@@ -127,7 +127,7 @@ fun SplashScreen() {
             Spacer(modifier = Modifier.height(10.dp))
 
             Text(
-                text = "Connecting to Firebase Realtime Catalog...",
+                text = "Your Music Universe",
                 style = MaterialTheme.typography.bodyMedium.copy(
                     color = MutedGray,
                     fontSize = 14.sp

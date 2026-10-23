@@ -257,7 +257,7 @@ fun ExploreScreen(
                 ) {
                     Box(contentAlignment = Alignment.Center) {
                         Text(
-                            text = "Upload songs to Firebase /songs to populate Trending Carousel",
+                            text = "Trending releases in your music library will appear here",
                             style = MaterialTheme.typography.bodyMedium.copy(color = MutedGray)
                         )
                     }

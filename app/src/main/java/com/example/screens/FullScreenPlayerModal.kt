@@ -1,6 +1,8 @@
 package com.example.screens
 
 import android.content.Intent
+import android.view.ViewGroup
+import android.widget.FrameLayout
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -62,6 +64,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
@@ -73,6 +76,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import com.example.R
 import com.example.models.Song
 import com.example.providers.RepeatModeState
@@ -114,7 +118,8 @@ fun FullScreenPlayerModal(
     onOpenSongOptions: (Song) -> Unit,
     onSetUpNextOpen: (Boolean) -> Unit,
     onSetLyricsOpen: (Boolean) -> Unit,
-    onSelectQueueSong: (Song) -> Unit
+    onSelectQueueSong: (Song) -> Unit,
+    onAttachBackstagePlayer: (ViewGroup) -> Unit = {}
 ) {
     BackHandler(onBack = onCollapse)
 
@@ -247,6 +252,28 @@ fun FullScreenPlayerModal(
                     ),
                 contentAlignment = Alignment.Center
             ) {
+                // Hidden Backstage YouTube WebView directly layered behind the album banner container (exact same bounds)
+                AndroidView(
+                    factory = { ctx ->
+                        FrameLayout(ctx).apply {
+                            layoutParams = ViewGroup.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT
+                            )
+                            onAttachBackstagePlayer(this)
+                        }
+                    },
+                    update = { container ->
+                        onAttachBackstagePlayer(container)
+                    },
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(RoundedCornerShape(18.dp))
+                        .alpha(0.01f)
+                        .testTag("hidden_backstage_youtube_webview")
+                )
+
+                // Existing Album Banner Poster directly on top covering the hidden WebView
                 SongArtwork(
                     imageUrl = song.highResBannerUrl,
                     contentDescription = song.title,
@@ -274,13 +301,13 @@ fun FullScreenPlayerModal(
                             )
                             Spacer(modifier = Modifier.height(8.dp))
                             Text(
-                                text = "Artist: ${song.artist}\nYouTube ID: ${song.cleanVideoId}",
+                                text = "Artist: ${song.artist}\nTrack ID: ${song.cleanVideoId}",
                                 style = MaterialTheme.typography.bodyLarge.copy(color = PrimaryWhite),
                                 textAlign = TextAlign.Center
                             )
                             Spacer(modifier = Modifier.height(14.dp))
                             Text(
-                                text = "Streaming high-bitrate M4A/Opus audio directly from Firebase /songs node.",
+                                text = "Your Music Universe • High-Quality Audio Streaming",
                                 style = MaterialTheme.typography.bodyMedium.copy(color = MutedGray),
                                 textAlign = TextAlign.Center
                             )

@@ -108,7 +108,7 @@ fun HomeScreen(
                     ) {
                         Icon(
                             imageVector = Icons.Default.CloudSync,
-                            contentDescription = "Sync Firebase",
+                            contentDescription = "Refresh Library",
                             tint = MutedGray
                         )
                     }
@@ -288,7 +288,7 @@ fun HomeScreen(
                         CircularProgressIndicator(color = SpotifyVibrantGreen)
                         Spacer(modifier = Modifier.height(14.dp))
                         Text(
-                            text = "Fetching songs from Firebase /songs...",
+                            text = "Loading your music library...",
                             style = MaterialTheme.typography.bodyMedium.copy(color = MutedGray)
                         )
                     }
@@ -318,7 +318,7 @@ fun HomeScreen(
                         Spacer(modifier = Modifier.height(12.dp))
                         Text(
                             text = if (searchQuery.isBlank()) {
-                                "No Songs in Firebase /songs Yet"
+                                "No Songs in Library Yet"
                             } else {
                                 "No matching songs for \"$searchQuery\""
                             },
@@ -331,9 +331,9 @@ fun HomeScreen(
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
                             text = if (searchQuery.isBlank()) {
-                                "Your app is connected live to Firebase (file-66f59). New songs added by the admin will appear here automatically in real time."
+                                "New tracks added to your music library will appear here automatically in real time."
                             } else {
-                                "Try searching by another song title, artist, or YouTube video ID."
+                                "Try searching by another song title, artist, or track ID."
                             },
                             style = MaterialTheme.typography.bodyMedium.copy(color = MutedGray),
                             textAlign = TextAlign.Center

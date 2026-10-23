@@ -79,8 +79,7 @@ fun SongOptionsBottomSheet(
     onViewAlbum: (Song) -> Unit,
     onAddToPlaylist: (Song) -> Unit,
     onOpenSleepTimer: () -> Unit,
-    onDownloadOffline: (Song) -> Unit,
-    onDeleteFromFirebase: (Song) -> Unit
+    onDownloadOffline: (Song) -> Unit
 ) {
     val context = LocalContext.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -488,14 +487,14 @@ fun AdminUploadSongBottomSheet(
                 Spacer(modifier = Modifier.width(12.dp))
                 Column {
                     Text(
-                        text = "Upload Song to Firebase",
+                        text = "Add Track to Library",
                         style = MaterialTheme.typography.headlineMedium.copy(
                             color = PrimaryWhite,
                             fontWeight = FontWeight.Bold
                         )
                     )
                     Text(
-                        text = "Pushes directly to file-66f59 /songs node in real-time",
+                        text = "Syncs directly to your cloud catalog in real-time",
                         style = MaterialTheme.typography.bodyMedium.copy(color = MutedGray)
                     )
                 }
@@ -613,7 +612,7 @@ fun AdminUploadSongBottomSheet(
                 )
             ) {
                 Text(
-                    text = "Publish to Firebase /songs",
+                    text = "Publish Track",
                     style = MaterialTheme.typography.titleMedium.copy(
                         color = PureBlack,
                         fontWeight = FontWeight.Bold

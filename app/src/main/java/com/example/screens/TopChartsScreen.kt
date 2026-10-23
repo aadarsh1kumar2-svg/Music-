@@ -163,7 +163,7 @@ fun TopChartsScreen(
                         )
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            text = "Songs added to your Firebase /songs database automatically rank here by play count (Local) and timestamp (Global).",
+                            text = "Songs in your music library automatically rank here by play count (Local) and release time (Global).",
                             style = MaterialTheme.typography.bodyMedium.copy(color = MutedGray),
                             textAlign = TextAlign.Center
                         )

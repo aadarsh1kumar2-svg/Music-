@@ -4,6 +4,8 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.view.ViewGroup
+import android.widget.FrameLayout
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -60,10 +62,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -77,7 +81,6 @@ import com.example.screens.LibraryScreen
 import com.example.screens.NameOnboardingScreen
 import com.example.screens.SplashScreen
 import com.example.screens.TopChartsScreen
-import com.example.services.FirebaseSongsService
 import com.example.ui.theme.DeepCharcoal
 import com.example.ui.theme.DividerDark
 import com.example.ui.theme.MutedGray
@@ -88,7 +91,6 @@ import com.example.ui.theme.SpotifyDarkGreenPill
 import com.example.ui.theme.SpotifyVibrantGreen
 import com.example.ui.theme.SurfaceDarkCard
 import com.example.widgets.AddToPlaylistDialog
-import com.example.widgets.AdminUploadSongBottomSheet
 import com.example.widgets.BottomNavBar
 import com.example.widgets.PersistentMiniPlayer
 import com.example.widgets.SleepTimerDialog
@@ -238,7 +240,7 @@ fun AKMusicAppRoot(
                                 )
                             )
                             Text(
-                                text = "Firebase: ${FirebaseSongsService.PROJECT_ID}",
+                                text = "Your Music Universe",
                                 style = MaterialTheme.typography.labelSmall.copy(color = MutedGray)
                             )
                         }
@@ -330,21 +332,6 @@ fun AKMusicAppRoot(
                             onClick = {
                                 coroutineScope.launch { drawerState.close() }
                                 musicViewModel.setEditNameDialogOpen(true)
-                            },
-                            colors = NavigationDrawerItemDefaults.colors(
-                                unselectedIconColor = MutedGray,
-                                unselectedTextColor = PrimaryWhite
-                            ),
-                            modifier = Modifier.padding(horizontal = 12.dp)
-                        )
-
-                        NavigationDrawerItem(
-                            label = { Text("Sync Firebase /songs Now") },
-                            icon = { Icon(Icons.Default.CloudSync, contentDescription = null) },
-                            selected = false,
-                            onClick = {
-                                coroutineScope.launch { drawerState.close() }
-                                musicViewModel.refreshFirebaseCatalog()
                             },
                             colors = NavigationDrawerItemDefaults.colors(
                                 unselectedIconColor = MutedGray,
@@ -508,6 +495,25 @@ fun AKMusicAppRoot(
             }
         }
 
+        // Keep Backstage YouTube Engine attached when Full-Screen Player is collapsed
+        if (!isFullScreenPlayerOpen) {
+            AndroidView(
+                factory = { ctx ->
+                    FrameLayout(ctx).apply {
+                        layoutParams = ViewGroup.LayoutParams(1, 1)
+                        musicViewModel.attachBackstagePlayer(this)
+                    }
+                },
+                update = { container ->
+                    musicViewModel.attachBackstagePlayer(container)
+                },
+                modifier = Modifier
+                    .width(1.dp)
+                    .height(1.dp)
+                    .alpha(0.01f)
+            )
+        }
+
         // Slide-Up Full-Screen Player Modal
         val activePlayerSong = currentSong
         AnimatedVisibility(
@@ -549,7 +555,10 @@ fun AKMusicAppRoot(
                     onOpenSongOptions = { musicViewModel.openSongOptions(it) },
                     onSetUpNextOpen = { musicViewModel.setUpNextSheetOpen(it) },
                     onSetLyricsOpen = { musicViewModel.setLyricsOverlayOpen(it) },
-                    onSelectQueueSong = { musicViewModel.playSong(it, queue) }
+                    onSelectQueueSong = { musicViewModel.playSong(it, queue) },
+                    onAttachBackstagePlayer = { container ->
+                        musicViewModel.attachBackstagePlayer(container)
+                    }
                 )
             }
         }
@@ -573,9 +582,6 @@ fun AKMusicAppRoot(
                 },
                 onDownloadOffline = { song ->
                     musicViewModel.downloadSongForOffline(song)
-                },
-                onDeleteFromFirebase = { song ->
-                    musicViewModel.deleteSongFromFirebase(song)
                 }
             )
         }
