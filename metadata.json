@@ -1,0 +1,6 @@
+{
+  "name": "AK Music",
+  "description": "Ultra-premium native Android music streaming application powered by real-time Firebase song catalog, YouTube & Piped audio stream extraction, and background playback.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
