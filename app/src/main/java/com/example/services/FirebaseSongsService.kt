@@ -19,19 +19,22 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 class FirebaseSongsService(private val context: Context) {
 
     companion object {
         private const val TAG = "AKCloudService"
-        private const val PROJECT_ID = "file-66f59"
-        private const val DATABASE_URL = "https://file-66f59-default-rtdb.firebaseio.com"
-        private const val STORAGE_BUCKET = "file-66f59.firebasestorage.app"
+        const val PROJECT_ID = "file-66f59"
+        const val DATABASE_URL = "https://file-66f59-default-rtdb.firebaseio.com"
+        const val STORAGE_BUCKET = "file-66f59.firebasestorage.app"
         private const val APP_ID = "1:237773536493:android:a7740030a05679148c60e4"
         private const val API_KEY = "AIzaSyDFYXjGLUHYu9whP7cawDwsunYR2f1elaE"
     }
@@ -287,5 +290,95 @@ class FirebaseSongsService(private val context: Context) {
             isTopChart = isTopChart,
             timestamp = timestamp
         )
+    }
+
+    suspend fun uploadSongToFirebase(
+        title: String,
+        artist: String,
+        videoIdOrUrl: String,
+        bannerUrl: String
+    ): Result<Song> = withContext(Dispatchers.IO) {
+        try {
+            val cleanVideoId = Song.extractYoutubeVideoId(videoIdOrUrl)
+            if (cleanVideoId.isBlank()) {
+                return@withContext Result.failure(IllegalArgumentException("Valid YouTube Video ID or URL is required"))
+            }
+            val id = "song_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(6)}"
+            val now = System.currentTimeMillis()
+            val resolvedBanner = bannerUrl.trim().ifBlank {
+                "https://img.youtube.com/vi/$cleanVideoId/hqdefault.jpg"
+            }
+
+            val song = Song(
+                id = id,
+                title = title.trim().ifBlank { "Untitled Track" },
+                artist = artist.trim().ifBlank { "Unknown Artist" },
+                videoId = cleanVideoId,
+                bannerUrl = resolvedBanner,
+                timestamp = now
+            )
+
+            val payload = JSONObject().apply {
+                put("id", song.id)
+                put("title", song.title)
+                put("artist", song.artist)
+                put("videoId", song.videoId)
+                put("bannerUrl", song.bannerUrl)
+                put("timestamp", song.timestamp)
+            }
+
+            val body = payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+            val request = Request.Builder()
+                .url("$DATABASE_URL/songs/$id.json")
+                .put(body)
+                .build()
+
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    return@withContext Result.failure(Exception("Firebase HTTP ${response.code}"))
+                }
+            }
+
+            try {
+                val map = mapOf(
+                    "id" to song.id,
+                    "title" to song.title,
+                    "artist" to song.artist,
+                    "videoId" to song.videoId,
+                    "bannerUrl" to song.bannerUrl,
+                    "timestamp" to song.timestamp
+                )
+                songsRef?.child(id)?.setValue(map)
+            } catch (_: Exception) {
+            }
+
+            fetchSongsViaRest(silent = true)
+            Result.success(song)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to upload song to Firebase", e)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun deleteSongFromFirebase(songId: String): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val request = Request.Builder()
+                .url("$DATABASE_URL/songs/$songId.json")
+                .delete()
+                .build()
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    return@withContext Result.failure(Exception("Firebase HTTP ${response.code}"))
+                }
+            }
+            try {
+                songsRef?.child(songId)?.removeValue()
+            } catch (_: Exception) {
+            }
+            fetchSongsViaRest(silent = true)
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
     }
 }
