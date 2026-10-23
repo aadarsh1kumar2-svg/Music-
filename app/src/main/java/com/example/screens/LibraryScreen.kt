@@ -2,6 +2,7 @@ package com.example.screens
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -17,6 +18,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -28,7 +30,11 @@ import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FolderSpecial
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.LibraryMusic
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Repeat
+import androidx.compose.material.icons.filled.RepeatOne
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -36,6 +42,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
@@ -64,12 +71,15 @@ import com.example.models.PlaylistSongEntity
 import com.example.models.SessionHistoryEntity
 import com.example.models.Song
 import com.example.providers.LibrarySubScreen
+import com.example.providers.RepeatModeState
 import com.example.ui.theme.DeepCharcoal
 import com.example.ui.theme.DividerDark
 import com.example.ui.theme.ErrorRed
 import com.example.ui.theme.MutedGray
 import com.example.ui.theme.PrimaryWhite
 import com.example.ui.theme.PureBlack
+import com.example.ui.theme.SpotifyDarkGreenPill
+import com.example.ui.theme.SpotifyGreenBorder
 import com.example.ui.theme.SpotifyVibrantGreen
 import com.example.ui.theme.SurfaceDarkCard
 import com.example.widgets.SongListRow
@@ -80,18 +90,23 @@ fun LibraryScreen(
     allSongs: List<Song>,
     favorites: List<FavoriteSongEntity>,
     downloadedSongs: List<DownloadedSongEntity>,
+    deviceLocalSongs: List<Song> = emptyList(),
+    hasAudioStoragePermission: Boolean = false,
     playlists: List<PlaylistEntity>,
     allPlaylistSongs: List<PlaylistSongEntity>,
     sessionHistory: List<SessionHistoryEntity>,
     currentQueue: List<Song>,
     currentSong: Song?,
     isPlaying: Boolean,
+    repeatMode: RepeatModeState = RepeatModeState.OFF,
     onNavigateSubScreen: (LibrarySubScreen) -> Unit,
     onSongClick: (Song, List<Song>) -> Unit,
     onSongMoreClick: (Song) -> Unit,
     onCreatePlaylist: (String) -> Unit,
     onDeletePlaylist: (PlaylistEntity) -> Unit,
     onDeleteDownloadedSong: (DownloadedSongEntity) -> Unit,
+    onRequestStoragePermission: () -> Unit = {},
+    onCycleRepeatMode: () -> Unit = {},
     onOpenDrawerMenu: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -105,11 +120,13 @@ fun LibraryScreen(
         }
     }
 
+    val totalMyMusicCount = deviceLocalSongs.size + downloadedSongs.size
+
     when (subScreen) {
         is LibrarySubScreen.Root -> {
             LibraryRootContent(
                 favoritesCount = favorites.size,
-                downloadsCount = downloadedSongs.size,
+                downloadsCount = totalMyMusicCount,
                 playlistsCount = playlists.size,
                 sessionCount = sessionHistory.size,
                 queueCount = currentQueue.size,
@@ -126,6 +143,9 @@ fun LibraryScreen(
                 songs = favSongs,
                 currentSong = currentSong,
                 isPlaying = isPlaying,
+                repeatMode = repeatMode,
+                showPlaylistControls = favSongs.isNotEmpty(),
+                onCycleRepeatMode = onCycleRepeatMode,
                 onBack = { onNavigateSubScreen(LibrarySubScreen.Root) },
                 onSongClick = onSongClick,
                 onSongMoreClick = onSongMoreClick,
@@ -133,13 +153,17 @@ fun LibraryScreen(
             )
         }
         is LibrarySubScreen.MyMusic -> {
-            LibraryDownloadedView(
+            LibraryMyMusicView(
+                hasAudioStoragePermission = hasAudioStoragePermission,
+                deviceLocalSongs = deviceLocalSongs,
                 downloadedSongs = downloadedSongs,
                 currentSong = currentSong,
                 isPlaying = isPlaying,
                 onBack = { onNavigateSubScreen(LibrarySubScreen.Root) },
                 onSongClick = onSongClick,
+                onSongMoreClick = onSongMoreClick,
                 onDeleteDownloadedSong = onDeleteDownloadedSong,
+                onRequestStoragePermission = onRequestStoragePermission,
                 modifier = modifier
             )
         }
@@ -157,13 +181,17 @@ fun LibraryScreen(
         is LibrarySubScreen.PlaylistDetail -> {
             val playlistSongs = allPlaylistSongs
                 .filter { it.playlistId == subScreen.playlist.playlistId }
+                .sortedBy { it.addedAt }
                 .map { it.toSong() }
             LibrarySongCollectionView(
                 title = subScreen.playlist.name,
-                emptyMessage = "Use the 3-dot menu on any song to add tracks to this playlist.",
+                emptyMessage = "Open any song player and tap the top-right 3-lines menu -> \"Add to Playlist\" to add songs here.",
                 songs = playlistSongs,
                 currentSong = currentSong,
                 isPlaying = isPlaying,
+                repeatMode = repeatMode,
+                showPlaylistControls = true,
+                onCycleRepeatMode = onCycleRepeatMode,
                 onBack = { onNavigateSubScreen(LibrarySubScreen.Playlists) },
                 onSongClick = onSongClick,
                 onSongMoreClick = onSongMoreClick,
@@ -177,6 +205,9 @@ fun LibraryScreen(
                 songs = currentQueue,
                 currentSong = currentSong,
                 isPlaying = isPlaying,
+                repeatMode = repeatMode,
+                showPlaylistControls = currentQueue.isNotEmpty(),
+                onCycleRepeatMode = onCycleRepeatMode,
                 onBack = { onNavigateSubScreen(LibrarySubScreen.Root) },
                 onSongClick = onSongClick,
                 onSongMoreClick = onSongMoreClick,
@@ -266,8 +297,7 @@ private fun LibraryRootContent(
             }
         }
 
-        // Primary Group Card: Favorites, My Music (Downloaded/Offline), Playlists
-        // Strictly NO "Following" button here.
+        // Primary Group Card: Favorites, My Music (Device Songs + Offline Downloads), Playlists
         item {
             Surface(
                 color = DeepCharcoal,
@@ -414,6 +444,9 @@ private fun LibrarySongCollectionView(
     songs: List<Song>,
     currentSong: Song?,
     isPlaying: Boolean,
+    repeatMode: RepeatModeState = RepeatModeState.OFF,
+    showPlaylistControls: Boolean = false,
+    onCycleRepeatMode: () -> Unit = {},
     onBack: () -> Unit,
     onSongClick: (Song, List<Song>) -> Unit,
     onSongMoreClick: (Song) -> Unit,
@@ -448,8 +481,75 @@ private fun LibrarySongCollectionView(
                 style = MaterialTheme.typography.headlineMedium.copy(
                     color = PrimaryWhite,
                     fontWeight = FontWeight.Bold
-                )
+                ),
+                modifier = Modifier.weight(1f)
             )
+        }
+
+        // Play All & Repeat Controls for Playlists / Collections
+        if (showPlaylistControls && songs.isNotEmpty()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Button(
+                    onClick = { onSongClick(songs.first(), songs) },
+                    shape = RoundedCornerShape(24.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = SpotifyVibrantGreen,
+                        contentColor = PureBlack
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(48.dp)
+                        .testTag("playlist_play_all_button")
+                ) {
+                    Icon(Icons.Default.PlayArrow, contentDescription = null)
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "Play All (${songs.size})",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 15.sp
+                    )
+                }
+
+                val isRepeatActive = repeatMode != RepeatModeState.OFF
+                OutlinedButton(
+                    onClick = onCycleRepeatMode,
+                    shape = RoundedCornerShape(24.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        containerColor = if (isRepeatActive) SpotifyDarkGreenPill else SurfaceDarkCard,
+                        contentColor = if (isRepeatActive) SpotifyVibrantGreen else PrimaryWhite
+                    ),
+                    modifier = Modifier
+                        .height(48.dp)
+                        .testTag("playlist_repeat_button")
+                ) {
+                    Icon(
+                        imageVector = if (repeatMode == RepeatModeState.ONE) {
+                            Icons.Default.RepeatOne
+                        } else {
+                            Icons.Default.Repeat
+                        },
+                        contentDescription = "Repeat Playlist",
+                        tint = if (isRepeatActive) SpotifyVibrantGreen else PrimaryWhite
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = when (repeatMode) {
+                            RepeatModeState.OFF -> "Repeat Off"
+                            RepeatModeState.ALL -> "Repeat All"
+                            RepeatModeState.ONE -> "Repeat 1"
+                        },
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 14.sp
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(6.dp))
         }
 
         if (songs.isEmpty()) {
@@ -492,16 +592,24 @@ private fun LibrarySongCollectionView(
 }
 
 @Composable
-private fun LibraryDownloadedView(
+private fun LibraryMyMusicView(
+    hasAudioStoragePermission: Boolean,
+    deviceLocalSongs: List<Song>,
     downloadedSongs: List<DownloadedSongEntity>,
     currentSong: Song?,
     isPlaying: Boolean,
     onBack: () -> Unit,
     onSongClick: (Song, List<Song>) -> Unit,
+    onSongMoreClick: (Song) -> Unit,
     onDeleteDownloadedSong: (DownloadedSongEntity) -> Unit,
+    onRequestStoragePermission: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val songs = downloadedSongs.map { it.toSong() }
+    val downloadedAsSongs = remember(downloadedSongs) { downloadedSongs.map { it.toSong() } }
+    val combinedOfflineQueue = remember(deviceLocalSongs, downloadedAsSongs) {
+        deviceLocalSongs + downloadedAsSongs
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -525,7 +633,7 @@ private fun LibraryDownloadedView(
             }
             Spacer(modifier = Modifier.width(8.dp))
             Text(
-                text = "My Music (Offline Downloads)",
+                text = "My Music (Offline & Device)",
                 style = MaterialTheme.typography.headlineMedium.copy(
                     color = PrimaryWhite,
                     fontWeight = FontWeight.Bold
@@ -533,7 +641,80 @@ private fun LibraryDownloadedView(
             )
         }
 
-        if (downloadedSongs.isEmpty()) {
+        if (!hasAudioStoragePermission) {
+            // Permission Required Banner Card
+            Surface(
+                color = SurfaceDarkCard,
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 12.dp)
+                    .border(
+                        width = 1.dp,
+                        color = SpotifyGreenBorder.copy(alpha = 0.6f),
+                        shape = RoundedCornerShape(16.dp)
+                    )
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(64.dp)
+                            .background(SpotifyDarkGreenPill, CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.LibraryMusic,
+                            contentDescription = null,
+                            tint = SpotifyVibrantGreen,
+                            modifier = Modifier.size(32.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(14.dp))
+                    Text(
+                        text = "Storage Permission Required",
+                        style = MaterialTheme.typography.titleLarge.copy(
+                            color = PrimaryWhite,
+                            fontWeight = FontWeight.Bold
+                        ),
+                        textAlign = TextAlign.Center
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Tap the button below to give permission so AADIFY can load and play all offline songs stored on your device.",
+                        style = MaterialTheme.typography.bodyMedium.copy(color = MutedGray),
+                        textAlign = TextAlign.Center
+                    )
+                    Spacer(modifier = Modifier.height(18.dp))
+                    Button(
+                        onClick = onRequestStoragePermission,
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = SpotifyVibrantGreen,
+                            contentColor = PureBlack
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(50.dp)
+                            .testTag("give_storage_permission_button")
+                    ) {
+                        Text(
+                            text = "Tap Button to Give Permission",
+                            style = MaterialTheme.typography.titleMedium.copy(
+                                color = PureBlack,
+                                fontWeight = FontWeight.Bold
+                            )
+                        )
+                    }
+                }
+            }
+        }
+
+        if (hasAudioStoragePermission && combinedOfflineQueue.isEmpty()) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -546,29 +727,90 @@ private fun LibraryDownloadedView(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
-                        text = "No offline tracks downloaded yet. Open the 3-dot menu on any song and tap \"Download Offline\" to save it on your device.",
+                        text = "No offline music files found on your device yet.",
                         style = MaterialTheme.typography.bodyLarge.copy(color = MutedGray),
                         textAlign = TextAlign.Center,
                         modifier = Modifier.padding(24.dp)
                     )
                 }
             }
-        } else {
+        } else if (combinedOfflineQueue.isNotEmpty()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Button(
+                    onClick = { onSongClick(combinedOfflineQueue.first(), combinedOfflineQueue) },
+                    shape = RoundedCornerShape(24.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = SpotifyVibrantGreen,
+                        contentColor = PureBlack
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(46.dp)
+                ) {
+                    Icon(Icons.Default.PlayArrow, contentDescription = null)
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "Play All Offline Music (${combinedOfflineQueue.size} Songs)",
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(bottom = 140.dp)
             ) {
-                items(items = downloadedSongs, key = { "dl_${it.id}" }) { entity ->
-                    val song = entity.toSong()
-                    val sizeMb = String.format("%.1f MB", entity.fileSizeBytes / (1024f * 1024f))
-                    SongListRow(
-                        song = song,
-                        isCurrentSong = currentSong?.id == song.id,
-                        isPlaying = isPlaying,
-                        subtitlePrefix = "Offline ($sizeMb) • ",
-                        onSongClick = { onSongClick(song, songs) },
-                        onMoreClick = { onDeleteDownloadedSong(entity) }
-                    )
+                if (deviceLocalSongs.isNotEmpty()) {
+                    item {
+                        Text(
+                            text = "Device Storage Songs (${deviceLocalSongs.size})",
+                            style = MaterialTheme.typography.titleMedium.copy(
+                                color = SpotifyVibrantGreen,
+                                fontWeight = FontWeight.Bold
+                            ),
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
+                        )
+                    }
+                    items(items = deviceLocalSongs, key = { "dev_${it.id}" }) { song ->
+                        SongListRow(
+                            song = song,
+                            isCurrentSong = currentSong?.id == song.id,
+                            isPlaying = isPlaying,
+                            subtitlePrefix = "Phone Storage • ",
+                            onSongClick = { onSongClick(song, combinedOfflineQueue) },
+                            onMoreClick = { onSongMoreClick(song) }
+                        )
+                    }
+                }
+
+                if (downloadedSongs.isNotEmpty()) {
+                    item {
+                        Text(
+                            text = "Downloaded in App (${downloadedSongs.size})",
+                            style = MaterialTheme.typography.titleMedium.copy(
+                                color = SpotifyVibrantGreen,
+                                fontWeight = FontWeight.Bold
+                            ),
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
+                        )
+                    }
+                    items(items = downloadedSongs, key = { "dl_${it.id}" }) { entity ->
+                        val song = entity.toSong()
+                        val sizeMb = String.format("%.1f MB", entity.fileSizeBytes / (1024f * 1024f))
+                        SongListRow(
+                            song = song,
+                            isCurrentSong = currentSong?.id == song.id,
+                            isPlaying = isPlaying,
+                            subtitlePrefix = "Offline ($sizeMb) • ",
+                            onSongClick = { onSongClick(song, combinedOfflineQueue) },
+                            onMoreClick = { onDeleteDownloadedSong(entity) }
+                        )
+                    }
                 }
             }
         }
@@ -646,7 +888,7 @@ private fun LibraryPlaylistsListView(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
-                        text = "No custom playlists yet. Tap \"New\" above or use the 3-dot menu on any song to create one.",
+                        text = "No custom playlists yet. Tap \"New\" above or use the top-right 3-lines menu inside the song player to create one.",
                         style = MaterialTheme.typography.bodyLarge.copy(color = MutedGray),
                         textAlign = TextAlign.Center,
                         modifier = Modifier.padding(24.dp)

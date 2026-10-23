@@ -1,5 +1,6 @@
 package com.example.screens
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -14,12 +15,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -36,8 +35,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -52,7 +54,6 @@ import com.example.ui.theme.ErrorRed
 import com.example.ui.theme.MutedGray
 import com.example.ui.theme.PrimaryWhite
 import com.example.ui.theme.PureBlack
-import com.example.ui.theme.SpotifyDarkGreenPill
 import com.example.ui.theme.SpotifyGreenBorder
 import com.example.ui.theme.SpotifyVibrantGreen
 import com.example.ui.theme.SurfaceDarkCard
@@ -100,23 +101,14 @@ fun NameOnboardingScreen(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center
             ) {
-                Box(
+                Image(
+                    painter = painterResource(id = R.drawable.aadify_logo),
+                    contentDescription = "AADIFY Logo",
+                    contentScale = ContentScale.Fit,
                     modifier = Modifier
-                        .size(80.dp)
-                        .background(
-                            color = SpotifyDarkGreenPill,
-                            shape = CircleShape
-                        )
-                        .border(2.dp, SpotifyVibrantGreen, CircleShape),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.MusicNote,
-                        contentDescription = "AK Music Logo",
-                        tint = SpotifyVibrantGreen,
-                        modifier = Modifier.size(42.dp)
-                    )
-                }
+                        .size(88.dp)
+                        .clip(RoundedCornerShape(18.dp))
+                )
 
                 Spacer(modifier = Modifier.height(22.dp))
 

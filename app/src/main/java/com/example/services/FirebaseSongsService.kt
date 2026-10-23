@@ -134,6 +134,18 @@ class FirebaseSongsService(private val context: Context) {
         return result
     }
 
+    private fun parseBooleanField(value: Any?): Boolean {
+        return when (value) {
+            is Boolean -> value
+            is String -> value.equals("true", ignoreCase = true) ||
+                    value.equals("1", ignoreCase = true) ||
+                    value.equals("yes", ignoreCase = true) ||
+                    value.equals("enabled", ignoreCase = true)
+            is Number -> value.toInt() == 1
+            else -> false
+        }
+    }
+
     private fun parseChildSnapshot(child: DataSnapshot): Song? {
         return try {
             val key = child.key ?: ""
@@ -162,12 +174,20 @@ class FirebaseSongsService(private val context: Context) {
                 else -> Int.MAX_VALUE
             }.let { if (it <= 0) Int.MAX_VALUE else it }
 
-            val isTopChartObj = child.child("isTopChart").value
-            val isTopChart = when (isTopChartObj) {
-                is Boolean -> isTopChartObj
-                is String -> isTopChartObj.equals("true", ignoreCase = true)
-                is Number -> isTopChartObj.toInt() == 1
-                else -> false
+            val isTopChart = parseBooleanField(child.child("isTopChart").value)
+
+            // Parse Admin-controlled download permission flag across common key names
+            val allowDownload = listOf(
+                "allowDownload",
+                "canDownload",
+                "isDownloadable",
+                "downloadable",
+                "download",
+                "downloadEnabled",
+                "allowOffline",
+                "offline"
+            ).any { fieldName ->
+                parseBooleanField(child.child(fieldName).value)
             }
 
             val timestampObj = child.child("timestamp").value
@@ -187,7 +207,8 @@ class FirebaseSongsService(private val context: Context) {
                 bannerUrl = bannerUrl,
                 rank = rank,
                 isTopChart = isTopChart,
-                timestamp = timestamp
+                timestamp = timestamp,
+                allowDownload = allowDownload
             )
         } catch (e: Exception) {
             Log.e(TAG, "Failed to parse child song snapshot", e)
@@ -278,6 +299,19 @@ class FirebaseSongsService(private val context: Context) {
         val isTopChart = obj.optBoolean("isTopChart", false)
         val timestamp = obj.optLong("timestamp", System.currentTimeMillis())
 
+        val allowDownload = listOf(
+            "allowDownload",
+            "canDownload",
+            "isDownloadable",
+            "downloadable",
+            "download",
+            "downloadEnabled",
+            "allowOffline",
+            "offline"
+        ).any { fieldName ->
+            if (!obj.has(fieldName)) false else parseBooleanField(obj.opt(fieldName))
+        }
+
         if (title.isBlank() && videoId.isBlank()) return null
 
         return Song(
@@ -288,7 +322,8 @@ class FirebaseSongsService(private val context: Context) {
             bannerUrl = bannerUrl,
             rank = rank,
             isTopChart = isTopChart,
-            timestamp = timestamp
+            timestamp = timestamp,
+            allowDownload = allowDownload
         )
     }
 

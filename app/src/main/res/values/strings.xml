@@ -1,6 +1,6 @@
 <resources>
-    <string name="app_name">AK Music</string>
-    <string name="splash_logo_title">AK Music 🎵</string>
+    <string name="app_name">AADIFY</string>
+    <string name="splash_logo_title">AADIFY</string>
     <string name="greeting_prefix">Hi There,</string>
     <string name="greeting_name">Listener</string>
     <string name="search_placeholder">Songs, albums or artists</string>
@@ -10,7 +10,7 @@
     <string name="nav_top_charts">Top Charts</string>
     <string name="nav_explore">Explore</string>
     <string name="nav_library">Library</string>
-    <string name="charts_title">Spotify Charts</string>
+    <string name="charts_title">Top Charts</string>
     <string name="charts_local">Local</string>
     <string name="charts_global">Global</string>
     <string name="video_charts">Video charts</string>
@@ -24,7 +24,7 @@
     <string name="library_my_music">My Music</string>
     <string name="library_playlists">Playlists</string>
     <string name="library_now_playing">Now Playing</string>
-    <string name="onboarding_welcome">Welcome to AK Music 🎵</string>
+    <string name="onboarding_welcome">Welcome to AADIFY</string>
     <string name="onboarding_subtitle">Enter your display name for your personalized music experience</string>
     <string name="onboarding_name_hint">Your Display Name</string>
     <string name="onboarding_continue">Start Listening</string>

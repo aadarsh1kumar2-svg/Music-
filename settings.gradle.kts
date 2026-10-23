@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "AK Music"
+rootProject.name = "AADIFY"
 
 include(":app")

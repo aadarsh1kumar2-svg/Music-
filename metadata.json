@@ -1,6 +1,6 @@
 {
-  "name": "AK Music",
-  "description": "Ultra-premium native Android music streaming application powered by real-time Firebase song catalog, YouTube & Piped audio stream extraction, and background playback.",
+  "name": "AADIFY",
+  "description": "AADIFY — High-speed online & offline Android music streaming application with background playback, playlists, and cloud catalog sync.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

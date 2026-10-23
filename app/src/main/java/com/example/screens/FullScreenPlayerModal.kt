@@ -34,7 +34,7 @@ import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Lyrics
-import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Repeat
@@ -64,7 +64,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
@@ -157,7 +156,7 @@ fun FullScreenPlayerModal(
                 .padding(horizontal = 24.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Top Bar: Down chevron (collapse), lyrics icon, share icon, and 3-dot menu
+            // Top Bar: Down chevron (collapse), lyrics icon, share icon, and 3-lines menu on the right corner
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -199,12 +198,16 @@ fun FullScreenPlayerModal(
 
                     IconButton(
                         onClick = {
-                            val shareUrl = "https://www.youtube.com/watch?v=${song.cleanVideoId}"
+                            val shareUrl = if (song.cleanVideoId.isNotBlank()) {
+                                "https://www.youtube.com/watch?v=${song.cleanVideoId}"
+                            } else {
+                                song.title
+                            }
                             val sendIntent = Intent(Intent.ACTION_SEND).apply {
                                 type = "text/plain"
                                 putExtra(
                                     Intent.EXTRA_TEXT,
-                                    "Listen to ${song.title} by ${song.artist} on AK Music 🎵: $shareUrl"
+                                    "Listen to ${song.title} by ${song.artist} on AADIFY: $shareUrl"
                                 )
                             }
                             context.startActivity(Intent.createChooser(sendIntent, "Share Song"))
@@ -221,6 +224,7 @@ fun FullScreenPlayerModal(
                         )
                     }
 
+                    // Top-Right 3-Lines Menu Button (opens bottom sheet with Add to Playlist & options)
                     IconButton(
                         onClick = { onOpenSongOptions(song) },
                         modifier = Modifier
@@ -228,8 +232,8 @@ fun FullScreenPlayerModal(
                             .testTag("full_player_more_button")
                     ) {
                         Icon(
-                            imageVector = Icons.Default.MoreVert,
-                            contentDescription = "More Options",
+                            imageVector = Icons.Default.Menu,
+                            contentDescription = "Player Menu (Add to Playlist)",
                             tint = PrimaryWhite,
                             modifier = Modifier.size(26.dp)
                         )
@@ -307,13 +311,13 @@ fun FullScreenPlayerModal(
                             )
                             Spacer(modifier = Modifier.height(8.dp))
                             Text(
-                                text = "Artist: ${song.artist}\nTrack ID: ${song.cleanVideoId}",
+                                text = "Artist: ${song.artist}",
                                 style = MaterialTheme.typography.bodyLarge.copy(color = PrimaryWhite),
                                 textAlign = TextAlign.Center
                             )
                             Spacer(modifier = Modifier.height(14.dp))
                             Text(
-                                text = "Your Music Universe • High-Quality Audio Streaming",
+                                text = "AADIFY • Your Music Universe",
                                 style = MaterialTheme.typography.bodyMedium.copy(color = MutedGray),
                                 textAlign = TextAlign.Center
                             )

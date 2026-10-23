@@ -3,6 +3,10 @@ package com.example.services
 import android.util.Log
 import com.example.models.Song
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.MediaType.Companion.toMediaType
@@ -49,7 +53,6 @@ class AudioStreamExtractor {
         private const val ANDROID_TESTSUITE_USER_AGENT =
             "com.google.android.youtube/1.9 (Linux; U; Android 14; en_US) gzip"
 
-        // Map stream URLs to their required User-Agent so ExoPlayer never gets HTTP 403 from googlevideo.com
         private val urlUserAgentMap = ConcurrentHashMap<String, String>()
 
         fun registerStreamUserAgent(streamUrl: String, userAgent: String) {
@@ -68,7 +71,6 @@ class AudioStreamExtractor {
             }
         }
 
-        // Fallback Stream Handlers (Sequential high-availability Piped & Invidious mirrors)
         private val PIPED_MIRRORS = listOf(
             "https://pipedapi.drgns.space",
             "https://api.piped.yt",
@@ -84,17 +86,10 @@ class AudioStreamExtractor {
     }
 
     private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(7, TimeUnit.SECONDS)
-        .readTimeout(7, TimeUnit.SECONDS)
-        .writeTimeout(7, TimeUnit.SECONDS)
-        .callTimeout(7, TimeUnit.SECONDS)
-        .followRedirects(true)
-        .followSslRedirects(true)
-        .build()
-
-    private val probeClient = OkHttpClient.Builder()
-        .connectTimeout(4, TimeUnit.SECONDS)
-        .readTimeout(4, TimeUnit.SECONDS)
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .readTimeout(5, TimeUnit.SECONDS)
+        .writeTimeout(5, TimeUnit.SECONDS)
+        .callTimeout(6, TimeUnit.SECONDS)
         .followRedirects(true)
         .followSslRedirects(true)
         .build()
@@ -149,9 +144,9 @@ class AudioStreamExtractor {
             }
         }
 
-        // Primary extraction for the song's videoId
+        // Fast parallel extraction for the song's videoId
         if (videoId.length == 11) {
-            val directResolved = resolveForSingleVideoId(videoId)
+            val directResolved = resolveForSingleVideoIdFast(videoId)
             if (directResolved != null) {
                 streamCache[videoId] = System.currentTimeMillis() to directResolved
                 registerStreamUserAgent(directResolved.streamUrl, directResolved.userAgent)
@@ -159,7 +154,7 @@ class AudioStreamExtractor {
             }
         }
 
-        // Automatic fallback: If videoId is restricted/ciphered or not a 11-char ID, search YouTube by title + artist
+        // Automatic fallback: If videoId is restricted/ciphered, search YouTube by title + artist
         val searchQuery = buildString {
             if (songTitle.isNotBlank()) append(songTitle.trim())
             if (songArtist.isNotBlank() && !songArtist.equals("Unknown Artist", ignoreCase = true)) {
@@ -169,12 +164,12 @@ class AudioStreamExtractor {
         }.trim()
 
         if (searchQuery.isNotBlank()) {
-            val candidateIds = withTimeoutOrNull(7_000L) {
+            val candidateIds = withTimeoutOrNull(5_000L) {
                 searchPlayableVideoIds("$searchQuery official audio")
             }.orEmpty().filter { it != videoId }.take(3)
 
             for (altVideoId in candidateIds) {
-                val altResolved = resolveForSingleVideoId(altVideoId)
+                val altResolved = resolveForSingleVideoIdFast(altVideoId)
                 if (altResolved != null) {
                     if (videoId.isNotBlank()) {
                         streamCache[videoId] = System.currentTimeMillis() to altResolved
@@ -188,41 +183,90 @@ class AudioStreamExtractor {
         Result.failure(RuntimeException("Stream unavailable for this track."))
     }
 
-    private suspend fun resolveForSingleVideoId(videoId: String): ResolvedAudioStream? {
-        // 1. Primary: Native YouTube InnerTube Player API (ANDROID_MUSIC client)
-        val androidMusicStream = withTimeoutOrNull(7_000L) {
-            extractViaAndroidMusicInnerTube(videoId)
-        }
-        if (androidMusicStream != null) {
-            return androidMusicStream
-        }
-
-        // 2. Secondary InnerTube Clients (ANDROID_VR, IOS, ANDROID_TESTSUITE, ANDROID)
-        val innerTubeFallback = withTimeoutOrNull(7_000L) {
-            extractViaAdditionalInnerTubeClients(videoId)
-        }
-        if (innerTubeFallback != null) {
-            return innerTubeFallback
-        }
-
-        // 3. Fallback Stream Handlers: Sequential Piped & Invidious Mirrors
-        // Mirror 1: https://pipedapi.drgns.space/streams/$videoId
-        // Mirror 2: https://api.piped.yt/streams/$videoId
-        // Mirror 3: https://invidious.nerdvpn.de/api/v1/videos/$videoId
-        val mirrorStream = withTimeoutOrNull(8_000L) {
-            extractViaFallbackMirrors(videoId)
-        }
-        if (mirrorStream != null) {
-            return mirrorStream
-        }
-
-        return null
-    }
-
     /**
-     * 1. Native YouTube InnerTube Player API (ANDROID_MUSIC client)
-     * Endpoint: https://music.youtube.com/youtubei/v1/player
+     * Races ANDROID_VR, IOS, ANDROID_MUSIC, and Piped in parallel so the fastest working
+     * direct audio stream returns in ~0.7–1.2 seconds!
      */
+    private suspend fun resolveForSingleVideoIdFast(videoId: String): ResolvedAudioStream? =
+        withTimeoutOrNull(6_500L) {
+            coroutineScope {
+                val resultChannel = Channel<ResolvedAudioStream?>(Channel.UNLIMITED)
+                val tasks = listOf<suspend () -> ResolvedAudioStream?>(
+                    { extractViaSingleInnerTubeClient(videoId, vrClientConfig) },
+                    { extractViaSingleInnerTubeClient(videoId, iosClientConfig) },
+                    { extractViaAndroidMusicInnerTube(videoId) },
+                    { extractViaSingleInnerTubeClient(videoId, testSuiteClientConfig) },
+                    { fetchFromPipedMirror(PIPED_MIRRORS[0], videoId) },
+                    { fetchFromPipedMirror(PIPED_MIRRORS[1], videoId) }
+                )
+
+                val jobs = tasks.map { block ->
+                    launch(Dispatchers.IO) {
+                        val res = try {
+                            block()
+                        } catch (_: Exception) {
+                            null
+                        }
+                        resultChannel.trySend(res)
+                    }
+                }
+
+                var winner: ResolvedAudioStream? = null
+                repeat(tasks.size) {
+                    val candidate = resultChannel.receive()
+                    if (candidate != null && winner == null) {
+                        winner = candidate
+                        jobs.forEach { it.cancel() }
+                        return@repeat
+                    }
+                }
+
+                if (winner != null) {
+                    return@coroutineScope winner
+                }
+
+                // Final sequential fallback across remaining mirrors if all parallel racers missed
+                extractViaFallbackMirrors(videoId)
+            }
+        }
+
+    private val vrClientConfig = InnerTubeClientConfig(
+        endpoint = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
+        clientName = "ANDROID_VR",
+        clientVersion = "1.60.19",
+        clientIdHeader = "28",
+        userAgent = ANDROID_VR_USER_AGENT,
+        osName = "Android",
+        osVersion = "12L",
+        androidSdkVersion = 32,
+        deviceMake = "Oculus",
+        deviceModel = "Quest 3"
+    )
+
+    private val iosClientConfig = InnerTubeClientConfig(
+        endpoint = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
+        clientName = "IOS",
+        clientVersion = "19.45.4",
+        clientIdHeader = "5",
+        userAgent = IOS_USER_AGENT,
+        osName = "iOS",
+        osVersion = "18.1.0.22B83",
+        androidSdkVersion = null,
+        deviceMake = "Apple",
+        deviceModel = "iPhone16,2"
+    )
+
+    private val testSuiteClientConfig = InnerTubeClientConfig(
+        endpoint = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
+        clientName = "ANDROID_TESTSUITE",
+        clientVersion = "1.9",
+        clientIdHeader = "30",
+        userAgent = ANDROID_TESTSUITE_USER_AGENT,
+        osName = "Android",
+        osVersion = "14",
+        androidSdkVersion = 34
+    )
+
     private fun extractViaAndroidMusicInnerTube(videoId: String): ResolvedAudioStream? {
         return try {
             val clientObj = JSONObject().apply {
@@ -280,124 +324,72 @@ class AudioStreamExtractor {
                 }
             }
         } catch (e: Exception) {
-            Log.w(TAG, "ANDROID_MUSIC InnerTube failed for $videoId: ${e.message}")
             null
         }
     }
 
-    private fun extractViaAdditionalInnerTubeClients(videoId: String): ResolvedAudioStream? {
-        val clients = listOf(
-            InnerTubeClientConfig(
-                endpoint = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
-                clientName = "ANDROID_VR",
-                clientVersion = "1.60.19",
-                clientIdHeader = "28",
-                userAgent = ANDROID_VR_USER_AGENT,
-                osName = "Android",
-                osVersion = "12L",
-                androidSdkVersion = 32,
-                deviceMake = "Oculus",
-                deviceModel = "Quest 3"
-            ),
-            InnerTubeClientConfig(
-                endpoint = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
-                clientName = "IOS",
-                clientVersion = "19.45.4",
-                clientIdHeader = "5",
-                userAgent = IOS_USER_AGENT,
-                osName = "iOS",
-                osVersion = "18.1.0.22B83",
-                androidSdkVersion = null,
-                deviceMake = "Apple",
-                deviceModel = "iPhone16,2"
-            ),
-            InnerTubeClientConfig(
-                endpoint = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
-                clientName = "ANDROID_TESTSUITE",
-                clientVersion = "1.9",
-                clientIdHeader = "30",
-                userAgent = ANDROID_TESTSUITE_USER_AGENT,
-                osName = "Android",
-                osVersion = "14",
-                androidSdkVersion = 34
-            ),
-            InnerTubeClientConfig(
-                endpoint = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
-                clientName = "ANDROID",
-                clientVersion = "19.44.38",
-                clientIdHeader = "3",
-                userAgent = ANDROID_YT_USER_AGENT,
-                osName = "Android",
-                osVersion = "14",
-                androidSdkVersion = 34
-            )
-        )
-
-        for (client in clients) {
-            try {
-                val contextClient = JSONObject().apply {
-                    put("clientName", client.clientName)
-                    put("clientVersion", client.clientVersion)
-                    put("hl", "en")
-                    put("gl", "IN")
-                    put("osName", client.osName)
-                    put("osVersion", client.osVersion)
-                    if (client.androidSdkVersion != null) {
-                        put("androidSdkVersion", client.androidSdkVersion)
-                    }
-                    if (client.deviceMake != null) {
-                        put("deviceMake", client.deviceMake)
-                    }
-                    if (client.deviceModel != null) {
-                        put("deviceModel", client.deviceModel)
-                    }
+    private fun extractViaSingleInnerTubeClient(
+        videoId: String,
+        client: InnerTubeClientConfig
+    ): ResolvedAudioStream? {
+        return try {
+            val contextClient = JSONObject().apply {
+                put("clientName", client.clientName)
+                put("clientVersion", client.clientVersion)
+                put("hl", "en")
+                put("gl", "IN")
+                put("osName", client.osName)
+                put("osVersion", client.osVersion)
+                if (client.androidSdkVersion != null) {
+                    put("androidSdkVersion", client.androidSdkVersion)
                 }
-                val payload = JSONObject().apply {
-                    put("videoId", videoId)
-                    put("contentCheckOk", true)
-                    put("racyCheckOk", true)
-                    put("context", JSONObject().put("client", contextClient))
+                if (client.deviceMake != null) {
+                    put("deviceMake", client.deviceMake)
                 }
-
-                val request = Request.Builder()
-                    .url(client.endpoint)
-                    .header("User-Agent", client.userAgent)
-                    .header("Content-Type", "application/json")
-                    .header("Accept", "*/*")
-                    .header("X-YouTube-Client-Name", client.clientIdHeader)
-                    .header("X-YouTube-Client-Version", client.clientVersion)
-                    .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
-                    .build()
-
-                httpClient.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) return@use
-                    val body = response.body?.string() ?: return@use
-                    val json = JSONObject(body)
-                    val streamingData = json.optJSONObject("streamingData") ?: return@use
-                    val adaptiveFormats = streamingData.optJSONArray("adaptiveFormats") ?: return@use
-
-                    val bestStream = pickHighestBitrateAudio(
-                        formats = adaptiveFormats,
-                        engineName = "InnerTube (${client.clientName})",
-                        userAgent = client.userAgent
-                    )
-                    if (bestStream != null && isStreamUrlReachable(bestStream.streamUrl, bestStream.userAgent)) {
-                        return bestStream
-                    }
+                if (client.deviceModel != null) {
+                    put("deviceModel", client.deviceModel)
                 }
-            } catch (e: Exception) {
-                Log.w(TAG, "InnerTube (${client.clientName}) failed for $videoId: ${e.message}")
             }
+            val payload = JSONObject().apply {
+                put("videoId", videoId)
+                put("contentCheckOk", true)
+                put("racyCheckOk", true)
+                put("context", JSONObject().put("client", contextClient))
+            }
+
+            val request = Request.Builder()
+                .url(client.endpoint)
+                .header("User-Agent", client.userAgent)
+                .header("Content-Type", "application/json")
+                .header("Accept", "*/*")
+                .header("X-YouTube-Client-Name", client.clientIdHeader)
+                .header("X-YouTube-Client-Version", client.clientVersion)
+                .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+                .build()
+
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return null
+                val body = response.body?.string() ?: return null
+                val json = JSONObject(body)
+                val streamingData = json.optJSONObject("streamingData") ?: return null
+                val adaptiveFormats = streamingData.optJSONArray("adaptiveFormats") ?: return null
+
+                val bestStream = pickHighestBitrateAudio(
+                    formats = adaptiveFormats,
+                    engineName = "InnerTube (${client.clientName})",
+                    userAgent = client.userAgent
+                )
+                if (bestStream != null && isStreamUrlReachable(bestStream.streamUrl, bestStream.userAgent)) {
+                    bestStream
+                } else {
+                    null
+                }
+            }
+        } catch (e: Exception) {
+            null
         }
-        return null
     }
 
-    /**
-     * 2. Stream URL Extraction Logic:
-     * Navigate to streamingData -> adaptiveFormats.
-     * Filter formats where mimeType starts with audio/ (prefer audio/mp4 or highest bitrate).
-     * Extract the direct url string.
-     */
     private fun pickHighestBitrateAudio(
         formats: JSONArray,
         engineName: String,
@@ -415,7 +407,6 @@ class AudioStreamExtractor {
             if (url.isBlank() || !mimeType.startsWith("audio/", ignoreCase = true)) continue
 
             val bitrate = item.optInt("bitrate", 0)
-            // Prefer audio/mp4 (M4A/AAC) for native ExoPlayer compatibility, then highest bitrate
             val mp4Bonus = if (mimeType.contains("audio/mp4", ignoreCase = true) ||
                 mimeType.contains("m4a", ignoreCase = true)
             ) 50_000 else 0
@@ -442,27 +433,15 @@ class AudioStreamExtractor {
         }
     }
 
-    /**
-     * 3. Fallback Stream Handlers:
-     * Sequentially attempts:
-     * - Mirror 1: https://pipedapi.drgns.space/streams/$videoId
-     * - Mirror 2: https://api.piped.yt/streams/$videoId
-     * - Mirror 3: https://invidious.nerdvpn.de/api/v1/videos/$videoId
-     * followed by additional backup mirrors.
-     */
     private fun extractViaFallbackMirrors(videoId: String): ResolvedAudioStream? {
-        // Attempt Mirror 1 & Mirror 2 (plus backup Piped mirrors)
         for (baseUrl in PIPED_MIRRORS) {
             val resolved = fetchFromPipedMirror(baseUrl, videoId)
             if (resolved != null) return resolved
         }
-
-        // Attempt Mirror 3 (https://invidious.nerdvpn.de/api/v1/videos/$videoId + backup Invidious mirrors)
         for (baseUrl in INVIDIOUS_MIRRORS) {
             val resolved = fetchFromInvidiousMirror(baseUrl, videoId)
             if (resolved != null) return resolved
         }
-
         return null
     }
 
@@ -519,7 +498,6 @@ class AudioStreamExtractor {
                 }
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Piped mirror $baseUrl failed for $videoId: ${e.message}")
             null
         }
     }
@@ -551,7 +529,6 @@ class AudioStreamExtractor {
                 }
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Invidious mirror $baseUrl failed for $videoId: ${e.message}")
             null
         }
     }

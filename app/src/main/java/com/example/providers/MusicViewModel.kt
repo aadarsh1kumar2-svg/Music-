@@ -1,8 +1,13 @@
 package com.example.providers
 
+import android.Manifest
 import android.app.Application
 import android.content.ComponentName
+import android.content.ContentUris
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
+import android.provider.MediaStore
 import android.util.Log
 import android.view.ViewGroup
 import androidx.core.content.ContextCompat
@@ -30,6 +35,7 @@ import com.example.services.MusicPlaybackService
 import com.example.utils.CountryOption
 import com.example.utils.SUPPORTED_COUNTRIES
 import com.google.common.util.concurrent.ListenableFuture
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -42,6 +48,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 enum class MainTab {
@@ -90,17 +97,142 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private val _isEditNameDialogOpen = MutableStateFlow(false)
     val isEditNameDialogOpen: StateFlow<Boolean> = _isEditNameDialogOpen.asStateFlow()
 
+    // Developer Screen Modal State
+    private val _isDeveloperScreenOpen = MutableStateFlow(false)
+    val isDeveloperScreenOpen: StateFlow<Boolean> = _isDeveloperScreenOpen.asStateFlow()
+
+    fun setDeveloperScreenOpen(open: Boolean) {
+        _isDeveloperScreenOpen.value = open
+    }
+
     fun saveUserName(name: String) {
         val cleaned = name.trim()
         if (cleaned.isEmpty()) return
         prefs.edit().putString("user_name", cleaned).apply()
         _userName.value = cleaned
         _isEditNameDialogOpen.value = false
-        emitSnackbar("Welcome, $cleaned! 🎵")
+        emitSnackbar("Welcome to AADIFY, $cleaned! 🎵")
     }
 
     fun setEditNameDialogOpen(open: Boolean) {
         _isEditNameDialogOpen.value = open
+    }
+
+    // Device Audio Storage Permission & Local Songs State
+    private val _hasAudioStoragePermission = MutableStateFlow(checkAudioPermissionGranted())
+    val hasAudioStoragePermission: StateFlow<Boolean> = _hasAudioStoragePermission.asStateFlow()
+
+    private val _deviceLocalSongs = MutableStateFlow<List<Song>>(emptyList())
+    val deviceLocalSongs: StateFlow<List<Song>> = _deviceLocalSongs.asStateFlow()
+
+    fun checkAudioPermissionGranted(): Boolean {
+        val permission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            Manifest.permission.READ_MEDIA_AUDIO
+        } else {
+            Manifest.permission.READ_EXTERNAL_STORAGE
+        }
+        return ContextCompat.checkSelfPermission(appContext, permission) == PackageManager.PERMISSION_GRANTED
+    }
+
+    fun onAudioStoragePermissionResult(granted: Boolean) {
+        _hasAudioStoragePermission.value = granted || checkAudioPermissionGranted()
+        if (_hasAudioStoragePermission.value) {
+            loadDeviceLocalSongs()
+        }
+    }
+
+    fun loadDeviceLocalSongs() {
+        val granted = checkAudioPermissionGranted()
+        _hasAudioStoragePermission.value = granted
+        if (!granted) return
+
+        viewModelScope.launch {
+            val loaded = withContext(Dispatchers.IO) {
+                val list = mutableListOf<Song>()
+                try {
+                    val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+                    } else {
+                        MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+                    }
+
+                    val projection = arrayOf(
+                        MediaStore.Audio.Media._ID,
+                        MediaStore.Audio.Media.TITLE,
+                        MediaStore.Audio.Media.ARTIST,
+                        MediaStore.Audio.Media.ALBUM_ID,
+                        MediaStore.Audio.Media.DURATION,
+                        MediaStore.Audio.Media.DATE_ADDED,
+                        MediaStore.Audio.Media.IS_MUSIC
+                    )
+
+                    val selection = "${MediaStore.Audio.Media.IS_MUSIC} != 0"
+                    val sortOrder = "${MediaStore.Audio.Media.DATE_ADDED} DESC"
+
+                    appContext.contentResolver.query(
+                        collection,
+                        projection,
+                        selection,
+                        null,
+                        sortOrder
+                    )?.use { cursor ->
+                        val idCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
+                        val titleCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.TITLE)
+                        val artistCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST)
+                        val albumIdCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM_ID)
+                        val durationCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
+                        val dateCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATE_ADDED)
+
+                        val albumArtBaseUri = Uri.parse("content://media/external/audio/albumart")
+
+                        while (cursor.moveToNext()) {
+                            val mediaId = cursor.getLong(idCol)
+                            val rawTitle = cursor.getString(titleCol)?.trim().orEmpty()
+                            val rawArtist = cursor.getString(artistCol)?.trim().orEmpty()
+                            val albumId = cursor.getLong(albumIdCol)
+                            val duration = cursor.getLong(durationCol)
+                            val dateAdded = cursor.getLong(dateCol)
+
+                            // Skip very short ringtones/notification clips (< 5 seconds)
+                            if (duration in 1..4999) continue
+
+                            val contentUri = ContentUris.withAppendedId(
+                                MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+                                mediaId
+                            )
+                            val albumArtUri = if (albumId > 0) {
+                                ContentUris.withAppendedId(albumArtBaseUri, albumId).toString()
+                            } else {
+                                ""
+                            }
+
+                            val cleanArtist = if (rawArtist.isBlank() || rawArtist == "<unknown>") {
+                                "Device Audio"
+                            } else {
+                                rawArtist
+                            }
+
+                            list.add(
+                                Song(
+                                    id = "local_media_$mediaId",
+                                    title = rawTitle.ifBlank { "Audio Track #$mediaId" },
+                                    artist = cleanArtist,
+                                    videoId = "",
+                                    bannerUrl = albumArtUri,
+                                    timestamp = dateAdded * 1000L,
+                                    allowDownload = false,
+                                    localContentUri = contentUri.toString()
+                                )
+                            )
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error querying MediaStore audio files", e)
+                }
+                list
+            }
+            _deviceLocalSongs.value = loaded
+        }
     }
 
     // Database
@@ -115,13 +247,13 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private val firebaseService = FirebaseSongsService(appContext)
     private val audioExtractor = AudioStreamExtractor()
 
-    // Media3 Controller (for local offline files & embed-restricted fallback)
+    // Media3 Controller (Foreground MediaSessionService for background + lockscreen + notification bar controls)
     private var controllerFuture: ListenableFuture<MediaController>? = null
     private var mediaController: MediaController? = null
     private var pendingPlaybackPair: Pair<Song, String>? = null
-    private var isUsingExoPlayerFallback = false
+    private var isUsingExoPlayerFallback = true
 
-    // Hidden Backstage YouTube IFrame Player Controller (Primary Engine behind Album Banner)
+    // Hidden Backstage YouTube IFrame Player Controller (Backup Engine behind Album Banner)
     private val backstagePlayer = BackstageYouTubePlayerController(
         context = appContext,
         onProgressUpdate = { posMs ->
@@ -157,7 +289,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             }
         },
         onErrorUpdate = { _ ->
-            // If YouTube IFrame encounters an embed restriction (e.g. 101/150), fallback seamlessly to direct audio stream
             val active = _currentSong.value ?: return@BackstageYouTubePlayerController
             if (!isUsingExoPlayerFallback) {
                 isUsingExoPlayerFallback = true
@@ -165,7 +296,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     val fallbackResult = audioExtractor.extractBestAudioStream(
                         rawVideoId = active.videoId,
                         songTitle = active.title,
-                        songArtist = active.artist
+                        songArtist = active.artist,
+                        forceFresh = true
                     )
                     fallbackResult.fold(
                         onSuccess = { resolved ->
@@ -310,7 +442,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private val _repeatMode = MutableStateFlow(RepeatModeState.OFF)
     val repeatMode: StateFlow<RepeatModeState> = _repeatMode.asStateFlow()
 
-    private val _activeStreamEngine = MutableStateFlow("Backstage YouTube Engine")
+    private val _activeStreamEngine = MutableStateFlow("AADIFY Fast Audio Engine")
     val activeStreamEngine: StateFlow<String> = _activeStreamEngine.asStateFlow()
 
     // Sleep Timer
@@ -330,10 +462,34 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private var hasRetriedCurrentTrack = false
 
     init {
-        // Pre-warm hidden backstage WebView on main thread
+        // Connect Notification Bar / Lock Screen Next, Previous, and Play/Pause callbacks
+        MusicPlaybackService.onSkipNextCallback = {
+            viewModelScope.launch { skipToNext() }
+        }
+        MusicPlaybackService.onSkipPreviousCallback = {
+            viewModelScope.launch { skipToPrevious() }
+        }
+        MusicPlaybackService.onTogglePlayPauseCallback = { shouldPlay ->
+            viewModelScope.launch {
+                if (!isUsingExoPlayerFallback) {
+                    if (shouldPlay) {
+                        backstagePlayer.playVideo()
+                        _isPlaying.value = true
+                    } else {
+                        backstagePlayer.pauseVideo()
+                        _isPlaying.value = false
+                    }
+                }
+            }
+        }
+
+        // Pre-warm backstage WebView & MediaSessionService
         backstagePlayer.getOrCreateWebView()
         initializeMediaController()
         startProgressPoller()
+        if (checkAudioPermissionGranted()) {
+            loadDeviceLocalSongs()
+        }
     }
 
     private fun initializeMediaController() {
@@ -391,8 +547,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             override fun onPlayerError(error: PlaybackException) {
                 if (!isUsingExoPlayerFallback) return
                 Log.e(TAG, "ExoPlayer PlaybackException: ${error.message}", error)
-                val active = _currentSong.value
-                if (active != null && !hasRetriedCurrentTrack) {
+                val active = _currentSong.value ?: return
+                if (!hasRetriedCurrentTrack && active.cleanVideoId.isNotBlank()) {
                     hasRetriedCurrentTrack = true
                     audioExtractor.invalidateCachedStream(active.videoId)
                     viewModelScope.launch {
@@ -407,11 +563,17 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                                 startExoPlayerWithUri(active, resolved.streamUrl)
                             },
                             onFailure = {
-                                _isBuffering.value = false
-                                _isPlaying.value = false
+                                // Seamlessly switch to Backstage YouTube Engine if direct stream fails
+                                isUsingExoPlayerFallback = false
+                                _activeStreamEngine.value = "Backstage YouTube Engine"
+                                backstagePlayer.loadVideoById(active.cleanVideoId)
                             }
                         )
                     }
+                } else if (active.cleanVideoId.isNotBlank()) {
+                    isUsingExoPlayerFallback = false
+                    _activeStreamEngine.value = "Backstage YouTube Engine"
+                    backstagePlayer.loadVideoById(active.cleanVideoId)
                 } else {
                     _isBuffering.value = false
                     _isPlaying.value = false
@@ -448,6 +610,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     fun openLibrarySubScreen(subScreen: LibrarySubScreen) {
         _selectedTab.value = MainTab.LIBRARY
         _librarySubScreen.value = subScreen
+        if (subScreen is LibrarySubScreen.MyMusic && checkAudioPermissionGranted()) {
+            loadDeviceLocalSongs()
+        }
     }
 
     fun updateSearchQuery(query: String) {
@@ -505,6 +670,15 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         _isLyricsOverlayOpen.value = open
     }
 
+    fun playPlaylist(songs: List<Song>, startIndex: Int = 0, enableRepeatAll: Boolean = false) {
+        if (songs.isEmpty()) return
+        if (enableRepeatAll) {
+            _repeatMode.value = RepeatModeState.ALL
+        }
+        val target = songs.getOrElse(startIndex) { songs.first() }
+        playSong(target, songs)
+    }
+
     fun playSong(song: Song, customQueue: List<Song>? = null) {
         val currentList = customQueue?.takeIf { it.isNotEmpty() }
             ?: allSongs.value.takeIf { it.isNotEmpty() }
@@ -542,7 +716,16 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
         playbackJob?.cancel()
         playbackJob = viewModelScope.launch {
-            // 1. Check if song is downloaded locally for offline playback
+            // 1. Check if song is a local device audio file from MediaStore
+            if (song.localContentUri.isNotBlank()) {
+                isUsingExoPlayerFallback = true
+                backstagePlayer.pauseVideo()
+                _activeStreamEngine.value = "Device Local Audio"
+                startExoPlayerWithUri(song, song.localContentUri)
+                return@launch
+            }
+
+            // 2. Check if song is downloaded locally for offline playback
             val downloaded = libraryDao.getDownloadedSong(song.id)
             if (downloaded != null) {
                 val localFile = File(downloaded.localFilePath)
@@ -555,29 +738,34 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
 
-            // 2. Primary: Hidden Backstage YouTube Engine (m.youtube.com HTML5 video bridge)
-            isUsingExoPlayerFallback = false
-            mediaController?.pause()
-            _activeStreamEngine.value = "Backstage YouTube Engine"
-            backstagePlayer.loadVideoById(song.cleanVideoId)
+            // 3. Online Track: Extract direct audio stream in parallel (~0.8s) and play via
+            // MusicPlaybackService (ExoPlayer) so background/screen-off playback and Android
+            // Notification Bar / Lock Screen controls work 100% of the time!
+            val streamResult = audioExtractor.extractBestAudioStream(
+                rawVideoId = song.videoId,
+                songTitle = song.title,
+                songArtist = song.artist
+            )
 
-            // 3. Safety Watchdog: If WebView is still buffering after 5.5s, seamlessly start ExoPlayer direct audio stream
-            delay(5500L)
-            if (isActive && _currentSong.value?.id == song.id && _isBuffering.value && !_isPlaying.value) {
-                val fallbackResult = audioExtractor.extractBestAudioStream(
-                    rawVideoId = song.videoId,
-                    songTitle = song.title,
-                    songArtist = song.artist
-                )
-                fallbackResult.onSuccess { resolved ->
-                    if (_currentSong.value?.id == song.id && !_isPlaying.value) {
+            streamResult.fold(
+                onSuccess = { resolved ->
+                    if (_currentSong.value?.id == song.id) {
                         isUsingExoPlayerFallback = true
                         backstagePlayer.pauseVideo()
                         _activeStreamEngine.value = resolved.sourceEngine
                         startExoPlayerWithUri(song, resolved.streamUrl)
                     }
+                },
+                onFailure = {
+                    // Fallback to Backstage YouTube Engine if direct extraction fails
+                    if (_currentSong.value?.id == song.id) {
+                        isUsingExoPlayerFallback = false
+                        mediaController?.pause()
+                        _activeStreamEngine.value = "Backstage YouTube Engine"
+                        backstagePlayer.loadVideoById(song.cleanVideoId)
+                    }
                 }
-            }
+            )
         }
     }
 
@@ -589,16 +777,25 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
-        val metadata = MediaMetadata.Builder()
+        val artworkUri = if (song.highResBannerUrl.isNotBlank()) {
+            Uri.parse(song.highResBannerUrl)
+        } else {
+            null
+        }
+
+        val metadataBuilder = MediaMetadata.Builder()
             .setTitle(song.title)
             .setArtist(song.artist)
-            .setArtworkUri(Uri.parse(song.highResBannerUrl))
-            .build()
+            .setDisplayTitle(song.title)
+            .setSubtitle(song.artist)
+        if (artworkUri != null) {
+            metadataBuilder.setArtworkUri(artworkUri)
+        }
 
         val mediaItem = MediaItem.Builder()
             .setMediaId(song.id)
             .setUri(streamUri)
-            .setMediaMetadata(metadata)
+            .setMediaMetadata(metadataBuilder.build())
             .build()
 
         controller.setMediaItem(mediaItem)
@@ -704,6 +901,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 val idx = list.indexOfFirst { it.id == current.id }
                 if (idx in 0 until list.lastIndex || _isShuffleEnabled.value) {
                     skipToNext()
+                } else if (list.size > 1) {
+                    // Automatically redirect to the first track in the queue so continuous playback never stops
+                    skipToNext()
                 } else {
                     _isPlaying.value = false
                 }
@@ -735,7 +935,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         _repeatMode.value = next
         val label = when (next) {
             RepeatModeState.OFF -> "Repeat Off"
-            RepeatModeState.ALL -> "Repeat All"
+            RepeatModeState.ALL -> "Repeat All (Playlist Loop)"
             RepeatModeState.ONE -> "Repeat One"
         }
         emitSnackbar(label)
@@ -807,6 +1007,10 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun downloadSongForOffline(song: Song) {
+        if (!song.allowDownload) {
+            emitSnackbar("Offline download is not enabled by Admin for this song.")
+            return
+        }
         if (_downloadingSongIds.value.contains(song.id)) return
         viewModelScope.launch {
             _downloadingSongIds.value = _downloadingSongIds.value + song.id
@@ -888,6 +1092,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         super.onCleared()
+        MusicPlaybackService.onSkipNextCallback = null
+        MusicPlaybackService.onSkipPreviousCallback = null
+        MusicPlaybackService.onTogglePlayPauseCallback = null
         backstagePlayer.release()
         controllerFuture?.let { MediaController.releaseFuture(it) }
     }

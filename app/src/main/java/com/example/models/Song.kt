@@ -8,8 +8,13 @@ data class Song(
     val bannerUrl: String = "",
     val rank: Int = Int.MAX_VALUE,
     val isTopChart: Boolean = false,
-    val timestamp: Long = 0L
+    val timestamp: Long = 0L,
+    val allowDownload: Boolean = false,
+    val localContentUri: String = ""
 ) {
+    val isLocalDeviceSong: Boolean
+        get() = localContentUri.isNotBlank()
+
     val resolvedBannerUrl: String
         get() = if (bannerUrl.isNotBlank()) {
             bannerUrl
@@ -35,6 +40,11 @@ data class Song(
         fun extractYoutubeVideoId(input: String): String {
             val trimmed = input.trim()
             if (trimmed.isEmpty()) return ""
+            if (trimmed.startsWith("content://", ignoreCase = true) ||
+                trimmed.startsWith("file://", ignoreCase = true)
+            ) {
+                return ""
+            }
             if (trimmed.length == 11 && !trimmed.contains("/") && !trimmed.contains("?")) {
                 return trimmed
             }

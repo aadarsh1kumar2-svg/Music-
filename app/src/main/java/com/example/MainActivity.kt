@@ -1,9 +1,12 @@
 package com.example
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.activity.ComponentActivity
@@ -18,9 +21,13 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
@@ -28,21 +35,26 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.automirrored.filled.TrendingUp
-import androidx.compose.material.icons.filled.CloudSync
-import androidx.compose.material.icons.filled.CloudUpload
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.LibraryMusic
-import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Timer
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
@@ -52,6 +64,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
@@ -61,13 +74,19 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -88,6 +107,7 @@ import com.example.ui.theme.MyApplicationTheme
 import com.example.ui.theme.PrimaryWhite
 import com.example.ui.theme.PureBlack
 import com.example.ui.theme.SpotifyDarkGreenPill
+import com.example.ui.theme.SpotifyGreenBorder
 import com.example.ui.theme.SpotifyVibrantGreen
 import com.example.ui.theme.SurfaceDarkCard
 import com.example.widgets.AddToPlaylistDialog
@@ -120,24 +140,60 @@ fun AKMusicAppRoot(
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val snackbarHostState = remember { SnackbarHostState() }
 
-    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+    val audioPermissionName = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        Manifest.permission.READ_MEDIA_AUDIO
+    } else {
+        Manifest.permission.READ_EXTERNAL_STORAGE
+    }
+
+    val audioPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
-    ) { _ -> }
+    ) { granted ->
+        musicViewModel.onAudioStoragePermissionResult(granted)
+        if (!granted) {
+            musicViewModel.emitSnackbar("Storage permission is needed to show device songs in My Music.")
+        }
+    }
+
+    val multiPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+        val audioGranted = results[audioPermissionName] == true || musicViewModel.checkAudioPermissionGranted()
+        musicViewModel.onAudioStoragePermissionResult(audioGranted)
+    }
 
     LaunchedEffect(Unit) {
+        val permsToRequest = mutableListOf<String>()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            val granted = ContextCompat.checkSelfPermission(
+            val notifGranted = ContextCompat.checkSelfPermission(
                 context,
                 Manifest.permission.POST_NOTIFICATIONS
             ) == PackageManager.PERMISSION_GRANTED
-            if (!granted) {
-                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            if (!notifGranted) {
+                permsToRequest.add(Manifest.permission.POST_NOTIFICATIONS)
             }
+        }
+        val audioGranted = ContextCompat.checkSelfPermission(
+            context,
+            audioPermissionName
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!audioGranted) {
+            permsToRequest.add(audioPermissionName)
+        } else {
+            musicViewModel.onAudioStoragePermissionResult(true)
+        }
+
+        if (permsToRequest.isNotEmpty()) {
+            multiPermissionLauncher.launch(permsToRequest.toTypedArray())
         }
     }
 
     val userName by musicViewModel.userName.collectAsStateWithLifecycle()
     val isEditNameDialogOpen by musicViewModel.isEditNameDialogOpen.collectAsStateWithLifecycle()
+    val isDeveloperScreenOpen by musicViewModel.isDeveloperScreenOpen.collectAsStateWithLifecycle()
+    val hasAudioStoragePermission by musicViewModel.hasAudioStoragePermission.collectAsStateWithLifecycle()
+    val deviceLocalSongs by musicViewModel.deviceLocalSongs.collectAsStateWithLifecycle()
+
     val selectedTab by musicViewModel.selectedTab.collectAsStateWithLifecycle()
     val librarySubScreen by musicViewModel.librarySubScreen.collectAsStateWithLifecycle()
     val allSongs by musicViewModel.allSongs.collectAsStateWithLifecycle()
@@ -166,7 +222,6 @@ fun AKMusicAppRoot(
 
     val isFullScreenPlayerOpen by musicViewModel.isFullScreenPlayerOpen.collectAsStateWithLifecycle()
     val optionsSheetSong by musicViewModel.optionsSheetSong.collectAsStateWithLifecycle()
-    val isAdminUploadSheetOpen by musicViewModel.isAdminUploadSheetOpen.collectAsStateWithLifecycle()
     val playlistPickerSong by musicViewModel.playlistPickerSong.collectAsStateWithLifecycle()
     val isSleepTimerDialogOpen by musicViewModel.isSleepTimerDialogOpen.collectAsStateWithLifecycle()
     val sleepTimerRemainingSeconds by musicViewModel.sleepTimerRemainingSeconds.collectAsStateWithLifecycle()
@@ -218,7 +273,6 @@ fun AKMusicAppRoot(
                     },
                     modifier = Modifier.fillMaxSize()
                 )
-                // Opaque PureBlack cover directly over the backstage WebView
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -247,15 +301,17 @@ fun AKMusicAppRoot(
                                 .fillMaxWidth()
                                 .padding(24.dp)
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.MusicNote,
-                                contentDescription = null,
-                                tint = SpotifyVibrantGreen,
-                                modifier = Modifier.height(40.dp)
+                            Image(
+                                painter = painterResource(id = R.drawable.aadify_logo),
+                                contentDescription = "AADIFY Logo",
+                                contentScale = ContentScale.Fit,
+                                modifier = Modifier
+                                    .size(56.dp)
+                                    .clip(RoundedCornerShape(12.dp))
                             )
                             Spacer(modifier = Modifier.height(12.dp))
                             Text(
-                                text = "AK Music 🎵",
+                                text = "AADIFY",
                                 style = MaterialTheme.typography.headlineMedium.copy(
                                     color = PrimaryWhite,
                                     fontWeight = FontWeight.ExtraBold
@@ -388,6 +444,27 @@ fun AKMusicAppRoot(
                             ),
                             modifier = Modifier.padding(horizontal = 12.dp)
                         )
+
+                        // Developer Section in Left 3-Lines Drawer
+                        NavigationDrawerItem(
+                            label = { Text("Developer") },
+                            icon = { Icon(Icons.Default.Code, contentDescription = "Developer") },
+                            selected = isDeveloperScreenOpen,
+                            onClick = {
+                                coroutineScope.launch { drawerState.close() }
+                                musicViewModel.setDeveloperScreenOpen(true)
+                            },
+                            colors = NavigationDrawerItemDefaults.colors(
+                                selectedContainerColor = SpotifyDarkGreenPill,
+                                selectedIconColor = SpotifyVibrantGreen,
+                                selectedTextColor = SpotifyVibrantGreen,
+                                unselectedIconColor = SpotifyVibrantGreen,
+                                unselectedTextColor = PrimaryWhite
+                            ),
+                            modifier = Modifier
+                                .padding(horizontal = 12.dp)
+                                .testTag("drawer_developer_item")
+                        )
                     }
                 }
             ) {
@@ -503,18 +580,29 @@ fun AKMusicAppRoot(
                                     allSongs = allSongs,
                                     favorites = favorites,
                                     downloadedSongs = downloadedSongs,
+                                    deviceLocalSongs = deviceLocalSongs,
+                                    hasAudioStoragePermission = hasAudioStoragePermission,
                                     playlists = playlists,
                                     allPlaylistSongs = allPlaylistSongs,
                                     sessionHistory = sessionHistory,
                                     currentQueue = queue,
                                     currentSong = currentSong,
                                     isPlaying = isPlaying,
+                                    repeatMode = repeatMode,
                                     onNavigateSubScreen = { musicViewModel.openLibrarySubScreen(it) },
                                     onSongClick = { song, list -> musicViewModel.playSong(song, list) },
                                     onSongMoreClick = { musicViewModel.openSongOptions(it) },
                                     onCreatePlaylist = { musicViewModel.createNewPlaylist(it) },
                                     onDeletePlaylist = { musicViewModel.deletePlaylist(it) },
                                     onDeleteDownloadedSong = { musicViewModel.deleteDownloadedSong(it) },
+                                    onRequestStoragePermission = {
+                                        if (musicViewModel.checkAudioPermissionGranted()) {
+                                            musicViewModel.onAudioStoragePermissionResult(true)
+                                        } else {
+                                            audioPermissionLauncher.launch(audioPermissionName)
+                                        }
+                                    },
+                                    onCycleRepeatMode = { musicViewModel.cycleRepeatMode() },
                                     onOpenDrawerMenu = {
                                         coroutineScope.launch { drawerState.open() }
                                     }
@@ -575,7 +663,7 @@ fun AKMusicAppRoot(
             }
         }
 
-        // 3-Dot Song Options Bottom Sheet
+        // Song Options Bottom Sheet (from song row or top-right 3-lines in player)
         val sheetSong = optionsSheetSong
         if (sheetSong != null) {
             SongOptionsBottomSheet(
@@ -625,6 +713,13 @@ fun AKMusicAppRoot(
             )
         }
 
+        // Developer Page Dialog / Modal
+        if (isDeveloperScreenOpen) {
+            DeveloperProfileDialog(
+                onDismiss = { musicViewModel.setDeveloperScreenOpen(false) }
+            )
+        }
+
         // Animated Neon Splash Screen Overlay on Launch
         AnimatedVisibility(
             visible = showSplash,
@@ -632,6 +727,164 @@ fun AKMusicAppRoot(
             exit = fadeOut(animationSpec = tween(durationMillis = 450))
         ) {
             SplashScreen()
+        }
+    }
+}
+
+@Composable
+fun DeveloperProfileDialog(
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            color = DeepCharcoal,
+            shape = RoundedCornerShape(22.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(
+                    width = 1.5.dp,
+                    color = SpotifyGreenBorder,
+                    shape = RoundedCornerShape(22.dp)
+                )
+                .testTag("developer_profile_dialog")
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Developer Info",
+                        style = MaterialTheme.typography.titleLarge.copy(
+                            color = SpotifyVibrantGreen,
+                            fontWeight = FontWeight.Bold
+                        )
+                    )
+                    IconButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Close",
+                            tint = MutedGray
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Image(
+                    painter = painterResource(id = R.drawable.aadify_logo),
+                    contentDescription = "AADIFY Logo",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier
+                        .size(84.dp)
+                        .clip(RoundedCornerShape(18.dp))
+                )
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Text(
+                    text = "Developer Name",
+                    style = MaterialTheme.typography.labelLarge.copy(
+                        color = MutedGray,
+                        fontSize = 13.sp
+                    )
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Aadarsh kumar",
+                    style = MaterialTheme.typography.headlineMedium.copy(
+                        color = PrimaryWhite,
+                        fontWeight = FontWeight.ExtraBold,
+                        fontSize = 24.sp
+                    ),
+                    textAlign = TextAlign.Center
+                )
+
+                Spacer(modifier = Modifier.height(20.dp))
+                HorizontalDivider(color = DividerDark)
+                Spacer(modifier = Modifier.height(20.dp))
+
+                Surface(
+                    color = SurfaceDarkCard,
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(18.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = "Contact to Developer",
+                            style = MaterialTheme.typography.titleMedium.copy(
+                                color = PrimaryWhite,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 17.sp
+                            )
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "Telegram: @Devacoding1",
+                            style = MaterialTheme.typography.bodyMedium.copy(
+                                color = SpotifyVibrantGreen,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 15.sp
+                            )
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Button(
+                            onClick = {
+                                try {
+                                    val tgIntent = Intent(
+                                        Intent.ACTION_VIEW,
+                                        Uri.parse("https://t.me/Devacoding1")
+                                    ).apply {
+                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    }
+                                    context.startActivity(tgIntent)
+                                } catch (_: Exception) {
+                                }
+                            },
+                            shape = RoundedCornerShape(12.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = SpotifyVibrantGreen,
+                                contentColor = PureBlack
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                                .testTag("developer_telegram_go_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.Send,
+                                contentDescription = null,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Go",
+                                style = MaterialTheme.typography.titleMedium.copy(
+                                    color = PureBlack,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    fontSize = 17.sp
+                                )
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 }

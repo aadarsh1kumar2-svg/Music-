@@ -23,7 +23,6 @@ import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Album
 import androidx.compose.material.icons.filled.CloudUpload
-import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.SmartDisplay
 import androidx.compose.material.icons.filled.Timer
@@ -147,7 +146,20 @@ fun SongOptionsBottomSheet(
                 modifier = Modifier.padding(vertical = 6.dp)
             )
 
-            // 1. View Album
+            // 1. Add to Playlist (Primary option at top — opens playlist picker with all playlists)
+            OptionSheetRow(
+                icon = Icons.AutoMirrored.Filled.PlaylistAdd,
+                label = stringResource(id = R.string.option_add_to_playlist),
+                showChevron = true,
+                tint = SpotifyVibrantGreen,
+                testTag = "sheet_option_add_playlist",
+                onClick = {
+                    onDismiss()
+                    onAddToPlaylist(song)
+                }
+            )
+
+            // 2. View Album / Artist
             OptionSheetRow(
                 icon = Icons.Default.Album,
                 label = stringResource(id = R.string.option_view_album),
@@ -156,18 +168,6 @@ fun SongOptionsBottomSheet(
                 onClick = {
                     onDismiss()
                     onViewAlbum(song)
-                }
-            )
-
-            // 2. Add to Playlist
-            OptionSheetRow(
-                icon = Icons.AutoMirrored.Filled.PlaylistAdd,
-                label = stringResource(id = R.string.option_add_to_playlist),
-                showChevron = false,
-                testTag = "sheet_option_add_playlist",
-                onClick = {
-                    onDismiss()
-                    onAddToPlaylist(song)
                 }
             )
 
@@ -188,37 +188,41 @@ fun SongOptionsBottomSheet(
                 }
             )
 
-            // 4. Watch Video
-            OptionSheetRow(
-                icon = Icons.Default.SmartDisplay,
-                label = stringResource(id = R.string.option_watch_video),
-                showChevron = false,
-                testTag = "sheet_option_watch_video",
-                onClick = {
-                    onDismiss()
-                    val vid = song.cleanVideoId
-                    val url = if (vid.startsWith("http")) vid else "https://www.youtube.com/watch?v=$vid"
-                    try {
-                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
-                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            // 4. Watch Video (only for online tracks with a YouTube ID)
+            if (song.cleanVideoId.isNotBlank()) {
+                OptionSheetRow(
+                    icon = Icons.Default.SmartDisplay,
+                    label = stringResource(id = R.string.option_watch_video),
+                    showChevron = false,
+                    testTag = "sheet_option_watch_video",
+                    onClick = {
+                        onDismiss()
+                        val vid = song.cleanVideoId
+                        val url = if (vid.startsWith("http")) vid else "https://www.youtube.com/watch?v=$vid"
+                        try {
+                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                            context.startActivity(intent)
+                        } catch (_: Exception) {
                         }
-                        context.startActivity(intent)
-                    } catch (_: Exception) {
                     }
-                }
-            )
+                )
+            }
 
-            // Download Offline (My Music)
-            OptionSheetRow(
-                icon = Icons.Default.Download,
-                label = stringResource(id = R.string.option_download_offline),
-                showChevron = false,
-                testTag = "sheet_option_download",
-                onClick = {
-                    onDismiss()
-                    onDownloadOffline(song)
-                }
-            )
+            // 5. Download Offline (ONLY shown if Admin enabled download permission for this song)
+            if (song.allowDownload) {
+                OptionSheetRow(
+                    icon = Icons.Default.Download,
+                    label = stringResource(id = R.string.option_download_offline),
+                    showChevron = false,
+                    testTag = "sheet_option_download",
+                    onClick = {
+                        onDismiss()
+                        onDownloadOffline(song)
+                    }
+                )
+            }
         }
     }
 }
@@ -407,11 +411,11 @@ fun AddToPlaylistDialog(
 
                 if (playlists.isNotEmpty()) {
                     Text(
-                        text = "Existing Playlists",
+                        text = "Tap any playlist to add song:",
                         style = MaterialTheme.typography.labelLarge.copy(color = MutedGray)
                     )
                     LazyColumn(
-                        modifier = Modifier.height(180.dp),
+                        modifier = Modifier.height(200.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         items(playlists, key = { it.playlistId }) { playlist ->
@@ -435,11 +439,19 @@ fun AddToPlaylistDialog(
                                 Spacer(modifier = Modifier.width(12.dp))
                                 Text(
                                     text = playlist.name,
-                                    style = MaterialTheme.typography.bodyLarge.copy(color = PrimaryWhite)
+                                    style = MaterialTheme.typography.bodyLarge.copy(
+                                        color = PrimaryWhite,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
                                 )
                             }
                         }
                     }
+                } else {
+                    Text(
+                        text = "No playlists yet. Enter a name above and tap + to create your first playlist!",
+                        style = MaterialTheme.typography.bodyMedium.copy(color = MutedGray)
+                    )
                 }
             }
         },
