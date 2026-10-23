@@ -220,19 +220,6 @@ fun SongOptionsBottomSheet(
                     onDownloadOffline(song)
                 }
             )
-
-            // Remove from Firebase
-            OptionSheetRow(
-                icon = Icons.Default.DeleteOutline,
-                label = "Remove from Firebase Catalog",
-                showChevron = false,
-                tint = ErrorRed,
-                testTag = "sheet_option_delete_firebase",
-                onClick = {
-                    onDismiss()
-                    onDeleteFromFirebase(song)
-                }
-            )
         }
     }
 }

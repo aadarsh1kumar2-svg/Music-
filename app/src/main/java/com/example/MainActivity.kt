@@ -339,21 +339,6 @@ fun AKMusicAppRoot(
                         )
 
                         NavigationDrawerItem(
-                            label = { Text("Upload Song to Firebase") },
-                            icon = { Icon(Icons.Default.CloudUpload, contentDescription = null) },
-                            selected = false,
-                            onClick = {
-                                coroutineScope.launch { drawerState.close() }
-                                musicViewModel.setAdminUploadSheetOpen(true)
-                            },
-                            colors = NavigationDrawerItemDefaults.colors(
-                                unselectedIconColor = SpotifyVibrantGreen,
-                                unselectedTextColor = SpotifyVibrantGreen
-                            ),
-                            modifier = Modifier.padding(horizontal = 12.dp)
-                        )
-
-                        NavigationDrawerItem(
                             label = { Text("Sync Firebase /songs Now") },
                             icon = { Icon(Icons.Default.CloudSync, contentDescription = null) },
                             selected = false,
@@ -452,9 +437,6 @@ fun AKMusicAppRoot(
                                     onSongMoreClick = { musicViewModel.openSongOptions(it) },
                                     onOpenDrawerMenu = {
                                         coroutineScope.launch { drawerState.open() }
-                                    },
-                                    onOpenAdminUpload = {
-                                        musicViewModel.setAdminUploadSheetOpen(true)
                                     },
                                     onRefreshCatalog = {
                                         musicViewModel.refreshFirebaseCatalog()
@@ -622,24 +604,6 @@ fun AKMusicAppRoot(
                     musicViewModel.startSleepTimer(mins)
                 },
                 onDismiss = { musicViewModel.setSleepTimerDialogOpen(false) }
-            )
-        }
-
-        // In-App Admin Upload Song to Firebase Sheet
-        if (isAdminUploadSheetOpen) {
-            AdminUploadSongBottomSheet(
-                onDismiss = { musicViewModel.setAdminUploadSheetOpen(false) },
-                onUploadSong = { title, artist, videoId, bannerUrl ->
-                    musicViewModel.uploadSongToFirebase(
-                        title = title,
-                        artist = artist,
-                        videoIdOrUrl = videoId,
-                        bannerUrl = bannerUrl,
-                        onSuccess = {
-                            musicViewModel.setAdminUploadSheetOpen(false)
-                        }
-                    )
-                }
             )
         }
 

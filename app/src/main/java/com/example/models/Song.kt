@@ -39,7 +39,7 @@ data class Song(
                 return trimmed
             }
             val patterns = listOf(
-                Regex("(?:v=|/v/|youtu\\.be/|/embed/|/shorts/)([a-zA-Z0-9_-]{11})"),
+                Regex("(?:v=|/v/|youtu\\.be/|/embed/|/shorts/|/live/)([a-zA-Z0-9_-]{11})"),
                 Regex("^([a-zA-Z0-9_-]{11})$")
             )
             for (pattern in patterns) {

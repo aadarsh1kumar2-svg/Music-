@@ -321,7 +321,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     hasRetriedCurrentTrack = true
                     audioExtractor.invalidateCachedStream(active.videoId)
                     viewModelScope.launch {
-                        val retryResult = audioExtractor.extractBestAudioStream(active.videoId, forceFresh = true)
+                        val retryResult = audioExtractor.extractBestAudioStream(
+                            rawVideoId = active.videoId,
+                            songTitle = active.title,
+                            songArtist = active.artist,
+                            forceFresh = true
+                        )
                         retryResult.fold(
                             onSuccess = { resolved ->
                                 startExoPlayerWithUri(active, resolved.streamUrl)
@@ -472,8 +477,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
 
-            // 2. Multi-Tier Audio Stream Extractor (7-second timeout per attempt)
-            val extractionResult = audioExtractor.extractBestAudioStream(song.videoId)
+            // 2. Native YouTube InnerTube (ANDROID_MUSIC) + Multi-Tier Fallback Audio Stream Extractor
+            val extractionResult = audioExtractor.extractBestAudioStream(
+                rawVideoId = song.videoId,
+                songTitle = song.title,
+                songArtist = song.artist
+            )
             extractionResult.fold(
                 onSuccess = { resolved ->
                     _activeStreamEngine.value = resolved.sourceEngine

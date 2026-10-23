@@ -8,6 +8,7 @@ import androidx.media3.common.C
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.ResolvingDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.MediaSession
@@ -26,20 +27,29 @@ class MusicPlaybackService : MediaSessionService() {
             .setUsage(C.USAGE_MEDIA)
             .build()
 
-        // Configure standard Chrome User-Agent and Accept: */* headers on all HTTP audio requests
+        // Configure DefaultHttpDataSource.Factory() for ExoPlayer with Android 14 Mobile Chrome User-Agent
+        // and allowCrossProtocolRedirects(true), wrapped with ResolvingDataSource to attach client-specific
+        // User-Agent headers for googlevideo.com streams.
         val httpDataSourceFactory = DefaultHttpDataSource.Factory()
-            .setUserAgent(AudioStreamExtractor.DEFAULT_STREAM_USER_AGENT)
-            .setDefaultRequestProperties(
-                mapOf(
-                    "User-Agent" to AudioStreamExtractor.DEFAULT_STREAM_USER_AGENT,
-                    "Accept" to "*/*"
-                )
-            )
+            .setUserAgent(AudioStreamExtractor.EXOPLAYER_USER_AGENT)
             .setAllowCrossProtocolRedirects(true)
-            .setConnectTimeoutMs(10_000)
-            .setReadTimeoutMs(10_000)
+            .setConnectTimeoutMs(12_000)
+            .setReadTimeoutMs(12_000)
 
-        val dataSourceFactory = DefaultDataSource.Factory(this, httpDataSourceFactory)
+        val resolvingHttpFactory = ResolvingDataSource.Factory(httpDataSourceFactory) { dataSpec ->
+            val streamUrl = dataSpec.uri.toString()
+            val resolvedUserAgent = AudioStreamExtractor.resolveUserAgentForStreamUrl(streamUrl)
+            dataSpec.buildUpon()
+                .setHttpRequestHeaders(
+                    mapOf(
+                        "User-Agent" to resolvedUserAgent,
+                        "Accept" to "*/*"
+                    )
+                )
+                .build()
+        }
+
+        val dataSourceFactory = DefaultDataSource.Factory(this, resolvingHttpFactory)
         val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory)
 
         val player = ExoPlayer.Builder(this)

@@ -66,7 +66,6 @@ fun HomeScreen(
     onSongClick: (Song, List<Song>) -> Unit,
     onSongMoreClick: (Song) -> Unit,
     onOpenDrawerMenu: () -> Unit,
-    onOpenAdminUpload: () -> Unit,
     onRefreshCatalog: () -> Unit,
     onEditUserName: () -> Unit,
     modifier: Modifier = Modifier
@@ -111,18 +110,6 @@ fun HomeScreen(
                             imageVector = Icons.Default.CloudSync,
                             contentDescription = "Sync Firebase",
                             tint = MutedGray
-                        )
-                    }
-                    IconButton(
-                        onClick = onOpenAdminUpload,
-                        modifier = Modifier
-                            .size(48.dp)
-                            .testTag("home_upload_song_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Add,
-                            contentDescription = "Upload Song to Firebase",
-                            tint = SpotifyVibrantGreen
                         )
                     }
                 }
@@ -344,32 +331,13 @@ fun HomeScreen(
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
                             text = if (searchQuery.isBlank()) {
-                                "Your app is connected live to file-66f59. Add a song to the /songs node in Firebase Console or use the button below to upload one directly."
+                                "Your app is connected live to Firebase (file-66f59). New songs added by the admin will appear here automatically in real time."
                             } else {
                                 "Try searching by another song title, artist, or YouTube video ID."
                             },
                             style = MaterialTheme.typography.bodyMedium.copy(color = MutedGray),
                             textAlign = TextAlign.Center
                         )
-                        if (searchQuery.isBlank()) {
-                            Spacer(modifier = Modifier.height(18.dp))
-                            Button(
-                                onClick = onOpenAdminUpload,
-                                shape = RoundedCornerShape(12.dp),
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = SpotifyVibrantGreen,
-                                    contentColor = PureBlack
-                                ),
-                                modifier = Modifier.testTag("empty_state_upload_button")
-                            ) {
-                                Icon(Icons.Default.Add, contentDescription = null)
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    text = "Add Song to Firebase",
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                        }
                     }
                 }
             }
