@@ -2,6 +2,7 @@ package com.example.services
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.os.Handler
 import android.os.Looper
@@ -9,6 +10,7 @@ import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.ConsoleMessage
+import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
@@ -18,14 +20,17 @@ import android.webkit.WebViewClient
 import com.example.models.Song
 
 /**
- * Hidden Backstage YouTube IFrame Player Engine layered directly behind the album banner.
- * Uses a persistent WebView with JavaScript, DomStorage, and mediaPlaybackRequiresUserGesture = false,
- * communicating playback progress, duration, and state changes back to Kotlin via AndroidBridge.
+ * Custom WebView that always reports View.VISIBLE to Chromium so HTML5 audio/video
+ * playback is never throttled or paused when covered by the Album Banner poster
+ * or when the screen is minimized.
  */
 class BackstageAudioWebView(context: Context) : WebView(context) {
     override fun onWindowVisibilityChanged(visibility: Int) {
-        // Keep the backstage WebView active even when covered or when the app is in background
         super.onWindowVisibilityChanged(View.VISIBLE)
+    }
+
+    override fun onVisibilityChanged(changedView: View, visibility: Int) {
+        super.onVisibilityChanged(changedView, View.VISIBLE)
     }
 }
 
@@ -48,10 +53,9 @@ class BackstageYouTubePlayerController(
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private var webView: BackstageAudioWebView? = null
-    private var isPlayerReady = false
-    private var pendingVideoId: String? = null
     private var currentLoadedVideoId: String = ""
     private var currentPlaybackRate: Float = 1.0f
+    private var userRequestedPause: Boolean = false
 
     @SuppressLint("SetJavaScriptEnabled")
     fun getOrCreateWebView(): BackstageAudioWebView {
@@ -61,22 +65,34 @@ class BackstageYouTubePlayerController(
         }
 
         val created = BackstageAudioWebView(context.applicationContext).apply {
-            setBackgroundColor(Color.TRANSPARENT)
+            setBackgroundColor(Color.BLACK)
             isVerticalScrollBarEnabled = false
             isHorizontalScrollBarEnabled = false
             isFocusable = false
             isFocusableInTouchMode = false
+            keepScreenOn = true
 
             settings.apply {
                 javaScriptEnabled = true
                 domStorageEnabled = true
-                mediaPlaybackRequiresUserGesture = false
                 databaseEnabled = true
+                mediaPlaybackRequiresUserGesture = false
                 loadsImagesAutomatically = true
                 mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                 cacheMode = WebSettings.LOAD_DEFAULT
+                useWideViewPort = true
+                loadWithOverviewMode = true
+                javaScriptCanOpenWindowsAutomatically = false
+                setSupportMultipleWindows(false)
                 userAgentString =
-                    "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+                    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+            }
+
+            try {
+                val cookieManager = CookieManager.getInstance()
+                cookieManager.setAcceptCookie(true)
+                cookieManager.setAcceptThirdPartyCookies(this, true)
+            } catch (_: Exception) {
             }
 
             addJavascriptInterface(AndroidBridge(), "AndroidBridge")
@@ -85,24 +101,43 @@ class BackstageYouTubePlayerController(
                 override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
                     return true
                 }
+
+                override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                    super.onProgressChanged(view, newProgress)
+                    if (newProgress >= 35) {
+                        injectVideoBridgeScript()
+                    }
+                }
             }
 
             webViewClient = object : WebViewClient() {
+                override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                    super.onPageStarted(view, url, favicon)
+                    injectVideoBridgeScript()
+                }
+
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    super.onPageFinished(view, url)
+                    injectVideoBridgeScript()
+                }
+
+                override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+                    super.doUpdateVisitedHistory(view, url, isReload)
+                    injectVideoBridgeScript()
+                }
+
                 override fun shouldOverrideUrlLoading(
                     view: WebView?,
                     request: WebResourceRequest?
                 ): Boolean {
-                    return false
+                    val reqUrl = request?.url?.toString() ?: return false
+                    // Keep only youtube.com / google pages inside the backstage player
+                    return !(reqUrl.contains("youtube.com") ||
+                            reqUrl.contains("youtu.be") ||
+                            reqUrl.contains("google.com") ||
+                            reqUrl.contains("googlevideo.com"))
                 }
             }
-
-            loadDataWithBaseURL(
-                "https://www.youtube.com",
-                buildIFramePlayerHtml(),
-                "text/html",
-                "UTF-8",
-                null
-            )
         }
 
         webView = created
@@ -122,6 +157,9 @@ class BackstageYouTubePlayerController(
                     ViewGroup.LayoutParams.MATCH_PARENT
                 )
             )
+            if (!userRequestedPause && currentLoadedVideoId.isNotBlank()) {
+                mainHandler.postDelayed({ playVideo() }, 80L)
+            }
         }
     }
 
@@ -132,51 +170,237 @@ class BackstageYouTubePlayerController(
             return
         }
         currentLoadedVideoId = cleanId
-        pendingVideoId = cleanId
+        userRequestedPause = false
 
         mainHandler.post {
-            getOrCreateWebView()
-            if (isPlayerReady) {
-                val safeId = cleanId.replace("'", "\\'")
-                evaluateJs("if (window.ytPlayer && window.ytPlayer.loadVideoById) { window.ytPlayer.loadVideoById('$safeId'); window.ytPlayer.playVideo(); }")
-            }
+            val view = getOrCreateWebView()
+            val watchUrl = "https://m.youtube.com/watch?v=$cleanId&autoplay=1"
+            view.loadUrl(watchUrl)
         }
     }
 
     fun playVideo() {
+        userRequestedPause = false
         mainHandler.post {
-            if (isPlayerReady) {
-                evaluateJs("if (window.ytPlayer && window.ytPlayer.playVideo) { window.ytPlayer.playVideo(); }")
-            } else if (!pendingVideoId.isNullOrBlank()) {
-                loadVideoById(pendingVideoId!!)
-            }
+            evaluateJs(
+                """
+                (function() {
+                    window.__akUserPaused = false;
+                    if (window.ytPlayer && typeof window.ytPlayer.playVideo === 'function') {
+                        window.ytPlayer.playVideo();
+                    }
+                    var v = document.querySelector('video');
+                    if (v) {
+                        v.muted = false;
+                        v.volume = 1.0;
+                        var p = v.play();
+                        if (p && typeof p.catch === 'function') { p.catch(function(){}); }
+                    }
+                })();
+                """.trimIndent()
+            )
         }
     }
 
     fun pauseVideo() {
+        userRequestedPause = true
         mainHandler.post {
-            if (isPlayerReady) {
-                evaluateJs("if (window.ytPlayer && window.ytPlayer.pauseVideo) { window.ytPlayer.pauseVideo(); }")
-            }
+            evaluateJs(
+                """
+                (function() {
+                    window.__akUserPaused = true;
+                    if (window.ytPlayer && typeof window.ytPlayer.pauseVideo === 'function') {
+                        window.ytPlayer.pauseVideo();
+                    }
+                    var v = document.querySelector('video');
+                    if (v) {
+                        v.pause();
+                    }
+                })();
+                """.trimIndent()
+            )
         }
     }
 
     fun seekToSeconds(targetSeconds: Double) {
         val clamped = targetSeconds.coerceAtLeast(0.0)
         mainHandler.post {
-            if (isPlayerReady) {
-                evaluateJs("if (window.ytPlayer && window.ytPlayer.seekTo) { window.ytPlayer.seekTo($clamped, true); }")
-            }
+            evaluateJs(
+                """
+                (function() {
+                    if (window.ytPlayer && typeof window.ytPlayer.seekTo === 'function') {
+                        window.ytPlayer.seekTo($clamped, true);
+                    }
+                    var v = document.querySelector('video');
+                    if (v) {
+                        v.currentTime = $clamped;
+                        if (!window.__akUserPaused) {
+                            var p = v.play();
+                            if (p && typeof p.catch === 'function') { p.catch(function(){}); }
+                        }
+                    }
+                })();
+                """.trimIndent()
+            )
         }
     }
 
     fun setPlaybackSpeed(speed: Float) {
         currentPlaybackRate = speed
         mainHandler.post {
-            if (isPlayerReady) {
-                evaluateJs("if (window.ytPlayer && window.ytPlayer.setPlaybackRate) { window.ytPlayer.setPlaybackRate($speed); }")
-            }
+            evaluateJs(
+                """
+                (function() {
+                    window.__akPlaybackRate = $speed;
+                    if (window.ytPlayer && typeof window.ytPlayer.setPlaybackRate === 'function') {
+                        window.ytPlayer.setPlaybackRate($speed);
+                    }
+                    var v = document.querySelector('video');
+                    if (v) {
+                        v.playbackRate = $speed;
+                    }
+                })();
+                """.trimIndent()
+            )
         }
+    }
+
+    private fun injectVideoBridgeScript() {
+        val pausedFlag = if (userRequestedPause) "true" else "false"
+        val rate = currentPlaybackRate
+        val script = """
+            (function() {
+                window.__akUserPaused = $pausedFlag;
+                window.__akPlaybackRate = $rate;
+                if (window.__akBridgeInstalled) return;
+                window.__akBridgeInstalled = true;
+
+                function hookVideoElement(v) {
+                    if (!v || v.__akHooked) return;
+                    v.__akHooked = true;
+                    v.setAttribute('playsinline', 'true');
+                    v.setAttribute('webkit-playsinline', 'true');
+                    v.playsInline = true;
+                    v.muted = false;
+                    v.volume = 1.0;
+                    if (window.__akPlaybackRate) {
+                        v.playbackRate = window.__akPlaybackRate;
+                    }
+
+                    v.addEventListener('playing', function() {
+                        if (window.AndroidBridge) {
+                            window.AndroidBridge.onStateChange(1);
+                            if (v.duration && v.duration > 0) {
+                                window.AndroidBridge.onDuration(v.duration);
+                            }
+                        }
+                    });
+
+                    v.addEventListener('play', function() {
+                        if (window.AndroidBridge) {
+                            window.AndroidBridge.onStateChange(1);
+                        }
+                    });
+
+                    v.addEventListener('pause', function() {
+                        if (window.__akUserPaused && window.AndroidBridge) {
+                            window.AndroidBridge.onStateChange(2);
+                        }
+                    });
+
+                    v.addEventListener('waiting', function() {
+                        if (window.AndroidBridge) {
+                            window.AndroidBridge.onStateChange(3);
+                        }
+                    });
+
+                    v.addEventListener('loadedmetadata', function() {
+                        if (v.duration && v.duration > 0 && window.AndroidBridge) {
+                            window.AndroidBridge.onDuration(v.duration);
+                        }
+                    });
+
+                    v.addEventListener('durationchange', function() {
+                        if (v.duration && v.duration > 0 && window.AndroidBridge) {
+                            window.AndroidBridge.onDuration(v.duration);
+                        }
+                    });
+
+                    v.addEventListener('timeupdate', function() {
+                        if (!window.AndroidBridge) return;
+                        var isAd = !!document.querySelector('.ad-showing, .ad-interrupting');
+                        if (isAd) {
+                            var skipBtn = document.querySelector('.ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-skip-ad-button');
+                            if (skipBtn) { skipBtn.click(); }
+                            else if (v.duration && v.duration > 0 && v.duration < 120) {
+                                v.currentTime = v.duration;
+                            }
+                            return;
+                        }
+                        if (v.currentTime >= 0) {
+                            window.AndroidBridge.onProgress(v.currentTime);
+                        }
+                        if (v.duration && v.duration > 0) {
+                            window.AndroidBridge.onDuration(v.duration);
+                        }
+                        if (!v.paused && v.readyState >= 2) {
+                            window.AndroidBridge.onStateChange(1);
+                        }
+                    });
+
+                    v.addEventListener('ended', function() {
+                        var isAd = !!document.querySelector('.ad-showing, .ad-interrupting');
+                        if (!isAd && window.AndroidBridge) {
+                            window.AndroidBridge.onStateChange(0);
+                        }
+                    });
+                }
+
+                setInterval(function() {
+                    try {
+                        var v = document.querySelector('video');
+                        if (!v) return;
+                        hookVideoElement(v);
+
+                        // Skip ads automatically if any pre-roll appears
+                        var isAd = !!document.querySelector('.ad-showing, .ad-interrupting');
+                        if (isAd) {
+                            var skipBtn = document.querySelector('.ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-skip-ad-button');
+                            if (skipBtn) { skipBtn.click(); }
+                            else if (v.duration && v.duration > 0 && v.duration < 120) {
+                                v.currentTime = v.duration;
+                            }
+                            return;
+                        }
+
+                        // Ensure unmuted and playing unless user paused
+                        if (v.muted) {
+                            v.muted = false;
+                            v.volume = 1.0;
+                        }
+
+                        if (!window.__akUserPaused && v.paused && !v.ended) {
+                            var playPromise = v.play();
+                            if (playPromise && typeof playPromise.catch === 'function') {
+                                playPromise.catch(function() {
+                                    var playBtn = document.querySelector('.ytp-large-play-button, .ytp-play-button, button.player-control-play-pause-icon');
+                                    if (playBtn) { playBtn.click(); }
+                                });
+                            }
+                        }
+
+                        if (!v.paused && v.currentTime > 0 && window.AndroidBridge) {
+                            window.AndroidBridge.onStateChange(1);
+                            window.AndroidBridge.onProgress(v.currentTime);
+                            if (v.duration && v.duration > 0) {
+                                window.AndroidBridge.onDuration(v.duration);
+                            }
+                        }
+                    } catch (e) {}
+                }, 250);
+            })();
+        """.trimIndent()
+        evaluateJs(script)
     }
 
     private fun evaluateJs(script: String) {
@@ -198,7 +422,6 @@ class BackstageYouTubePlayerController(
             } catch (_: Exception) {
             }
             webView = null
-            isPlayerReady = false
         }
     }
 
@@ -206,12 +429,7 @@ class BackstageYouTubePlayerController(
         @JavascriptInterface
         fun onReady() {
             mainHandler.post {
-                isPlayerReady = true
-                val targetId = pendingVideoId
-                if (!targetId.isNullOrBlank()) {
-                    val safeId = targetId.replace("'", "\\'")
-                    evaluateJs("if (window.ytPlayer && window.ytPlayer.loadVideoById) { window.ytPlayer.loadVideoById('$safeId'); window.ytPlayer.setPlaybackRate($currentPlaybackRate); window.ytPlayer.playVideo(); }")
-                }
+                injectVideoBridgeScript()
             }
         }
 
@@ -242,118 +460,10 @@ class BackstageYouTubePlayerController(
 
         @JavascriptInterface
         fun onError(errorCode: Int) {
-            Log.w(TAG, "YouTube IFrame Player error code: $errorCode for $currentLoadedVideoId")
+            Log.w(TAG, "Backstage player error code: $errorCode for $currentLoadedVideoId")
             mainHandler.post {
                 onErrorUpdate(errorCode)
             }
         }
-    }
-
-    private fun buildIFramePlayerHtml(): String {
-        return """
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-                <style>
-                    html, body {
-                        margin: 0;
-                        padding: 0;
-                        width: 100%;
-                        height: 100%;
-                        background-color: #000000;
-                        overflow: hidden;
-                    }
-                    #player {
-                        width: 100%;
-                        height: 100%;
-                        border: 0;
-                    }
-                </style>
-            </head>
-            <body>
-                <div id="player"></div>
-                <script>
-                    var tag = document.createElement('script');
-                    tag.src = "https://www.youtube.com/iframe_api";
-                    var firstScriptTag = document.getElementsByTagName('script')[0];
-                    firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
-
-                    window.ytPlayer = null;
-                    var progressTimer = null;
-
-                    function onYouTubeIframeAPIReady() {
-                        window.ytPlayer = new YT.Player('player', {
-                            width: '100%',
-                            height: '100%',
-                            videoId: '',
-                            playerVars: {
-                                'controls': 0,
-                                'autoplay': 1,
-                                'playsinline': 1,
-                                'rel': 0,
-                                'fs': 0,
-                                'modestbranding': 1,
-                                'iv_load_policy': 3,
-                                'disablekb': 1,
-                                'origin': 'https://www.youtube.com'
-                            },
-                            events: {
-                                'onReady': onPlayerReady,
-                                'onStateChange': onPlayerStateChange,
-                                'onError': onPlayerError
-                            }
-                        });
-                    }
-
-                    function onPlayerReady(event) {
-                        if (window.AndroidBridge && window.AndroidBridge.onReady) {
-                            window.AndroidBridge.onReady();
-                        }
-                        startProgressPolling();
-                    }
-
-                    function onPlayerStateChange(event) {
-                        var state = event.data;
-                        if (window.AndroidBridge && window.AndroidBridge.onStateChange) {
-                            window.AndroidBridge.onStateChange(state);
-                        }
-                        syncTimeAndDuration();
-                    }
-
-                    function onPlayerError(event) {
-                        if (window.AndroidBridge && window.AndroidBridge.onError) {
-                            window.AndroidBridge.onError(event.data || -1);
-                        }
-                    }
-
-                    function syncTimeAndDuration() {
-                        try {
-                            if (!window.ytPlayer) return;
-                            if (typeof window.ytPlayer.getDuration === 'function') {
-                                var dur = window.ytPlayer.getDuration();
-                                if (dur && dur > 0 && window.AndroidBridge && window.AndroidBridge.onDuration) {
-                                    window.AndroidBridge.onDuration(dur);
-                                }
-                            }
-                            if (typeof window.ytPlayer.getCurrentTime === 'function') {
-                                var cur = window.ytPlayer.getCurrentTime();
-                                if (cur >= 0 && window.AndroidBridge && window.AndroidBridge.onProgress) {
-                                    window.AndroidBridge.onProgress(cur);
-                                }
-                            }
-                        } catch (e) {}
-                    }
-
-                    function startProgressPolling() {
-                        if (progressTimer) clearInterval(progressTimer);
-                        progressTimer = setInterval(function() {
-                            syncTimeAndDuration();
-                        }, 250);
-                    }
-                </script>
-            </body>
-            </html>
-        """.trimIndent()
     }
 }

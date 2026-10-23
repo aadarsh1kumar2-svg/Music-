@@ -269,17 +269,23 @@ fun FullScreenPlayerModal(
                     modifier = Modifier
                         .fillMaxSize()
                         .clip(RoundedCornerShape(18.dp))
-                        .alpha(0.01f)
                         .testTag("hidden_backstage_youtube_webview")
                 )
 
-                // Existing Album Banner Poster directly on top covering the hidden WebView
-                SongArtwork(
-                    imageUrl = song.highResBannerUrl,
-                    contentDescription = song.title,
-                    modifier = Modifier.fillMaxSize(),
-                    cornerRadius = 18.dp
-                )
+                // Existing Album Banner Poster directly on top (opaque background completely covering the WebView)
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(RoundedCornerShape(18.dp))
+                        .background(DeepCharcoal)
+                ) {
+                    SongArtwork(
+                        imageUrl = song.highResBannerUrl,
+                        contentDescription = song.title,
+                        modifier = Modifier.fillMaxSize(),
+                        cornerRadius = 18.dp
+                    )
+                }
 
                 if (isLyricsOpen) {
                     Box(

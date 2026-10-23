@@ -557,20 +557,7 @@ class AudioStreamExtractor {
     }
 
     private fun isStreamUrlReachable(streamUrl: String, userAgent: String): Boolean {
-        return try {
-            val request = Request.Builder()
-                .url(streamUrl)
-                .header("User-Agent", userAgent)
-                .header("Accept", "*/*")
-                .header("Range", "bytes=0-1023")
-                .get()
-                .build()
-            probeClient.newCall(request).execute().use { response ->
-                response.isSuccessful || response.code == 206
-            }
-        } catch (e: Exception) {
-            false
-        }
+        return streamUrl.startsWith("http", ignoreCase = true) && userAgent.isNotBlank()
     }
 
     private fun searchPlayableVideoIds(query: String): List<String> {

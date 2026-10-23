@@ -555,11 +555,29 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
 
-            // 2. Primary: Hidden Backstage YouTube IFrame Player (ytPlayer.loadVideoById)
+            // 2. Primary: Hidden Backstage YouTube Engine (m.youtube.com HTML5 video bridge)
             isUsingExoPlayerFallback = false
             mediaController?.pause()
             _activeStreamEngine.value = "Backstage YouTube Engine"
             backstagePlayer.loadVideoById(song.cleanVideoId)
+
+            // 3. Safety Watchdog: If WebView is still buffering after 5.5s, seamlessly start ExoPlayer direct audio stream
+            delay(5500L)
+            if (isActive && _currentSong.value?.id == song.id && _isBuffering.value && !_isPlaying.value) {
+                val fallbackResult = audioExtractor.extractBestAudioStream(
+                    rawVideoId = song.videoId,
+                    songTitle = song.title,
+                    songArtist = song.artist
+                )
+                fallbackResult.onSuccess { resolved ->
+                    if (_currentSong.value?.id == song.id && !_isPlaying.value) {
+                        isUsingExoPlayerFallback = true
+                        backstagePlayer.pauseVideo()
+                        _activeStreamEngine.value = resolved.sourceEngine
+                        startExoPlayerWithUri(song, resolved.streamUrl)
+                    }
+                }
+            }
         }
     }
 

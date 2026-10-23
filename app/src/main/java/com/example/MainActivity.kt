@@ -196,6 +196,37 @@ fun AKMusicAppRoot(
             .fillMaxSize()
             .background(PureBlack)
     ) {
+        // Backstage YouTube Engine layer (behind the opaque PureBlack UI when Full-Screen Player is collapsed)
+        if (!isFullScreenPlayerOpen) {
+            Box(
+                modifier = Modifier
+                    .width(240.dp)
+                    .height(240.dp)
+            ) {
+                AndroidView(
+                    factory = { ctx ->
+                        FrameLayout(ctx).apply {
+                            layoutParams = ViewGroup.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT
+                            )
+                            musicViewModel.attachBackstagePlayer(this)
+                        }
+                    },
+                    update = { container ->
+                        musicViewModel.attachBackstagePlayer(container)
+                    },
+                    modifier = Modifier.fillMaxSize()
+                )
+                // Opaque PureBlack cover directly over the backstage WebView
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(PureBlack)
+                )
+            }
+        }
+
         if (!showSplash && (userName.isBlank() || isEditNameDialogOpen)) {
             NameOnboardingScreen(
                 initialName = userName,
@@ -493,25 +524,6 @@ fun AKMusicAppRoot(
                     }
                 }
             }
-        }
-
-        // Keep Backstage YouTube Engine attached when Full-Screen Player is collapsed
-        if (!isFullScreenPlayerOpen) {
-            AndroidView(
-                factory = { ctx ->
-                    FrameLayout(ctx).apply {
-                        layoutParams = ViewGroup.LayoutParams(1, 1)
-                        musicViewModel.attachBackstagePlayer(this)
-                    }
-                },
-                update = { container ->
-                    musicViewModel.attachBackstagePlayer(container)
-                },
-                modifier = Modifier
-                    .width(1.dp)
-                    .height(1.dp)
-                    .alpha(0.01f)
-            )
         }
 
         // Slide-Up Full-Screen Player Modal
