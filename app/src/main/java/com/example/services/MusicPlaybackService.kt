@@ -3,6 +3,7 @@ package com.example.services
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.PowerManager
 import androidx.annotation.OptIn
@@ -19,6 +20,10 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import com.example.MainActivity
+import java.io.File
+import java.io.FileOutputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
 class MusicPlaybackService : MediaSessionService() {
 
@@ -31,6 +36,49 @@ class MusicPlaybackService : MediaSessionService() {
 
         @Volatile
         var onTogglePlayPauseCallback: ((Boolean) -> Unit)? = null
+
+        /**
+         * Generates a tiny 3-second silent WAV file used by MusicPlaybackService to keep the
+         * Foreground MediaSession, WakeLock, WifiLock, Lock Screen, and Notification Bar
+         * media controls active while BackstageYouTubePlayerController streams online audio.
+         */
+        fun getOrCreateSilentWavUri(context: Context): String {
+            val file = File(context.cacheDir, "aadify_keepalive_silence.wav")
+            if (file.exists() && file.length() > 100L) {
+                return Uri.fromFile(file).toString()
+            }
+            try {
+                val sampleRate = 8000
+                val durationSeconds = 3
+                val numSamples = sampleRate * durationSeconds
+                val dataSize = numSamples * 2 // 16-bit mono
+                val buffer = ByteBuffer.allocate(44 + dataSize).order(ByteOrder.LITTLE_ENDIAN)
+
+                // RIFF header
+                buffer.put("RIFF".toByteArray(Charsets.US_ASCII))
+                buffer.putInt(36 + dataSize)
+                buffer.put("WAVE".toByteArray(Charsets.US_ASCII))
+                // fmt subchunk
+                buffer.put("fmt ".toByteArray(Charsets.US_ASCII))
+                buffer.putInt(16) // PCM
+                buffer.putShort(1.toShort()) // AudioFormat = 1 (PCM)
+                buffer.putShort(1.toShort()) // NumChannels = 1
+                buffer.putInt(sampleRate)
+                buffer.putInt(sampleRate * 2) // ByteRate
+                buffer.putShort(2.toShort()) // BlockAlign
+                buffer.putShort(16.toShort()) // BitsPerSample
+                // data subchunk
+                buffer.put("data".toByteArray(Charsets.US_ASCII))
+                buffer.putInt(dataSize)
+                // Remaining bytes in buffer are already 0 (silence)
+
+                FileOutputStream(file).use { out ->
+                    out.write(buffer.array())
+                }
+            } catch (_: Exception) {
+            }
+            return Uri.fromFile(file).toString()
+        }
     }
 
     private var mediaSession: MediaSession? = null
@@ -87,9 +135,10 @@ class MusicPlaybackService : MediaSessionService() {
         val dataSourceFactory = DefaultDataSource.Factory(this, resolvingHttpFactory)
         val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory)
 
+        // Pass handleAudioFocus = false so ExoPlayer never steals audio focus from BackstageAudioWebView!
         val exoPlayer = ExoPlayer.Builder(this)
             .setMediaSourceFactory(mediaSourceFactory)
-            .setAudioAttributes(audioAttributes, true)
+            .setAudioAttributes(audioAttributes, false)
             .setHandleAudioBecomingNoisy(true)
             .setWakeMode(C.WAKE_MODE_NETWORK)
             .build()

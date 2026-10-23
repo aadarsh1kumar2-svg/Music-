@@ -163,28 +163,17 @@ fun AKMusicAppRoot(
     }
 
     LaunchedEffect(Unit) {
-        val permsToRequest = mutableListOf<String>()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val notifGranted = ContextCompat.checkSelfPermission(
                 context,
                 Manifest.permission.POST_NOTIFICATIONS
             ) == PackageManager.PERMISSION_GRANTED
             if (!notifGranted) {
-                permsToRequest.add(Manifest.permission.POST_NOTIFICATIONS)
+                multiPermissionLauncher.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
             }
         }
-        val audioGranted = ContextCompat.checkSelfPermission(
-            context,
-            audioPermissionName
-        ) == PackageManager.PERMISSION_GRANTED
-        if (!audioGranted) {
-            permsToRequest.add(audioPermissionName)
-        } else {
+        if (musicViewModel.checkAudioPermissionGranted()) {
             musicViewModel.onAudioStoragePermissionResult(true)
-        }
-
-        if (permsToRequest.isNotEmpty()) {
-            multiPermissionLauncher.launch(permsToRequest.toTypedArray())
         }
     }
 

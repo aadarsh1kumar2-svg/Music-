@@ -3,7 +3,6 @@ package com.example.services
 import android.util.Log
 import com.example.models.Song
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
@@ -17,6 +16,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
+import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
@@ -109,6 +109,140 @@ class AudioStreamExtractor {
         return extractBestAudioStream(rawVideoId).getOrNull()?.streamUrl
     }
 
+    /**
+     * Live Online Search Engine: Searches YouTube for any song title/artist query
+     * and returns playable Song items so the user can search and play any song!
+     */
+    suspend fun searchSongsOnline(query: String): List<Song> = withContext(Dispatchers.IO) {
+        val trimmed = query.trim()
+        if (trimmed.length < 2) return@withContext emptyList()
+
+        // 1. Primary: YouTube InnerTube Search API (fast & rich metadata)
+        val innerTubeResults = searchViaInnerTube(trimmed)
+        if (innerTubeResults.isNotEmpty()) {
+            return@withContext innerTubeResults
+        }
+
+        // 2. Fallback: Piped Search API
+        for (baseUrl in PIPED_MIRRORS.take(2)) {
+            val pipedResults = searchViaPiped(baseUrl, trimmed)
+            if (pipedResults.isNotEmpty()) {
+                return@withContext pipedResults
+            }
+        }
+
+        emptyList()
+    }
+
+    private fun searchViaInnerTube(query: String): List<Song> {
+        return try {
+            val clientObj = JSONObject().apply {
+                put("clientName", "WEB")
+                put("clientVersion", "2.20241118.01.00")
+                put("hl", "en")
+                put("gl", "IN")
+            }
+            val payload = JSONObject().apply {
+                put("context", JSONObject().put("client", clientObj))
+                put("query", "$query song")
+            }
+            val request = Request.Builder()
+                .url("https://www.youtube.com/youtubei/v1/search?prettyPrint=false")
+                .header("Content-Type", "application/json")
+                .header("User-Agent", EXOPLAYER_USER_AGENT)
+                .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+                .build()
+
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return emptyList()
+                val body = response.body?.string() ?: return emptyList()
+                val results = mutableListOf<Song>()
+                val seenIds = mutableSetOf<String>()
+
+                val videoRendererRegex = Regex(
+                    "\"videoRenderer\"\\s*:\\s*\\{\\s*\"videoId\"\\s*:\\s*\"([a-zA-Z0-9_-]{11})\".*?\"title\"\\s*:\\s*\\{\\s*\"runs\"\\s*:\\s*\\[\\s*\\{\\s*\"text\"\\s*:\\s*\"([^\"]+)\"",
+                    setOf(RegexOption.DOT_MATCHES_ALL)
+                )
+
+                for (match in videoRendererRegex.findAll(body)) {
+                    val vid = match.groupValues[1]
+                    if (!seenIds.add(vid)) continue
+                    val rawTitle = match.groupValues[2]
+                        .replace("\\\"", "\"")
+                        .replace("\\u0026", "&")
+                        .replace("&amp;", "&")
+                    val artist = if (rawTitle.contains(" - ")) {
+                        rawTitle.substringBefore(" - ").trim()
+                    } else {
+                        "AADIFY Music"
+                    }
+                    results.add(
+                        Song(
+                            id = "yt_search_$vid",
+                            title = rawTitle,
+                            artist = artist,
+                            videoId = vid,
+                            bannerUrl = "https://img.youtube.com/vi/$vid/hqdefault.jpg",
+                            timestamp = System.currentTimeMillis()
+                        )
+                    )
+                    if (results.size >= 15) break
+                }
+                results
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "InnerTube search failed: ${e.message}")
+            emptyList()
+        }
+    }
+
+    private fun searchViaPiped(baseUrl: String, query: String): List<Song> {
+        return try {
+            val encoded = URLEncoder.encode(query, "UTF-8")
+            val request = Request.Builder()
+                .url("$baseUrl/search?q=$encoded&filter=music_songs")
+                .header("User-Agent", EXOPLAYER_USER_AGENT)
+                .header("Accept", "application/json")
+                .get()
+                .build()
+
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return emptyList()
+                val body = response.body?.string() ?: return emptyList()
+                if (!body.trimStart().startsWith("{")) return emptyList()
+                val root = JSONObject(body)
+                val items = root.optJSONArray("items") ?: return emptyList()
+                val results = mutableListOf<Song>()
+                for (i in 0 until items.length()) {
+                    val item = items.optJSONObject(i) ?: continue
+                    val url = item.optString("url", "")
+                    val vid = Song.extractYoutubeVideoId(url)
+                    if (vid.length != 11) continue
+                    val title = item.optString("title", "").ifBlank { continue }
+                    val artist = item.optString("uploaderName", "AADIFY Music")
+                    val thumb = item.optString(
+                        "thumbnail",
+                        "https://img.youtube.com/vi/$vid/hqdefault.jpg"
+                    )
+                    results.add(
+                        Song(
+                            id = "yt_search_$vid",
+                            title = title,
+                            artist = artist,
+                            videoId = vid,
+                            bannerUrl = thumb,
+                            timestamp = System.currentTimeMillis()
+                        )
+                    )
+                    if (results.size >= 15) break
+                }
+                results
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
     suspend fun extractBestAudioStream(
         rawVideoId: String,
         songTitle: String = "",
@@ -117,7 +251,6 @@ class AudioStreamExtractor {
     ): Result<ResolvedAudioStream> = withContext(Dispatchers.IO) {
         val videoId = Song.extractYoutubeVideoId(rawVideoId)
 
-        // Direct audio URL check (.mp3, .m4a, .ogg, .opus, .wav)
         if (rawVideoId.startsWith("http", ignoreCase = true) &&
             (rawVideoId.contains(".mp3", ignoreCase = true) ||
                     rawVideoId.contains(".m4a", ignoreCase = true) ||
@@ -144,7 +277,6 @@ class AudioStreamExtractor {
             }
         }
 
-        // Fast parallel extraction for the song's videoId
         if (videoId.length == 11) {
             val directResolved = resolveForSingleVideoIdFast(videoId)
             if (directResolved != null) {
@@ -154,7 +286,6 @@ class AudioStreamExtractor {
             }
         }
 
-        // Automatic fallback: If videoId is restricted/ciphered, search YouTube by title + artist
         val searchQuery = buildString {
             if (songTitle.isNotBlank()) append(songTitle.trim())
             if (songArtist.isNotBlank() && !songArtist.equals("Unknown Artist", ignoreCase = true)) {
@@ -183,10 +314,6 @@ class AudioStreamExtractor {
         Result.failure(RuntimeException("Stream unavailable for this track."))
     }
 
-    /**
-     * Races ANDROID_VR, IOS, ANDROID_MUSIC, and Piped in parallel so the fastest working
-     * direct audio stream returns in ~0.7–1.2 seconds!
-     */
     private suspend fun resolveForSingleVideoIdFast(videoId: String): ResolvedAudioStream? =
         withTimeoutOrNull(6_500L) {
             coroutineScope {
@@ -225,7 +352,6 @@ class AudioStreamExtractor {
                     return@coroutineScope winner
                 }
 
-                // Final sequential fallback across remaining mirrors if all parallel racers missed
                 extractViaFallbackMirrors(videoId)
             }
         }

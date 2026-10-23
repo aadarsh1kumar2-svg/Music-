@@ -193,7 +193,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                             val duration = cursor.getLong(durationCol)
                             val dateAdded = cursor.getLong(dateCol)
 
-                            // Skip very short ringtones/notification clips (< 5 seconds)
                             if (duration in 1..4999) continue
 
                             val contentUri = ContentUris.withAppendedId(
@@ -247,13 +246,14 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private val firebaseService = FirebaseSongsService(appContext)
     private val audioExtractor = AudioStreamExtractor()
 
-    // Media3 Controller (Foreground MediaSessionService for background + lockscreen + notification bar controls)
+    // Media3 Controller (Foreground MediaSessionService for Notification Bar + Lockscreen + Offline Playback)
     private var controllerFuture: ListenableFuture<MediaController>? = null
     private var mediaController: MediaController? = null
     private var pendingPlaybackPair: Pair<Song, String>? = null
-    private var isUsingExoPlayerFallback = true
+    private var pendingKeepAliveSong: Song? = null
+    private var isUsingExoPlayerFallback = false
 
-    // Hidden Backstage YouTube IFrame Player Controller (Backup Engine behind Album Banner)
+    // Hidden Backstage YouTube Player Controller (Primary Engine for all Admin & Online Songs!)
     private val backstagePlayer = BackstageYouTubePlayerController(
         context = appContext,
         onProgressUpdate = { posMs ->
@@ -272,10 +272,18 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     BackstageYouTubePlayerController.STATE_PLAYING -> {
                         _isBuffering.value = false
                         _isPlaying.value = true
+                        val controller = mediaController
+                        if (controller != null && !controller.isPlaying && controller.mediaItemCount > 0) {
+                            controller.play()
+                        }
                     }
                     BackstageYouTubePlayerController.STATE_PAUSED -> {
                         _isBuffering.value = false
                         _isPlaying.value = false
+                        val controller = mediaController
+                        if (controller != null && controller.isPlaying) {
+                            controller.pause()
+                        }
                     }
                     BackstageYouTubePlayerController.STATE_BUFFERING -> {
                         _isBuffering.value = true
@@ -347,9 +355,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private val _isLyricsOverlayOpen = MutableStateFlow(false)
     val isLyricsOverlayOpen: StateFlow<Boolean> = _isLyricsOverlayOpen.asStateFlow()
 
-    // Search & Filters
+    // Search & Live Online Search Engine
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
+
+    private val _onlineSearchResults = MutableStateFlow<List<Song>>(emptyList())
+    private var searchJob: Job? = null
 
     private val _selectedChartTab = MutableStateFlow(ChartTab.LOCAL)
     val selectedChartTab: StateFlow<ChartTab> = _selectedChartTab.asStateFlow()
@@ -357,24 +368,30 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private val _selectedCountry = MutableStateFlow(SUPPORTED_COUNTRIES.first())
     val selectedCountry: StateFlow<CountryOption> = _selectedCountry.asStateFlow()
 
-    // Catalog Songs & Filtered State
+    // Catalog Songs & Filtered State (Admin Catalog + Live Online Search Engine)
     val allSongs: StateFlow<List<Song>> = firebaseService.songs
     val isLoadingSongs: StateFlow<Boolean> = firebaseService.isLoading
     val firebaseError: StateFlow<String?> = firebaseService.connectionError
 
     val filteredSongs: StateFlow<List<Song>> = combine(
         firebaseService.songs,
-        _searchQuery
-    ) { songs, query ->
+        _searchQuery,
+        _onlineSearchResults
+    ) { songs, query, onlineMatches ->
         val trimmed = query.trim()
         if (trimmed.isEmpty()) {
             songs
         } else {
-            songs.filter {
-                it.title.contains(trimmed, ignoreCase = true) ||
-                        it.artist.contains(trimmed, ignoreCase = true) ||
-                        it.videoId.contains(trimmed, ignoreCase = true)
+            val tokens = trimmed.lowercase().split(Regex("\\s+")).filter { it.isNotBlank() }
+            val localMatches = songs.filter { song ->
+                val haystack = "${song.title} ${song.artist} ${song.videoId}".lowercase()
+                tokens.all { token -> haystack.contains(token) } ||
+                        song.title.contains(trimmed, ignoreCase = true) ||
+                        song.artist.contains(trimmed, ignoreCase = true)
             }
+            val existingVideoIds = localMatches.map { it.cleanVideoId }.toSet()
+            val extraOnline = onlineMatches.filter { it.cleanVideoId !in existingVideoIds }
+            localMatches + extraOnline
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
@@ -442,7 +459,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private val _repeatMode = MutableStateFlow(RepeatModeState.OFF)
     val repeatMode: StateFlow<RepeatModeState> = _repeatMode.asStateFlow()
 
-    private val _activeStreamEngine = MutableStateFlow("AADIFY Fast Audio Engine")
+    private val _activeStreamEngine = MutableStateFlow("Backstage YouTube Engine")
     val activeStreamEngine: StateFlow<String> = _activeStreamEngine.asStateFlow()
 
     // Sleep Timer
@@ -462,7 +479,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private var hasRetriedCurrentTrack = false
 
     init {
-        // Connect Notification Bar / Lock Screen Next, Previous, and Play/Pause callbacks
         MusicPlaybackService.onSkipNextCallback = {
             viewModelScope.launch { skipToNext() }
         }
@@ -483,7 +499,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        // Pre-warm backstage WebView & MediaSessionService
+        // Pre-warm hidden backstage WebView on main thread
         backstagePlayer.getOrCreateWebView()
         initializeMediaController()
         startProgressPoller()
@@ -509,6 +525,10 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                         pendingPlaybackPair?.let { (song, streamUri) ->
                             pendingPlaybackPair = null
                             startExoPlayerWithUri(song, streamUri)
+                        }
+                        pendingKeepAliveSong?.let { song ->
+                            pendingKeepAliveSong = null
+                            startNotificationKeepAliveForSong(song)
                         }
                     } catch (e: Exception) {
                         Log.e(TAG, "Failed to connect MediaController", e)
@@ -547,37 +567,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             override fun onPlayerError(error: PlaybackException) {
                 if (!isUsingExoPlayerFallback) return
                 Log.e(TAG, "ExoPlayer PlaybackException: ${error.message}", error)
-                val active = _currentSong.value ?: return
-                if (!hasRetriedCurrentTrack && active.cleanVideoId.isNotBlank()) {
-                    hasRetriedCurrentTrack = true
-                    audioExtractor.invalidateCachedStream(active.videoId)
-                    viewModelScope.launch {
-                        val retryResult = audioExtractor.extractBestAudioStream(
-                            rawVideoId = active.videoId,
-                            songTitle = active.title,
-                            songArtist = active.artist,
-                            forceFresh = true
-                        )
-                        retryResult.fold(
-                            onSuccess = { resolved ->
-                                startExoPlayerWithUri(active, resolved.streamUrl)
-                            },
-                            onFailure = {
-                                // Seamlessly switch to Backstage YouTube Engine if direct stream fails
-                                isUsingExoPlayerFallback = false
-                                _activeStreamEngine.value = "Backstage YouTube Engine"
-                                backstagePlayer.loadVideoById(active.cleanVideoId)
-                            }
-                        )
-                    }
-                } else if (active.cleanVideoId.isNotBlank()) {
-                    isUsingExoPlayerFallback = false
-                    _activeStreamEngine.value = "Backstage YouTube Engine"
-                    backstagePlayer.loadVideoById(active.cleanVideoId)
-                } else {
-                    _isBuffering.value = false
-                    _isPlaying.value = false
-                }
+                _isBuffering.value = false
+                _isPlaying.value = false
             }
         })
     }
@@ -617,6 +608,19 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateSearchQuery(query: String) {
         _searchQuery.value = query
+        searchJob?.cancel()
+        val trimmed = query.trim()
+        if (trimmed.length < 2) {
+            _onlineSearchResults.value = emptyList()
+            return
+        }
+        searchJob = viewModelScope.launch {
+            delay(350L)
+            val results = audioExtractor.searchSongsOnline(trimmed)
+            if (_searchQuery.value.trim() == trimmed) {
+                _onlineSearchResults.value = results
+            }
+        }
     }
 
     fun selectChartTab(tab: ChartTab) {
@@ -668,15 +672,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setLyricsOverlayOpen(open: Boolean) {
         _isLyricsOverlayOpen.value = open
-    }
-
-    fun playPlaylist(songs: List<Song>, startIndex: Int = 0, enableRepeatAll: Boolean = false) {
-        if (songs.isEmpty()) return
-        if (enableRepeatAll) {
-            _repeatMode.value = RepeatModeState.ALL
-        }
-        val target = songs.getOrElse(startIndex) { songs.first() }
-        playSong(target, songs)
     }
 
     fun playSong(song: Song, customQueue: List<Song>? = null) {
@@ -738,35 +733,56 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
 
-            // 3. Online Track: Extract direct audio stream in parallel (~0.8s) and play via
-            // MusicPlaybackService (ExoPlayer) so background/screen-off playback and Android
-            // Notification Bar / Lock Screen controls work 100% of the time!
-            val streamResult = audioExtractor.extractBestAudioStream(
-                rawVideoId = song.videoId,
-                songTitle = song.title,
-                songArtist = song.artist
-            )
-
-            streamResult.fold(
-                onSuccess = { resolved ->
-                    if (_currentSong.value?.id == song.id) {
-                        isUsingExoPlayerFallback = true
-                        backstagePlayer.pauseVideo()
-                        _activeStreamEngine.value = resolved.sourceEngine
-                        startExoPlayerWithUri(song, resolved.streamUrl)
-                    }
-                },
-                onFailure = {
-                    // Fallback to Backstage YouTube Engine if direct extraction fails
-                    if (_currentSong.value?.id == song.id) {
-                        isUsingExoPlayerFallback = false
-                        mediaController?.pause()
-                        _activeStreamEngine.value = "Backstage YouTube Engine"
-                        backstagePlayer.loadVideoById(song.cleanVideoId)
-                    }
-                }
-            )
+            // 3. Primary Engine for ALL Admin & Online Songs:
+            // Play immediately via BackstageYouTubePlayerController AND activate the Foreground
+            // MediaSessionService Notification Bar + WakeLock keep-alive!
+            isUsingExoPlayerFallback = false
+            _activeStreamEngine.value = "Backstage YouTube Engine"
+            backstagePlayer.loadVideoById(song.cleanVideoId)
+            startNotificationKeepAliveForSong(song)
         }
+    }
+
+    /**
+     * Starts a silent looping audio session in MusicPlaybackService with the current song's
+     * Title, Artist, and Artwork so the Android Notification Bar controls (Previous, Play/Pause, Next)
+     * and background/screen-off WakeLock stay active while BackstageYouTubePlayerController streams audio.
+     */
+    private fun startNotificationKeepAliveForSong(song: Song) {
+        val controller = mediaController
+        if (controller == null) {
+            pendingKeepAliveSong = song
+            initializeMediaController()
+            return
+        }
+
+        val silentUri = MusicPlaybackService.getOrCreateSilentWavUri(appContext)
+        val artworkUri = if (song.highResBannerUrl.isNotBlank()) {
+            Uri.parse(song.highResBannerUrl)
+        } else {
+            null
+        }
+
+        val metadataBuilder = MediaMetadata.Builder()
+            .setTitle(song.title)
+            .setArtist(song.artist)
+            .setDisplayTitle(song.title)
+            .setSubtitle(song.artist)
+        if (artworkUri != null) {
+            metadataBuilder.setArtworkUri(artworkUri)
+        }
+
+        val mediaItem = MediaItem.Builder()
+            .setMediaId(song.id)
+            .setUri(silentUri)
+            .setMediaMetadata(metadataBuilder.build())
+            .build()
+
+        controller.volume = 0f
+        controller.repeatMode = Player.REPEAT_MODE_ONE
+        controller.setMediaItem(mediaItem)
+        controller.prepare()
+        controller.play()
     }
 
     private fun startExoPlayerWithUri(song: Song, streamUri: String) {
@@ -798,6 +814,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             .setMediaMetadata(metadataBuilder.build())
             .build()
 
+        controller.volume = 1f
+        controller.repeatMode = Player.REPEAT_MODE_OFF
         controller.setMediaItem(mediaItem)
         controller.playbackParameters = PlaybackParameters(_playbackSpeed.value)
         controller.prepare()
@@ -823,9 +841,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         } else {
             if (_isPlaying.value) {
                 backstagePlayer.pauseVideo()
+                mediaController?.pause()
                 _isPlaying.value = false
             } else {
                 backstagePlayer.playVideo()
+                mediaController?.play()
                 _isPlaying.value = true
             }
         }
@@ -902,7 +922,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 if (idx in 0 until list.lastIndex || _isShuffleEnabled.value) {
                     skipToNext()
                 } else if (list.size > 1) {
-                    // Automatically redirect to the first track in the queue so continuous playback never stops
                     skipToNext()
                 } else {
                     _isPlaying.value = false

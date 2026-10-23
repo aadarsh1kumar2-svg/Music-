@@ -20,9 +20,9 @@ import android.webkit.WebViewClient
 import com.example.models.Song
 
 /**
- * Custom WebView that always reports View.VISIBLE to Chromium so HTML5 audio/video
- * playback is never throttled or paused when covered by the Album Banner poster
- * or when the screen is minimized.
+ * Custom WebView that always reports View.VISIBLE to Chromium and ignores lifecycle pause
+ * calls so HTML5 audio playback continues uninterrupted when covered by the Album Banner,
+ * when the app is minimized to the background, or when the phone screen is turned off.
  */
 class BackstageAudioWebView(context: Context) : WebView(context) {
     override fun onWindowVisibilityChanged(visibility: Int) {
@@ -31,6 +31,10 @@ class BackstageAudioWebView(context: Context) : WebView(context) {
 
     override fun onVisibilityChanged(changedView: View, visibility: Int) {
         super.onVisibilityChanged(changedView, View.VISIBLE)
+    }
+
+    override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
+        super.onWindowFocusChanged(true)
     }
 }
 
@@ -104,7 +108,7 @@ class BackstageYouTubePlayerController(
 
                 override fun onProgressChanged(view: WebView?, newProgress: Int) {
                     super.onProgressChanged(view, newProgress)
-                    if (newProgress >= 35) {
+                    if (newProgress >= 20) {
                         injectVideoBridgeScript()
                     }
                 }
@@ -131,13 +135,14 @@ class BackstageYouTubePlayerController(
                     request: WebResourceRequest?
                 ): Boolean {
                     val reqUrl = request?.url?.toString() ?: return false
-                    // Keep only youtube.com / google pages inside the backstage player
                     return !(reqUrl.contains("youtube.com") ||
                             reqUrl.contains("youtu.be") ||
                             reqUrl.contains("google.com") ||
                             reqUrl.contains("googlevideo.com"))
                 }
             }
+
+            resumeTimers()
         }
 
         webView = created
@@ -157,8 +162,10 @@ class BackstageYouTubePlayerController(
                     ViewGroup.LayoutParams.MATCH_PARENT
                 )
             )
+            view.onResume()
+            view.resumeTimers()
             if (!userRequestedPause && currentLoadedVideoId.isNotBlank()) {
-                mainHandler.postDelayed({ playVideo() }, 80L)
+                mainHandler.postDelayed({ playVideo() }, 60L)
             }
         }
     }
@@ -174,6 +181,8 @@ class BackstageYouTubePlayerController(
 
         mainHandler.post {
             val view = getOrCreateWebView()
+            view.onResume()
+            view.resumeTimers()
             val watchUrl = "https://m.youtube.com/watch?v=$cleanId&autoplay=1"
             view.loadUrl(watchUrl)
         }
@@ -182,6 +191,8 @@ class BackstageYouTubePlayerController(
     fun playVideo() {
         userRequestedPause = false
         mainHandler.post {
+            webView?.onResume()
+            webView?.resumeTimers()
             evaluateJs(
                 """
                 (function() {
@@ -272,8 +283,34 @@ class BackstageYouTubePlayerController(
             (function() {
                 window.__akUserPaused = $pausedFlag;
                 window.__akPlaybackRate = $rate;
+
+                // Spoof Page Visibility API so m.youtube.com NEVER pauses audio in background or screen-off
+                try {
+                    Object.defineProperty(document, 'hidden', { get: function() { return false; }, configurable: true });
+                    Object.defineProperty(document, 'webkitHidden', { get: function() { return false; }, configurable: true });
+                    Object.defineProperty(document, 'visibilityState', { get: function() { return 'visible'; }, configurable: true });
+                    Object.defineProperty(document, 'webkitVisibilityState', { get: function() { return 'visible'; }, configurable: true });
+                    document.hasFocus = function() { return true; };
+                } catch (e) {}
+
                 if (window.__akBridgeInstalled) return;
                 window.__akBridgeInstalled = true;
+
+                window.addEventListener('visibilitychange', function(e) {
+                    e.stopImmediatePropagation();
+                }, true);
+                window.addEventListener('webkitvisibilitychange', function(e) {
+                    e.stopImmediatePropagation();
+                }, true);
+                document.addEventListener('visibilitychange', function(e) {
+                    e.stopImmediatePropagation();
+                }, true);
+                window.addEventListener('pagehide', function(e) {
+                    e.stopImmediatePropagation();
+                }, true);
+                window.addEventListener('blur', function(e) {
+                    e.stopImmediatePropagation();
+                }, true);
 
                 function hookVideoElement(v) {
                     if (!v || v.__akHooked) return;
@@ -303,8 +340,18 @@ class BackstageYouTubePlayerController(
                     });
 
                     v.addEventListener('pause', function() {
-                        if (window.__akUserPaused && window.AndroidBridge) {
-                            window.AndroidBridge.onStateChange(2);
+                        if (window.__akUserPaused) {
+                            if (window.AndroidBridge) {
+                                window.AndroidBridge.onStateChange(2);
+                            }
+                        } else if (!v.ended) {
+                            // Auto-resume immediately if YouTube tried to pause on background/screen-off
+                            setTimeout(function() {
+                                if (!window.__akUserPaused && v.paused && !v.ended) {
+                                    var p = v.play();
+                                    if (p && typeof p.catch === 'function') { p.catch(function(){}); }
+                                }
+                            }, 50);
                         }
                     });
 
@@ -362,7 +409,6 @@ class BackstageYouTubePlayerController(
                         if (!v) return;
                         hookVideoElement(v);
 
-                        // Skip ads automatically if any pre-roll appears
                         var isAd = !!document.querySelector('.ad-showing, .ad-interrupting');
                         if (isAd) {
                             var skipBtn = document.querySelector('.ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-skip-ad-button');
@@ -373,7 +419,6 @@ class BackstageYouTubePlayerController(
                             return;
                         }
 
-                        // Ensure unmuted and playing unless user paused
                         if (v.muted) {
                             v.muted = false;
                             v.volume = 1.0;
@@ -397,7 +442,7 @@ class BackstageYouTubePlayerController(
                             }
                         }
                     } catch (e) {}
-                }, 250);
+                }, 180);
             })();
         """.trimIndent()
         evaluateJs(script)
