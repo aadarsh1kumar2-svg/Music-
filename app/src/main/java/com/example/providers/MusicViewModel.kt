@@ -251,6 +251,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private var mediaController: MediaController? = null
     private var pendingPlaybackPair: Pair<Song, String>? = null
     private var pendingKeepAliveSong: Song? = null
+    private var keepAliveActiveForSongId: String? = null
     private var isUsingExoPlayerFallback = false
 
     // Hidden Backstage YouTube Player Controller (Primary Engine for all Admin & Online Songs!)
@@ -272,8 +273,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     BackstageYouTubePlayerController.STATE_PLAYING -> {
                         _isBuffering.value = false
                         _isPlaying.value = true
+                        val activeSong = _currentSong.value
                         val controller = mediaController
-                        if (controller != null && !controller.isPlaying && controller.mediaItemCount > 0) {
+                        if (activeSong != null && keepAliveActiveForSongId != activeSong.id) {
+                            startNotificationKeepAliveForSong(activeSong)
+                        } else if (controller != null && !controller.isPlaying && controller.mediaItemCount > 0) {
                             controller.play()
                         }
                     }
@@ -499,8 +503,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        // Pre-warm hidden backstage WebView on main thread
-        backstagePlayer.getOrCreateWebView()
+        // Pre-warm hidden backstage WebView and YouTube SPA shell on main thread
+        backstagePlayer.preWarmEngine()
         initializeMediaController()
         startProgressPoller()
         if (checkAudioPermissionGranted()) {
@@ -734,12 +738,17 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             // 3. Primary Engine for ALL Admin & Online Songs:
-            // Play immediately via BackstageYouTubePlayerController AND activate the Foreground
-            // MediaSessionService Notification Bar + WakeLock keep-alive!
+            // Play immediately via BackstageYouTubePlayerController without AudioTrack contention
             isUsingExoPlayerFallback = false
+            keepAliveActiveForSongId = null
             _activeStreamEngine.value = "Backstage YouTube Engine"
             backstagePlayer.loadVideoById(song.cleanVideoId)
-            startNotificationKeepAliveForSong(song)
+
+            // Fallback keep-alive activation if user locks screen before STATE_PLAYING arrives
+            delay(1800L)
+            if (!isUsingExoPlayerFallback && _currentSong.value?.id == song.id && keepAliveActiveForSongId != song.id) {
+                startNotificationKeepAliveForSong(song)
+            }
         }
     }
 
@@ -756,6 +765,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
+        keepAliveActiveForSongId = song.id
         val silentUri = MusicPlaybackService.getOrCreateSilentWavUri(appContext)
         val artworkUri = if (song.highResBannerUrl.isNotBlank()) {
             Uri.parse(song.highResBannerUrl)

@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -14,15 +15,17 @@ import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.example.models.Song
+import java.io.ByteArrayInputStream
 
 /**
- * Custom WebView that always reports View.VISIBLE to Chromium and ignores lifecycle pause
- * calls so HTML5 audio playback continues uninterrupted when covered by the Album Banner,
- * when the app is minimized to the background, or when the phone screen is turned off.
+ * Custom WebView that always reports View.VISIBLE and focused to Chromium so HTML5 audio
+ * decoding runs at full priority with zero throttling when covered by the Album Banner,
+ * when minimized to the background, or when the device screen is turned off.
  */
 class BackstageAudioWebView(context: Context) : WebView(context) {
     override fun onWindowVisibilityChanged(visibility: Int) {
@@ -60,6 +63,7 @@ class BackstageYouTubePlayerController(
     private var currentLoadedVideoId: String = ""
     private var currentPlaybackRate: Float = 1.0f
     private var userRequestedPause: Boolean = false
+    private var isPlayerPageLoaded: Boolean = false
 
     @SuppressLint("SetJavaScriptEnabled")
     fun getOrCreateWebView(): BackstageAudioWebView {
@@ -70,11 +74,19 @@ class BackstageYouTubePlayerController(
 
         val created = BackstageAudioWebView(context.applicationContext).apply {
             setBackgroundColor(Color.BLACK)
+            setLayerType(View.LAYER_TYPE_HARDWARE, null)
             isVerticalScrollBarEnabled = false
             isHorizontalScrollBarEnabled = false
             isFocusable = false
             isFocusableInTouchMode = false
             keepScreenOn = true
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                try {
+                    setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
+                } catch (_: Exception) {
+                }
+            }
 
             settings.apply {
                 javaScriptEnabled = true
@@ -105,16 +117,33 @@ class BackstageYouTubePlayerController(
                 override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
                     return true
                 }
-
-                override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                    super.onProgressChanged(view, newProgress)
-                    if (newProgress >= 20) {
-                        injectVideoBridgeScript()
-                    }
-                }
             }
 
             webViewClient = object : WebViewClient() {
+                override fun shouldInterceptRequest(
+                    view: WebView?,
+                    request: WebResourceRequest?
+                ): WebResourceResponse? {
+                    val url = request?.url?.toString()?.lowercase() ?: return null
+                    // Block ad networks, telemetry, and heavy channel avatars so 100% of bandwidth
+                    // goes straight to the audio stream for instant, zero-buffer playback!
+                    if (url.contains("doubleclick.net") ||
+                        url.contains("googlesyndication.com") ||
+                        url.contains("googleadservices.com") ||
+                        url.contains("/youtubei/v1/log_event") ||
+                        url.contains("/api/stats/ads") ||
+                        url.contains("/pagead/") ||
+                        url.contains("yt3.ggpht.com")
+                    ) {
+                        return WebResourceResponse(
+                            "text/plain",
+                            "utf-8",
+                            ByteArrayInputStream(ByteArray(0))
+                        )
+                    }
+                    return super.shouldInterceptRequest(view, request)
+                }
+
                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                     super.onPageStarted(view, url, favicon)
                     injectVideoBridgeScript()
@@ -122,6 +151,9 @@ class BackstageYouTubePlayerController(
 
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
+                    if (url != null && url.contains("youtube.com/watch")) {
+                        isPlayerPageLoaded = true
+                    }
                     injectVideoBridgeScript()
                 }
 
@@ -149,6 +181,19 @@ class BackstageYouTubePlayerController(
         return created
     }
 
+    /**
+     * Pre-warms YouTube connection & player runtime at app launch so the very first song
+     * clicked by the user starts playing almost instantaneously.
+     */
+    fun preWarmEngine() {
+        mainHandler.post {
+            val view = getOrCreateWebView()
+            if (currentLoadedVideoId.isEmpty() && view.url.isNullOrBlank()) {
+                view.loadUrl("https://m.youtube.com/?hl=en")
+            }
+        }
+    }
+
     fun attachToContainer(container: ViewGroup) {
         val view = getOrCreateWebView()
         val currentParent = view.parent as? ViewGroup
@@ -165,7 +210,7 @@ class BackstageYouTubePlayerController(
             view.onResume()
             view.resumeTimers()
             if (!userRequestedPause && currentLoadedVideoId.isNotBlank()) {
-                mainHandler.postDelayed({ playVideo() }, 60L)
+                mainHandler.postDelayed({ playVideo() }, 50L)
             }
         }
     }
@@ -183,8 +228,44 @@ class BackstageYouTubePlayerController(
             val view = getOrCreateWebView()
             view.onResume()
             view.resumeTimers()
-            val watchUrl = "https://m.youtube.com/watch?v=$cleanId&autoplay=1"
-            view.loadUrl(watchUrl)
+
+            val currentUrl = view.url.orEmpty()
+            // Fast SPA Track Switch: If #movie_player is already loaded on m.youtube.com/watch,
+            // switch video via player API in 0ms without a full page reload!
+            if (isPlayerPageLoaded && currentUrl.contains("youtube.com/watch")) {
+                view.evaluateJavascript(
+                    """
+                    (function() {
+                        try {
+                            window.__akUserPaused = false;
+                            window.__akTargetVideoId = '$cleanId';
+                            var mp = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
+                            if (mp && typeof mp.loadVideoById === 'function') {
+                                mp.loadVideoById('$cleanId', 0, 'tiny');
+                                if (typeof mp.setPlaybackQualityRange === 'function') {
+                                    mp.setPlaybackQualityRange('tiny', 'tiny');
+                                }
+                                if (typeof mp.playVideo === 'function') {
+                                    mp.playVideo();
+                                }
+                                return 'SPA_OK';
+                            }
+                        } catch (e) {}
+                        return 'RELOAD';
+                    })();
+                    """.trimIndent()
+                ) { result ->
+                    if (result == null || !result.contains("SPA_OK")) {
+                        val watchUrl = "https://m.youtube.com/watch?v=$cleanId&autoplay=1"
+                        view.loadUrl(watchUrl)
+                    } else {
+                        injectVideoBridgeScript()
+                    }
+                }
+            } else {
+                val watchUrl = "https://m.youtube.com/watch?v=$cleanId&autoplay=1"
+                view.loadUrl(watchUrl)
+            }
         }
     }
 
@@ -197,15 +278,18 @@ class BackstageYouTubePlayerController(
                 """
                 (function() {
                     window.__akUserPaused = false;
-                    if (window.ytPlayer && typeof window.ytPlayer.playVideo === 'function') {
-                        window.ytPlayer.playVideo();
+                    var mp = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
+                    if (mp && typeof mp.playVideo === 'function') {
+                        mp.playVideo();
                     }
                     var v = document.querySelector('video');
                     if (v) {
                         v.muted = false;
                         v.volume = 1.0;
-                        var p = v.play();
-                        if (p && typeof p.catch === 'function') { p.catch(function(){}); }
+                        if (v.paused) {
+                            var p = v.play();
+                            if (p && typeof p.catch === 'function') { p.catch(function(){}); }
+                        }
                     }
                 })();
                 """.trimIndent()
@@ -220,11 +304,12 @@ class BackstageYouTubePlayerController(
                 """
                 (function() {
                     window.__akUserPaused = true;
-                    if (window.ytPlayer && typeof window.ytPlayer.pauseVideo === 'function') {
-                        window.ytPlayer.pauseVideo();
+                    var mp = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
+                    if (mp && typeof mp.pauseVideo === 'function') {
+                        mp.pauseVideo();
                     }
                     var v = document.querySelector('video');
-                    if (v) {
+                    if (v && !v.paused) {
                         v.pause();
                     }
                 })();
@@ -239,13 +324,14 @@ class BackstageYouTubePlayerController(
             evaluateJs(
                 """
                 (function() {
-                    if (window.ytPlayer && typeof window.ytPlayer.seekTo === 'function') {
-                        window.ytPlayer.seekTo($clamped, true);
+                    var mp = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
+                    if (mp && typeof mp.seekTo === 'function') {
+                        mp.seekTo($clamped, true);
                     }
                     var v = document.querySelector('video');
                     if (v) {
                         v.currentTime = $clamped;
-                        if (!window.__akUserPaused) {
+                        if (!window.__akUserPaused && v.paused) {
                             var p = v.play();
                             if (p && typeof p.catch === 'function') { p.catch(function(){}); }
                         }
@@ -263,8 +349,9 @@ class BackstageYouTubePlayerController(
                 """
                 (function() {
                     window.__akPlaybackRate = $speed;
-                    if (window.ytPlayer && typeof window.ytPlayer.setPlaybackRate === 'function') {
-                        window.ytPlayer.setPlaybackRate($speed);
+                    var mp = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
+                    if (mp && typeof mp.setPlaybackRate === 'function') {
+                        mp.setPlaybackRate($speed);
                     }
                     var v = document.querySelector('video');
                     if (v) {
@@ -284,7 +371,7 @@ class BackstageYouTubePlayerController(
                 window.__akUserPaused = $pausedFlag;
                 window.__akPlaybackRate = $rate;
 
-                // Spoof Page Visibility API so m.youtube.com NEVER pauses audio in background or screen-off
+                // 1. Spoof Page Visibility API so background / screen-off never pauses audio
                 try {
                     Object.defineProperty(document, 'hidden', { get: function() { return false; }, configurable: true });
                     Object.defineProperty(document, 'webkitHidden', { get: function() { return false; }, configurable: true });
@@ -293,30 +380,67 @@ class BackstageYouTubePlayerController(
                     document.hasFocus = function() { return true; };
                 } catch (e) {}
 
+                // 2. Lock YouTube player to 'tiny' (144p) video quality so 95% of bandwidth goes to crystal-clear audio!
+                function optimizePlayerBandwidth() {
+                    try {
+                        var mp = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
+                        if (mp) {
+                            if (typeof mp.setPlaybackQualityRange === 'function') {
+                                mp.setPlaybackQualityRange('tiny', 'tiny');
+                            }
+                            if (typeof mp.setPlaybackQuality === 'function') {
+                                mp.setPlaybackQuality('tiny');
+                            }
+                            if (typeof mp.unMute === 'function') {
+                                mp.unMute();
+                            }
+                            if (typeof mp.setVolume === 'function') {
+                                mp.setVolume(100);
+                            }
+                        }
+                    } catch (e) {}
+                }
+                optimizePlayerBandwidth();
+
                 if (window.__akBridgeInstalled) return;
                 window.__akBridgeInstalled = true;
+                window.__akLastPlayAttempt = 0;
 
-                window.addEventListener('visibilitychange', function(e) {
-                    e.stopImmediatePropagation();
-                }, true);
-                window.addEventListener('webkitvisibilitychange', function(e) {
-                    e.stopImmediatePropagation();
-                }, true);
-                document.addEventListener('visibilitychange', function(e) {
-                    e.stopImmediatePropagation();
-                }, true);
-                window.addEventListener('pagehide', function(e) {
-                    e.stopImmediatePropagation();
-                }, true);
-                window.addEventListener('blur', function(e) {
-                    e.stopImmediatePropagation();
-                }, true);
+                window.addEventListener('visibilitychange', function(e) { e.stopImmediatePropagation(); }, true);
+                window.addEventListener('webkitvisibilitychange', function(e) { e.stopImmediatePropagation(); }, true);
+                document.addEventListener('visibilitychange', function(e) { e.stopImmediatePropagation(); }, true);
+                window.addEventListener('pagehide', function(e) { e.stopImmediatePropagation(); }, true);
+                window.addEventListener('blur', function(e) { e.stopImmediatePropagation(); }, true);
+
+                function safePlayVideo(v) {
+                    if (!v || window.__akUserPaused || !v.paused || v.ended) return;
+                    var now = Date.now();
+                    if (now - window.__akLastPlayAttempt < 1100) return;
+                    window.__akLastPlayAttempt = now;
+
+                    v.muted = false;
+                    v.volume = 1.0;
+                    var p = v.play();
+                    if (p && typeof p.catch === 'function') {
+                        p.catch(function() {
+                            var mp = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
+                            if (mp && typeof mp.playVideo === 'function') {
+                                mp.playVideo();
+                            } else {
+                                var btn = document.querySelector('.ytp-large-play-button, .ytp-play-button, button.player-control-play-pause-icon');
+                                if (btn) { btn.click(); }
+                            }
+                        });
+                    }
+                }
 
                 function hookVideoElement(v) {
                     if (!v || v.__akHooked) return;
                     v.__akHooked = true;
                     v.setAttribute('playsinline', 'true');
                     v.setAttribute('webkit-playsinline', 'true');
+                    v.setAttribute('preload', 'auto');
+                    v.preload = 'auto';
                     v.playsInline = true;
                     v.muted = false;
                     v.volume = 1.0;
@@ -324,7 +448,17 @@ class BackstageYouTubePlayerController(
                         v.playbackRate = window.__akPlaybackRate;
                     }
 
+                    optimizePlayerBandwidth();
+
+                    v.addEventListener('canplay', function() {
+                        optimizePlayerBandwidth();
+                        if (!window.__akUserPaused && v.paused) {
+                            safePlayVideo(v);
+                        }
+                    });
+
                     v.addEventListener('playing', function() {
+                        optimizePlayerBandwidth();
                         if (window.AndroidBridge) {
                             window.AndroidBridge.onStateChange(1);
                             if (v.duration && v.duration > 0) {
@@ -344,14 +478,12 @@ class BackstageYouTubePlayerController(
                             if (window.AndroidBridge) {
                                 window.AndroidBridge.onStateChange(2);
                             }
-                        } else if (!v.ended) {
-                            // Auto-resume immediately if YouTube tried to pause on background/screen-off
+                        } else if (!v.ended && v.readyState >= 2) {
                             setTimeout(function() {
                                 if (!window.__akUserPaused && v.paused && !v.ended) {
-                                    var p = v.play();
-                                    if (p && typeof p.catch === 'function') { p.catch(function(){}); }
+                                    safePlayVideo(v);
                                 }
-                            }, 50);
+                            }, 150);
                         }
                     });
 
@@ -362,6 +494,7 @@ class BackstageYouTubePlayerController(
                     });
 
                     v.addEventListener('loadedmetadata', function() {
+                        optimizePlayerBandwidth();
                         if (v.duration && v.duration > 0 && window.AndroidBridge) {
                             window.AndroidBridge.onDuration(v.duration);
                         }
@@ -424,14 +557,10 @@ class BackstageYouTubePlayerController(
                             v.volume = 1.0;
                         }
 
+                        // Only trigger play if readyState >= 2 (enough data buffered) or initial unstarted state,
+                        // respecting the 1100ms cooldown so we never interrupt Chromium's audio pre-buffer!
                         if (!window.__akUserPaused && v.paused && !v.ended) {
-                            var playPromise = v.play();
-                            if (playPromise && typeof playPromise.catch === 'function') {
-                                playPromise.catch(function() {
-                                    var playBtn = document.querySelector('.ytp-large-play-button, .ytp-play-button, button.player-control-play-pause-icon');
-                                    if (playBtn) { playBtn.click(); }
-                                });
-                            }
+                            safePlayVideo(v);
                         }
 
                         if (!v.paused && v.currentTime > 0 && window.AndroidBridge) {
@@ -442,7 +571,7 @@ class BackstageYouTubePlayerController(
                             }
                         }
                     } catch (e) {}
-                }, 180);
+                }, 350);
             })();
         """.trimIndent()
         evaluateJs(script)

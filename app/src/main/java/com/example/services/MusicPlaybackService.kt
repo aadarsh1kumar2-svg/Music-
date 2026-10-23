@@ -43,13 +43,13 @@ class MusicPlaybackService : MediaSessionService() {
          * media controls active while BackstageYouTubePlayerController streams online audio.
          */
         fun getOrCreateSilentWavUri(context: Context): String {
-            val file = File(context.cacheDir, "aadify_keepalive_silence.wav")
-            if (file.exists() && file.length() > 100L) {
+            val file = File(context.cacheDir, "aadify_keepalive_silence_30s.wav")
+            if (file.exists() && file.length() > 1000L) {
                 return Uri.fromFile(file).toString()
             }
             try {
                 val sampleRate = 8000
-                val durationSeconds = 3
+                val durationSeconds = 30
                 val numSamples = sampleRate * durationSeconds
                 val dataSize = numSamples * 2 // 16-bit mono
                 val buffer = ByteBuffer.allocate(44 + dataSize).order(ByteOrder.LITTLE_ENDIAN)
