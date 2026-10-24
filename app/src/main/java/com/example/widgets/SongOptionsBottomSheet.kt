@@ -188,29 +188,7 @@ fun SongOptionsBottomSheet(
                 }
             )
 
-            // 4. Watch Video (only for online tracks with a YouTube ID)
-            if (song.cleanVideoId.isNotBlank()) {
-                OptionSheetRow(
-                    icon = Icons.Default.SmartDisplay,
-                    label = stringResource(id = R.string.option_watch_video),
-                    showChevron = false,
-                    testTag = "sheet_option_watch_video",
-                    onClick = {
-                        onDismiss()
-                        val vid = song.cleanVideoId
-                        val url = if (vid.startsWith("http")) vid else "https://www.youtube.com/watch?v=$vid"
-                        try {
-                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
-                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            }
-                            context.startActivity(intent)
-                        } catch (_: Exception) {
-                        }
-                    }
-                )
-            }
-
-            // 5. Download Offline (ONLY shown if Admin enabled download permission for this song)
+            // 4. Download Offline (ONLY shown if Admin enabled download permission for this song)
             if (song.allowDownload) {
                 OptionSheetRow(
                     icon = Icons.Default.Download,

@@ -256,27 +256,7 @@ fun FullScreenPlayerModal(
                     ),
                 contentAlignment = Alignment.Center
             ) {
-                // Hidden Backstage YouTube WebView directly layered behind the album banner container (exact same bounds)
-                AndroidView(
-                    factory = { ctx ->
-                        FrameLayout(ctx).apply {
-                            layoutParams = ViewGroup.LayoutParams(
-                                ViewGroup.LayoutParams.MATCH_PARENT,
-                                ViewGroup.LayoutParams.MATCH_PARENT
-                            )
-                            onAttachBackstagePlayer(this)
-                        }
-                    },
-                    update = { container ->
-                        onAttachBackstagePlayer(container)
-                    },
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .clip(RoundedCornerShape(18.dp))
-                        .testTag("hidden_backstage_youtube_webview")
-                )
-
-                // Existing Album Banner Poster directly on top (opaque background completely covering the WebView)
+                // Album Banner Poster
                 Box(
                     modifier = Modifier
                         .fillMaxSize()

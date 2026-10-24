@@ -87,7 +87,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
+import androidx.compose.runtime.DisposableEffect
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.providers.LibrarySubScreen
@@ -235,39 +239,50 @@ fun AKMusicAppRoot(
         }
     }
 
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP || event == Lifecycle.Event.ON_RESUME) {
+                musicViewModel.keepEngineAwakeInBackground()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(PureBlack)
     ) {
-        // Backstage YouTube Engine layer (behind the opaque PureBlack UI when Full-Screen Player is collapsed)
-        if (!isFullScreenPlayerOpen) {
+        // Permanent Backstage YouTube Engine layer (never detached when opening/closing player modal!)
+        Box(
+            modifier = Modifier
+                .width(240.dp)
+                .height(240.dp)
+        ) {
+            AndroidView(
+                factory = { ctx ->
+                    FrameLayout(ctx).apply {
+                        layoutParams = ViewGroup.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT
+                        )
+                        musicViewModel.attachBackstagePlayer(this)
+                    }
+                },
+                update = { container ->
+                    musicViewModel.attachBackstagePlayer(container)
+                },
+                modifier = Modifier.fillMaxSize()
+            )
             Box(
                 modifier = Modifier
-                    .width(240.dp)
-                    .height(240.dp)
-            ) {
-                AndroidView(
-                    factory = { ctx ->
-                        FrameLayout(ctx).apply {
-                            layoutParams = ViewGroup.LayoutParams(
-                                ViewGroup.LayoutParams.MATCH_PARENT,
-                                ViewGroup.LayoutParams.MATCH_PARENT
-                            )
-                            musicViewModel.attachBackstagePlayer(this)
-                        }
-                    },
-                    update = { container ->
-                        musicViewModel.attachBackstagePlayer(container)
-                    },
-                    modifier = Modifier.fillMaxSize()
-                )
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(PureBlack)
-                )
-            }
+                    .fillMaxSize()
+                    .background(PureBlack)
+            )
         }
 
         if (!showSplash && (userName.isBlank() || isEditNameDialogOpen)) {
@@ -644,10 +659,7 @@ fun AKMusicAppRoot(
                     onOpenSongOptions = { musicViewModel.openSongOptions(it) },
                     onSetUpNextOpen = { musicViewModel.setUpNextSheetOpen(it) },
                     onSetLyricsOpen = { musicViewModel.setLyricsOverlayOpen(it) },
-                    onSelectQueueSong = { musicViewModel.playSong(it, queue) },
-                    onAttachBackstagePlayer = { container ->
-                        musicViewModel.attachBackstagePlayer(container)
-                    }
+                    onSelectQueueSong = { musicViewModel.playSong(it, queue) }
                 )
             }
         }

@@ -249,17 +249,22 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     // Media3 Controller (Foreground MediaSessionService for Notification Bar + Lockscreen + Offline Playback)
     private var controllerFuture: ListenableFuture<MediaController>? = null
     private var mediaController: MediaController? = null
-    private var pendingPlaybackPair: Pair<Song, String>? = null
-    private var pendingKeepAliveSong: Song? = null
-    private var keepAliveActiveForSongId: String? = null
     private var isUsingExoPlayerFallback = false
+    private var hasHandledEndForCurrentSong = false
 
     // Hidden Backstage YouTube Player Controller (Primary Engine for all Admin & Online Songs!)
-    private val backstagePlayer = BackstageYouTubePlayerController(
+    private val backstagePlayer: BackstageYouTubePlayerController = BackstageYouTubePlayerController(
         context = appContext,
         onProgressUpdate = { posMs ->
-            if (!isUsingExoPlayerFallback) {
+            if (!isUsingExoPlayerFallback && !hasHandledEndForCurrentSong) {
                 _currentPositionMs.value = posMs
+                val dur = _durationMs.value
+                if (dur > 8000L && posMs >= dur - 650L) {
+                    hasHandledEndForCurrentSong = true
+                    _isBuffering.value = false
+                    _isPlaying.value = false
+                    handleTrackEnded()
+                }
             }
         },
         onDurationUpdate = { durMs ->
@@ -271,31 +276,29 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             if (!isUsingExoPlayerFallback) {
                 when (state) {
                     BackstageYouTubePlayerController.STATE_PLAYING -> {
-                        _isBuffering.value = false
-                        _isPlaying.value = true
-                        val activeSong = _currentSong.value
-                        val controller = mediaController
-                        if (activeSong != null && keepAliveActiveForSongId != activeSong.id) {
-                            startNotificationKeepAliveForSong(activeSong)
-                        } else if (controller != null && !controller.isPlaying && controller.mediaItemCount > 0) {
-                            controller.play()
+                        if (!hasHandledEndForCurrentSong) {
+                            _isBuffering.value = false
+                            _isPlaying.value = true
+                            MusicPlaybackService.syncPlayState(true)
                         }
                     }
                     BackstageYouTubePlayerController.STATE_PAUSED -> {
                         _isBuffering.value = false
                         _isPlaying.value = false
-                        val controller = mediaController
-                        if (controller != null && controller.isPlaying) {
-                            controller.pause()
-                        }
+                        MusicPlaybackService.syncPlayState(false)
                     }
                     BackstageYouTubePlayerController.STATE_BUFFERING -> {
-                        _isBuffering.value = true
+                        if (!hasHandledEndForCurrentSong) {
+                            _isBuffering.value = true
+                        }
                     }
                     BackstageYouTubePlayerController.STATE_ENDED -> {
-                        _isBuffering.value = false
-                        _isPlaying.value = false
-                        handleTrackEnded()
+                        if (!hasHandledEndForCurrentSong) {
+                            hasHandledEndForCurrentSong = true
+                            _isBuffering.value = false
+                            _isPlaying.value = false
+                            handleTrackEnded()
+                        }
                     }
                 }
             }
@@ -329,6 +332,13 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     fun attachBackstagePlayer(container: ViewGroup) {
         backstagePlayer.attachToContainer(container)
+    }
+
+    fun keepEngineAwakeInBackground() {
+        if (_currentSong.value != null && _isPlaying.value && !isUsingExoPlayerFallback) {
+            backstagePlayer.keepAwake()
+            MusicPlaybackService.syncPlayState(true)
+        }
     }
 
     // Navigation & Modals
@@ -491,20 +501,35 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
         MusicPlaybackService.onTogglePlayPauseCallback = { shouldPlay ->
             viewModelScope.launch {
-                if (!isUsingExoPlayerFallback) {
+                if (isUsingExoPlayerFallback) {
+                    _isPlaying.value = shouldPlay
+                    if (shouldPlay) _isBuffering.value = false
+                } else {
                     if (shouldPlay) {
                         backstagePlayer.playVideo()
                         _isPlaying.value = true
+                        _isBuffering.value = false
                     } else {
                         backstagePlayer.pauseVideo()
                         _isPlaying.value = false
+                        _isBuffering.value = false
                     }
                 }
             }
         }
+        MusicPlaybackService.onExoPlayerTrackEndedCallback = {
+            viewModelScope.launch {
+                if (isUsingExoPlayerFallback && !hasHandledEndForCurrentSong) {
+                    hasHandledEndForCurrentSong = true
+                    _isBuffering.value = false
+                    _isPlaying.value = false
+                    handleTrackEnded()
+                }
+            }
+        }
 
-        // Pre-warm hidden backstage WebView and YouTube SPA shell on main thread
-        backstagePlayer.preWarmEngine()
+        // Create hidden backstage WebView on main thread
+        backstagePlayer.getOrCreateWebView()
         initializeMediaController()
         startProgressPoller()
         if (checkAudioPermissionGranted()) {
@@ -523,17 +548,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             future.addListener(
                 {
                     try {
-                        val controller = future.get()
-                        mediaController = controller
-                        attachPlayerListener(controller)
-                        pendingPlaybackPair?.let { (song, streamUri) ->
-                            pendingPlaybackPair = null
-                            startExoPlayerWithUri(song, streamUri)
-                        }
-                        pendingKeepAliveSong?.let { song ->
-                            pendingKeepAliveSong = null
-                            startNotificationKeepAliveForSong(song)
-                        }
+                        mediaController = future.get()
                     } catch (e: Exception) {
                         Log.e(TAG, "Failed to connect MediaController", e)
                     }
@@ -545,48 +560,23 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun attachPlayerListener(controller: MediaController) {
-        controller.addListener(object : Player.Listener {
-            override fun onIsPlayingChanged(isPlaying: Boolean) {
-                if (isUsingExoPlayerFallback) {
-                    _isPlaying.value = isPlaying
-                    if (isPlaying) {
-                        _isBuffering.value = false
-                    }
-                }
-            }
-
-            override fun onPlaybackStateChanged(playbackState: Int) {
-                if (!isUsingExoPlayerFallback) return
-                _isBuffering.value = (playbackState == Player.STATE_BUFFERING)
-                if (playbackState == Player.STATE_READY) {
-                    _isBuffering.value = false
-                    _durationMs.value = controller.duration.coerceAtLeast(0L)
-                } else if (playbackState == Player.STATE_ENDED) {
-                    _isBuffering.value = false
-                    handleTrackEnded()
-                }
-            }
-
-            override fun onPlayerError(error: PlaybackException) {
-                if (!isUsingExoPlayerFallback) return
-                Log.e(TAG, "ExoPlayer PlaybackException: ${error.message}", error)
-                _isBuffering.value = false
-                _isPlaying.value = false
-            }
-        })
-    }
-
     private fun startProgressPoller() {
         viewModelScope.launch {
             while (isActive) {
                 if (isUsingExoPlayerFallback) {
-                    val controller = mediaController
-                    if (controller != null && controller.isPlaying) {
-                        _currentPositionMs.value = controller.currentPosition.coerceAtLeast(0L)
-                        val total = controller.duration
-                        if (total > 0) {
+                    val isPlayingNow = MusicPlaybackService.isExoPlaying()
+                    _isPlaying.value = isPlayingNow
+                    if (isPlayingNow) {
+                        _isBuffering.value = false
+                        val pos = MusicPlaybackService.getCurrentExoPositionMs()
+                        val total = MusicPlaybackService.getCurrentExoDurationMs()
+                        _currentPositionMs.value = pos
+                        if (total > 0L) {
                             _durationMs.value = total
+                            if (!hasHandledEndForCurrentSong && total > 4000L && pos >= total - 500L) {
+                                hasHandledEndForCurrentSong = true
+                                handleTrackEnded()
+                            }
                         }
                     }
                 }
@@ -690,11 +680,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         hasRetriedCurrentTrack = false
+        hasHandledEndForCurrentSong = false
         _currentSong.value = song
         _currentPositionMs.value = 0L
         _durationMs.value = 0L
         _isBuffering.value = true
-        _isPlaying.value = false
+        _isPlaying.value = true
 
         viewModelScope.launch {
             val existing = libraryDao.getHistoryItem(song.id)
@@ -738,125 +729,54 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             // 3. Primary Engine for ALL Admin & Online Songs:
-            // Play immediately via BackstageYouTubePlayerController without AudioTrack contention
+            // Play immediately via BackstageYouTubePlayerController AND sync the Foreground
+            // MediaSessionService Notification Bar + WakeLock!
             isUsingExoPlayerFallback = false
-            keepAliveActiveForSongId = null
             _activeStreamEngine.value = "Backstage YouTube Engine"
             backstagePlayer.loadVideoById(song.cleanVideoId)
-
-            // Fallback keep-alive activation if user locks screen before STATE_PLAYING arrives
-            delay(1800L)
-            if (!isUsingExoPlayerFallback && _currentSong.value?.id == song.id && keepAliveActiveForSongId != song.id) {
-                startNotificationKeepAliveForSong(song)
-            }
+            MusicPlaybackService.syncNowPlaying(
+                context = appContext,
+                song = song,
+                isPlaying = true,
+                directStreamUri = null,
+                playbackSpeed = _playbackSpeed.value
+            )
         }
-    }
-
-    /**
-     * Starts a silent looping audio session in MusicPlaybackService with the current song's
-     * Title, Artist, and Artwork so the Android Notification Bar controls (Previous, Play/Pause, Next)
-     * and background/screen-off WakeLock stay active while BackstageYouTubePlayerController streams audio.
-     */
-    private fun startNotificationKeepAliveForSong(song: Song) {
-        val controller = mediaController
-        if (controller == null) {
-            pendingKeepAliveSong = song
-            initializeMediaController()
-            return
-        }
-
-        keepAliveActiveForSongId = song.id
-        val silentUri = MusicPlaybackService.getOrCreateSilentWavUri(appContext)
-        val artworkUri = if (song.highResBannerUrl.isNotBlank()) {
-            Uri.parse(song.highResBannerUrl)
-        } else {
-            null
-        }
-
-        val metadataBuilder = MediaMetadata.Builder()
-            .setTitle(song.title)
-            .setArtist(song.artist)
-            .setDisplayTitle(song.title)
-            .setSubtitle(song.artist)
-        if (artworkUri != null) {
-            metadataBuilder.setArtworkUri(artworkUri)
-        }
-
-        val mediaItem = MediaItem.Builder()
-            .setMediaId(song.id)
-            .setUri(silentUri)
-            .setMediaMetadata(metadataBuilder.build())
-            .build()
-
-        controller.volume = 0f
-        controller.repeatMode = Player.REPEAT_MODE_ONE
-        controller.setMediaItem(mediaItem)
-        controller.prepare()
-        controller.play()
     }
 
     private fun startExoPlayerWithUri(song: Song, streamUri: String) {
-        val controller = mediaController
-        if (controller == null) {
-            pendingPlaybackPair = song to streamUri
-            initializeMediaController()
-            return
-        }
-
-        val artworkUri = if (song.highResBannerUrl.isNotBlank()) {
-            Uri.parse(song.highResBannerUrl)
-        } else {
-            null
-        }
-
-        val metadataBuilder = MediaMetadata.Builder()
-            .setTitle(song.title)
-            .setArtist(song.artist)
-            .setDisplayTitle(song.title)
-            .setSubtitle(song.artist)
-        if (artworkUri != null) {
-            metadataBuilder.setArtworkUri(artworkUri)
-        }
-
-        val mediaItem = MediaItem.Builder()
-            .setMediaId(song.id)
-            .setUri(streamUri)
-            .setMediaMetadata(metadataBuilder.build())
-            .build()
-
-        controller.volume = 1f
-        controller.repeatMode = Player.REPEAT_MODE_OFF
-        controller.setMediaItem(mediaItem)
-        controller.playbackParameters = PlaybackParameters(_playbackSpeed.value)
-        controller.prepare()
-        controller.play()
+        _isBuffering.value = false
         _isPlaying.value = true
+        MusicPlaybackService.syncNowPlaying(
+            context = appContext,
+            song = song,
+            isPlaying = true,
+            directStreamUri = streamUri,
+            playbackSpeed = _playbackSpeed.value
+        )
     }
 
     fun togglePlayPause() {
         val activeSong = _currentSong.value ?: return
         if (isUsingExoPlayerFallback) {
-            val controller = mediaController ?: return
-            if (controller.isPlaying) {
-                controller.pause()
-                _isPlaying.value = false
-            } else {
-                if (controller.mediaItemCount == 0) {
-                    playSong(activeSong, _queue.value)
-                } else {
-                    controller.play()
-                    _isPlaying.value = true
-                }
-            }
+            val nextPlay = !_isPlaying.value
+            _isPlaying.value = nextPlay
+            _isBuffering.value = false
+            MusicPlaybackService.syncPlayState(nextPlay)
         } else {
             if (_isPlaying.value) {
                 backstagePlayer.pauseVideo()
-                mediaController?.pause()
+                MusicPlaybackService.syncPlayState(false)
                 _isPlaying.value = false
+                _isBuffering.value = false
             } else {
-                backstagePlayer.playVideo()
-                mediaController?.play()
-                _isPlaying.value = true
+                if (hasHandledEndForCurrentSong) {
+                    playSong(activeSong, _queue.value)
+                } else {
+                    backstagePlayer.playVideo()
+                    MusicPlaybackService.syncPlayState(true)
+                    _isPlaying.value = true
+                }
             }
         }
     }
@@ -867,7 +787,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         _currentPositionMs.value = clampedMs
 
         if (isUsingExoPlayerFallback) {
-            mediaController?.seekTo(clampedMs)
+            MusicPlaybackService.syncSeekPosition(clampedMs)
         } else {
             val targetSeconds = clampedMs / 1000.0
             backstagePlayer.seekToSeconds(targetSeconds)
@@ -882,9 +802,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun skipToNext() {
-        val list = _queue.value
         val current = _currentSong.value ?: return
-        if (list.isEmpty()) return
+        val list = _queue.value.ifEmpty { allSongs.value }
+        if (list.isEmpty()) {
+            playSong(current, listOf(current))
+            return
+        }
 
         if (_isShuffleEnabled.value && list.size > 1) {
             val candidates = list.filterNot { it.id == current.id }
@@ -898,14 +821,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun skipToPrevious() {
-        if (_currentPositionMs.value > 4000L) {
-            seekToPosition(0L)
+        val current = _currentSong.value ?: return
+        val list = _queue.value.ifEmpty { allSongs.value }
+        if (list.isEmpty()) {
+            playSong(current, listOf(current))
             return
         }
-
-        val list = _queue.value
-        val current = _currentSong.value ?: return
-        if (list.isEmpty()) return
 
         val idx = list.indexOfFirst { it.id == current.id }
         val prevIndex = if (idx > 0) idx - 1 else list.lastIndex
@@ -914,28 +835,17 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun handleTrackEnded() {
         val current = _currentSong.value ?: return
-        val list = _queue.value
+        val list = _queue.value.ifEmpty { allSongs.value }
+        if (list.isEmpty()) {
+            playSong(current, listOf(current))
+            return
+        }
         when (_repeatMode.value) {
             RepeatModeState.ONE -> {
-                seekToPosition(0L)
-                if (isUsingExoPlayerFallback) {
-                    mediaController?.play()
-                } else {
-                    backstagePlayer.playVideo()
-                }
+                playSong(current, list)
             }
-            RepeatModeState.ALL -> {
+            RepeatModeState.ALL, RepeatModeState.OFF -> {
                 skipToNext()
-            }
-            RepeatModeState.OFF -> {
-                val idx = list.indexOfFirst { it.id == current.id }
-                if (idx in 0 until list.lastIndex || _isShuffleEnabled.value) {
-                    skipToNext()
-                } else if (list.size > 1) {
-                    skipToNext()
-                } else {
-                    _isPlaying.value = false
-                }
             }
         }
     }
@@ -945,7 +855,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         val nextSpeed = PLAYBACK_SPEEDS[(currentIdx + 1) % PLAYBACK_SPEEDS.size]
         _playbackSpeed.value = nextSpeed
         backstagePlayer.setPlaybackSpeed(nextSpeed)
-        mediaController?.playbackParameters = PlaybackParameters(nextSpeed)
+        MusicPlaybackService.syncPlaybackSpeed(nextSpeed)
         emitSnackbar("Playback speed set to ${nextSpeed}x")
     }
 

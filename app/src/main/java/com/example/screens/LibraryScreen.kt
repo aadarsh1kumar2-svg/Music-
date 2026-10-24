@@ -518,7 +518,13 @@ private fun LibrarySongCollectionView(
 
                 val isRepeatActive = repeatMode != RepeatModeState.OFF
                 OutlinedButton(
-                    onClick = onCycleRepeatMode,
+                    onClick = {
+                        val wasOff = repeatMode == RepeatModeState.OFF
+                        onCycleRepeatMode()
+                        if (wasOff && songs.isNotEmpty() && songs.none { it.id == currentSong?.id }) {
+                            onSongClick(songs.first(), songs)
+                        }
+                    },
                     shape = RoundedCornerShape(24.dp),
                     colors = ButtonDefaults.outlinedButtonColors(
                         containerColor = if (isRepeatActive) SpotifyDarkGreenPill else SurfaceDarkCard,
@@ -540,9 +546,9 @@ private fun LibrarySongCollectionView(
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
                         text = when (repeatMode) {
-                            RepeatModeState.OFF -> "Repeat Off"
-                            RepeatModeState.ALL -> "Repeat All"
-                            RepeatModeState.ONE -> "Repeat 1"
+                            RepeatModeState.OFF -> "Repeat: OFF"
+                            RepeatModeState.ALL -> "Repeat: ON"
+                            RepeatModeState.ONE -> "Repeat: 1"
                         },
                         fontWeight = FontWeight.SemiBold,
                         fontSize = 14.sp
