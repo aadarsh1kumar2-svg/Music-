@@ -26,6 +26,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 class FirebaseSongsService(private val context: Context) {
@@ -38,189 +39,29 @@ class FirebaseSongsService(private val context: Context) {
         private const val APP_ID = "1:237773536493:android:a7740030a05679148c60e4"
         private const val API_KEY = "AIzaSyDFYXjGLUHYu9whP7cawDwsunYR2f1elaE"
 
-        val DEFAULT_CURATED_SONGS = listOf(
-            Song(
-                id = "default_kesariya",
-                title = "Kesariya - Brahmastra",
-                artist = "Arijit Singh, Pritam",
-                videoId = "BddP6PYo2gs",
-                bannerUrl = "https://img.youtube.com/vi/BddP6PYo2gs/hqdefault.jpg",
-                rank = 101,
-                isTopChart = true,
-                timestamp = 1710000020000L
-            ),
-            Song(
-                id = "default_apna_bana_le",
-                title = "Apna Bana Le - Bhediya",
-                artist = "Arijit Singh, Sachin-Jigar",
-                videoId = "ElZfdU54Cp8",
-                bannerUrl = "https://img.youtube.com/vi/ElZfdU54Cp8/hqdefault.jpg",
-                rank = 102,
-                isTopChart = true,
-                timestamp = 1710000019000L
-            ),
-            Song(
-                id = "default_chaleya",
-                title = "Chaleya - Jawan",
-                artist = "Arijit Singh, Shilpa Rao, Anirudh",
-                videoId = "VAdGW7QDJiU",
-                bannerUrl = "https://img.youtube.com/vi/VAdGW7QDJiU/hqdefault.jpg",
-                rank = 103,
-                isTopChart = true,
-                timestamp = 1710000018000L
-            ),
-            Song(
-                id = "default_heeriye",
-                title = "Heeriye",
-                artist = "Jasleen Royal, Arijit Singh",
-                videoId = "RLzC55ai0eo",
-                bannerUrl = "https://img.youtube.com/vi/RLzC55ai0eo/hqdefault.jpg",
-                rank = 104,
-                isTopChart = true,
-                timestamp = 1710000017000L
-            ),
-            Song(
-                id = "default_o_maahi",
-                title = "O Maahi - Dunki",
-                artist = "Arijit Singh, Pritam",
-                videoId = "Zlqf9cuaOBw",
-                bannerUrl = "https://img.youtube.com/vi/Zlqf9cuaOBw/hqdefault.jpg",
-                rank = 105,
-                isTopChart = true,
-                timestamp = 1710000016000L
-            ),
-            Song(
-                id = "default_satranga",
-                title = "Satranga - Animal",
-                artist = "Arijit Singh, Shreyas Puranik",
-                videoId = "HrnrqYxYrbk",
-                bannerUrl = "https://img.youtube.com/vi/HrnrqYxYrbk/hqdefault.jpg",
-                rank = 106,
-                isTopChart = true,
-                timestamp = 1710000015000L
-            ),
-            Song(
-                id = "default_tauba_tauba",
-                title = "Tauba Tauba - Bad Newz",
-                artist = "Karan Aujla",
-                videoId = "LK7-_dgAVQE",
-                bannerUrl = "https://img.youtube.com/vi/LK7-_dgAVQE/hqdefault.jpg",
-                rank = 107,
-                isTopChart = true,
-                timestamp = 1710000014000L
-            ),
-            Song(
-                id = "default_aaj_ki_raat",
-                title = "Aaj Ki Raat - Stree 2",
-                artist = "Madhubanti Bagchi, Divya Kumar, Sachin-Jigar",
-                videoId = "rozTr9_s77A",
-                bannerUrl = "https://img.youtube.com/vi/rozTr9_s77A/hqdefault.jpg",
-                rank = 108,
-                isTopChart = true,
-                timestamp = 1710000013000L
-            ),
-            Song(
-                id = "default_sajni",
-                title = "Sajni - Laapataa Ladies",
-                artist = "Arijit Singh, Ram Sampath",
-                videoId = "k3g_WjLCsXM",
-                bannerUrl = "https://img.youtube.com/vi/k3g_WjLCsXM/hqdefault.jpg",
-                rank = 109,
-                isTopChart = true,
-                timestamp = 1710000012000L
-            ),
-            Song(
-                id = "default_husn",
-                title = "Husn",
-                artist = "Anuv Jain",
-                videoId = "gJLVTKhTnog",
-                bannerUrl = "https://img.youtube.com/vi/gJLVTKhTnog/hqdefault.jpg",
-                rank = 110,
-                isTopChart = true,
-                timestamp = 1710000011000L
-            ),
-            Song(
-                id = "default_tum_hi_ho",
-                title = "Tum Hi Ho - Aashiqui 2",
-                artist = "Arijit Singh, Mithoon",
-                videoId = "IJq0yyWug1k",
-                bannerUrl = "https://img.youtube.com/vi/IJq0yyWug1k/hqdefault.jpg",
-                rank = 111,
-                isTopChart = true,
-                timestamp = 1710000010000L
-            ),
-            Song(
-                id = "default_raataan_lambiyan",
-                title = "Raataan Lambiyan - Shershaah",
-                artist = "Jubin Nautiyal, Asees Kaur, Tanishk Bagchi",
-                videoId = "gvyUuxdRdR4",
-                bannerUrl = "https://img.youtube.com/vi/gvyUuxdRdR4/hqdefault.jpg",
-                rank = 112,
-                isTopChart = true,
-                timestamp = 1710000009000L
-            ),
-            Song(
-                id = "default_pasoori",
-                title = "Pasoori",
-                artist = "Ali Sethi, Shae Gill",
-                videoId = "5Eqb_-j3FDA",
-                bannerUrl = "https://img.youtube.com/vi/5Eqb_-j3FDA/hqdefault.jpg",
-                rank = 113,
-                isTopChart = true,
-                timestamp = 1710000008000L
-            ),
-            Song(
-                id = "default_blinding_lights",
-                title = "Blinding Lights",
-                artist = "The Weeknd",
-                videoId = "4NRXx6U8ABQ",
-                bannerUrl = "https://img.youtube.com/vi/4NRXx6U8ABQ/hqdefault.jpg",
-                rank = 114,
-                isTopChart = true,
-                timestamp = 1710000007000L
-            ),
-            Song(
-                id = "default_shape_of_you",
-                title = "Shape of You",
-                artist = "Ed Sheeran",
-                videoId = "JGwWNGJdvx8",
-                bannerUrl = "https://img.youtube.com/vi/JGwWNGJdvx8/hqdefault.jpg",
-                rank = 115,
-                isTopChart = true,
-                timestamp = 1710000006000L
-            ),
-            Song(
-                id = "default_starboy",
-                title = "Starboy",
-                artist = "The Weeknd, Daft Punk",
-                videoId = "34Na4j8AVgA",
-                bannerUrl = "https://img.youtube.com/vi/34Na4j8AVgA/hqdefault.jpg",
-                rank = 116,
-                isTopChart = true,
-                timestamp = 1710000005000L
-            ),
-            Song(
-                id = "default_believer",
-                title = "Believer",
-                artist = "Imagine Dragons",
-                videoId = "7wtfhZwyrcc",
-                bannerUrl = "https://img.youtube.com/vi/7wtfhZwyrcc/hqdefault.jpg",
-                rank = 117,
-                isTopChart = true,
-                timestamp = 1710000004000L
-            ),
-            Song(
-                id = "default_calm_down",
-                title = "Calm Down",
-                artist = "Rema, Selena Gomez",
-                videoId = "WcIcVapfqXw",
-                bannerUrl = "https://img.youtube.com/vi/WcIcVapfqXw/hqdefault.jpg",
-                rank = 118,
-                isTopChart = true,
-                timestamp = 1710000003000L
-            )
+        private val RANK_FIELD_NAMES = listOf(
+            "rank",
+            "ranking",
+            "position",
+            "pos",
+            "order",
+            "topRank",
+            "chartRank",
+            "rankNumber",
+            "serial",
+            "index",
+            "number",
+            "no"
         )
     }
+
+    private data class RawAdminSong(
+        val firebaseKey: String,
+        val song: Song,
+        val explicitRank: Int,
+        val snapshotOrder: Int,
+        val updatedAt: Long
+    )
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val httpClient = OkHttpClient.Builder()
@@ -228,10 +69,18 @@ class FirebaseSongsService(private val context: Context) {
         .readTimeout(10, TimeUnit.SECONDS)
         .build()
 
-    private val _songs = MutableStateFlow<List<Song>>(DEFAULT_CURATED_SONGS)
+    private val rankPrefs = context.applicationContext.getSharedPreferences(
+        "ak_admin_rank_tracker",
+        Context.MODE_PRIVATE
+    )
+    private val previousExplicitRanks = ConcurrentHashMap<String, Int>()
+    private val previousResolvedRanks = ConcurrentHashMap<String, Int>()
+
+    // Strictly Admin-uploaded songs ONLY (no extra default songs mixed into Admin catalog / Top Charts!)
+    private val _songs = MutableStateFlow<List<Song>>(emptyList())
     val songs: StateFlow<List<Song>> = _songs.asStateFlow()
 
-    private val _isLoading = MutableStateFlow(false)
+    private val _isLoading = MutableStateFlow(true)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
 
     private val _connectionError = MutableStateFlow<String?>(null)
@@ -241,14 +90,52 @@ class FirebaseSongsService(private val context: Context) {
     private var valueListener: ValueEventListener? = null
 
     init {
+        loadSavedRankHistory()
         initializeCloudAndListen()
     }
 
-    private fun mergeWithDefaultCatalog(adminSongs: List<Song>): List<Song> {
-        val sortedAdmin = sortCatalogTracks(adminSongs)
-        val adminVideoIds = sortedAdmin.map { it.cleanVideoId.lowercase() }.filter { it.isNotBlank() }.toSet()
-        val extras = DEFAULT_CURATED_SONGS.filter { it.cleanVideoId.lowercase() !in adminVideoIds }
-        return sortedAdmin + extras
+    private fun loadSavedRankHistory() {
+        try {
+            val savedResolved = rankPrefs.getString("resolved_ranks_json", null)
+            if (!savedResolved.isNullOrBlank()) {
+                val obj = JSONObject(savedResolved)
+                val keys = obj.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    val r = obj.optInt(k, -1)
+                    if (r > 0) previousResolvedRanks[k] = r
+                }
+            }
+            val savedExplicit = rankPrefs.getString("explicit_ranks_json", null)
+            if (!savedExplicit.isNullOrBlank()) {
+                val obj = JSONObject(savedExplicit)
+                val keys = obj.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    val r = obj.optInt(k, -1)
+                    if (r > 0) previousExplicitRanks[k] = r
+                }
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun saveRankHistory() {
+        try {
+            val resolvedObj = JSONObject()
+            for ((k, v) in previousResolvedRanks) {
+                resolvedObj.put(k, v)
+            }
+            val explicitObj = JSONObject()
+            for ((k, v) in previousExplicitRanks) {
+                explicitObj.put(k, v)
+            }
+            rankPrefs.edit()
+                .putString("resolved_ranks_json", resolvedObj.toString())
+                .putString("explicit_ranks_json", explicitObj.toString())
+                .apply()
+        } catch (_: Exception) {
+        }
     }
 
     private fun initializeCloudAndListen() {
@@ -278,8 +165,8 @@ class FirebaseSongsService(private val context: Context) {
 
             val listener = object : ValueEventListener {
                 override fun onDataChange(snapshot: DataSnapshot) {
-                    val parsedList = parseSnapshot(snapshot)
-                    _songs.value = mergeWithDefaultCatalog(parsedList)
+                    val rawList = parseSnapshot(snapshot)
+                    _songs.value = resolveSmartSwapsAndSort(rawList)
                     _isLoading.value = false
                     _connectionError.value = null
                 }
@@ -298,27 +185,202 @@ class FirebaseSongsService(private val context: Context) {
         scope.launch {
             fetchSongsViaRest()
             while (true) {
-                delay(10_000L)
+                delay(8_000L)
                 fetchSongsViaRest(silent = true)
             }
         }
     }
 
-    private fun sortCatalogTracks(list: List<Song>): List<Song> {
-        return list.sortedWith(
-            compareBy<Song> { if (it.rank in 1..99) it.rank else Int.MAX_VALUE }
-                .thenByDescending { it.timestamp }
+    /**
+     * Smart Rank Swap & Line-Wise Ranking Engine:
+     * 1. Places every song at the exact rank set by Admin (1st, 2nd, 3rd, ..., 30th).
+     * 2. If Admin changes a song's rank (e.g. Song at #30 is changed to #2), the song that was
+     *    previously at #2 automatically swaps to #30 (and updates in Firebase RTDB so all devices
+     *    and the Admin Panel stay in sync).
+     */
+    @Synchronized
+    private fun resolveSmartSwapsAndSort(rawList: List<RawAdminSong>): List<Song> {
+        if (rawList.isEmpty()) return emptyList()
+        val total = rawList.size
+
+        // Map of current explicit ranks from Firebase (1..Int.MAX_VALUE)
+        val effectiveRanks = HashMap<String, Int>()
+        for (item in rawList) {
+            if (item.explicitRank in 1 until Int.MAX_VALUE) {
+                effectiveRanks[item.song.id] = item.explicitRank
+            }
+        }
+
+        val firebaseRankUpdatesToPatch = mutableListOf<Pair<String, Int>>()
+
+        // Step 1: Detect songs whose explicit rank in Firebase just changed compared to previousExplicitRanks/previousResolvedRanks
+        val changedSongs = rawList.filter { item ->
+            val newRank = item.explicitRank
+            val prevExplicit = previousExplicitRanks[item.song.id]
+            val prevResolved = previousResolvedRanks[item.song.id]
+            newRank in 1 until Int.MAX_VALUE && (
+                (prevExplicit != null && prevExplicit != newRank) ||
+                    (prevExplicit == null && prevResolved != null && prevResolved != newRank)
+                )
+        }
+
+        val swappedTargetIds = mutableSetOf<String>()
+
+        for (mover in changedSongs) {
+            val targetRank = mover.explicitRank
+            val oldRank = previousResolvedRanks[mover.song.id]
+                ?: previousExplicitRanks[mover.song.id]
+                ?: (mover.snapshotOrder + 1)
+
+            if (oldRank == targetRank) continue
+
+            // Find the song that was sitting at targetRank
+            val displaced = rawList.firstOrNull { candidate ->
+                candidate.song.id != mover.song.id &&
+                        candidate.song.id !in swappedTargetIds &&
+                        (
+                            effectiveRanks[candidate.song.id] == targetRank ||
+                                previousResolvedRanks[candidate.song.id] == targetRank
+                            )
+            }
+
+            if (displaced != null) {
+                effectiveRanks[mover.song.id] = targetRank
+                effectiveRanks[displaced.song.id] = oldRank
+                swappedTargetIds.add(displaced.song.id)
+                swappedTargetIds.add(mover.song.id)
+                if (displaced.firebaseKey.isNotBlank() && displaced.explicitRank != oldRank) {
+                    firebaseRankUpdatesToPatch.add(displaced.firebaseKey to oldRank)
+                }
+            }
+        }
+
+        // Step 2: Also handle any pre-existing duplicate explicit ranks in Firebase (e.g. if Admin changed
+        // rank 30 -> 2 while the app was closed, so two songs in Firebase both have rank = 2 and rank 30 is vacant)
+        val rankGroups = rawList
+            .filter { (effectiveRanks[it.song.id] ?: Int.MAX_VALUE) in 1 until Int.MAX_VALUE }
+            .groupBy { effectiveRanks[it.song.id]!! }
+
+        val usedExplicitRanks = effectiveRanks.values.toMutableSet()
+        val vacantRanks = (1..total).filter { it !in usedExplicitRanks }.toMutableList()
+
+        for ((dupRank, itemsWithSameRank) in rankGroups) {
+            if (itemsWithSameRank.size <= 1) continue
+
+            // Determine which song is the newly moved song that should keep `dupRank`:
+            // 1. A song in `changedSongs`
+            // 2. Or a song with the newest `updatedAt`
+            // 3. Or the song whose natural snapshot position (1-based) is farthest from `dupRank`
+            //    (e.g. song at position 30 that was changed to rank 2!)
+            val winner = itemsWithSameRank.maxWithOrNull(
+                compareBy<RawAdminSong> { it.song.id in swappedTargetIds }
+                    .thenBy { it.updatedAt }
+                    .thenBy { kotlin.math.abs((it.snapshotOrder + 1) - dupRank) }
+            ) ?: itemsWithSameRank.first()
+
+            for (other in itemsWithSameRank) {
+                if (other.song.id == winner.song.id) continue
+                // Find the old slot that `winner` vacated (e.g. winner's previous rank or natural 1-based position)
+                val winnerOldRank = previousResolvedRanks[winner.song.id]
+                    ?: (winner.snapshotOrder + 1).takeIf { it in 1..total && it !in usedExplicitRanks }
+                    ?: vacantRanks.firstOrNull()
+
+                if (winnerOldRank != null) {
+                    effectiveRanks[other.song.id] = winnerOldRank
+                    usedExplicitRanks.add(winnerOldRank)
+                    vacantRanks.remove(winnerOldRank)
+                    if (other.firebaseKey.isNotBlank() && other.explicitRank != winnerOldRank) {
+                        firebaseRankUpdatesToPatch.add(other.firebaseKey to winnerOldRank)
+                    }
+                }
+            }
+        }
+
+        // Step 3: Place songs into exact 1..total slots so every song has its exact rank!
+        val finalSlots = arrayOfNulls<RawAdminSong>(total)
+        val unplaced = mutableListOf<RawAdminSong>()
+
+        // Sort songs with explicit ranks first
+        val sortedByExplicit = rawList.sortedWith(
+            compareBy<RawAdminSong> { effectiveRanks[it.song.id] ?: Int.MAX_VALUE }
+                .thenBy { it.snapshotOrder }
         )
+
+        for (item in sortedByExplicit) {
+            val desiredRank = effectiveRanks[item.song.id]
+            if (desiredRank != null && desiredRank in 1..total && finalSlots[desiredRank - 1] == null) {
+                finalSlots[desiredRank - 1] = item
+            } else {
+                unplaced.add(item)
+            }
+        }
+
+        // Fill remaining slots in exact Admin line-wise order (or overflow explicit ranks)
+        var cursor = 0
+        for (item in unplaced) {
+            while (cursor < total && finalSlots[cursor] != null) {
+                cursor++
+            }
+            if (cursor < total) {
+                finalSlots[cursor] = item
+                cursor++
+            }
+        }
+
+        val finalSongs = finalSlots.filterNotNull().mapIndexed { index, raw ->
+            val resolvedRank = index + 1
+            previousResolvedRanks[raw.song.id] = resolvedRank
+            val effExp = effectiveRanks[raw.song.id]
+            if (effExp != null && effExp in 1 until Int.MAX_VALUE) {
+                previousExplicitRanks[raw.song.id] = effExp
+            }
+            raw.song.copy(rank = resolvedRank)
+        }
+
+        saveRankHistory()
+
+        // Step 4: Patch swapped ranks back to Firebase Realtime Database so Admin Panel & all users see the swap!
+        if (firebaseRankUpdatesToPatch.isNotEmpty()) {
+            scope.launch {
+                for ((fbKey, swappedRank) in firebaseRankUpdatesToPatch) {
+                    patchSongRankInFirebase(fbKey, swappedRank)
+                }
+            }
+        }
+
+        return finalSongs
     }
 
-    private fun parseSnapshot(snapshot: DataSnapshot): List<Song> {
-        val result = mutableListOf<Song>()
+    private fun patchSongRankInFirebase(firebaseKey: String, newRank: Int) {
+        try {
+            songsRef?.child(firebaseKey)?.child("rank")?.setValue(newRank)
+        } catch (_: Exception) {
+        }
+        try {
+            val payload = JSONObject().apply {
+                put("rank", newRank)
+            }
+            val body = payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+            val request = Request.Builder()
+                .url("$DATABASE_URL/songs/$firebaseKey.json")
+                .patch(body)
+                .build()
+            httpClient.newCall(request).execute().close()
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to patch swapped rank to Firebase for $firebaseKey", e)
+        }
+    }
+
+    private fun parseSnapshot(snapshot: DataSnapshot): List<RawAdminSong> {
+        val result = mutableListOf<RawAdminSong>()
         if (!snapshot.exists()) return result
 
+        var idx = 0
         for (child in snapshot.children) {
-            val song = parseChildSnapshot(child)
-            if (song != null && (song.videoId.isNotBlank() || song.title.isNotBlank())) {
-                result.add(song)
+            val parsed = parseChildSnapshot(child, idx)
+            if (parsed != null && (parsed.song.videoId.isNotBlank() || parsed.song.title.isNotBlank())) {
+                result.add(parsed)
+                idx++
             }
         }
         return result
@@ -336,7 +398,18 @@ class FirebaseSongsService(private val context: Context) {
         }
     }
 
-    private fun parseChildSnapshot(child: DataSnapshot): Song? {
+    private fun parseRankNumber(value: Any?): Int {
+        return when (value) {
+            is Number -> value.toInt().let { if (it <= 0) Int.MAX_VALUE else it }
+            is String -> {
+                val digits = Regex("\\d+").find(value)?.value?.toIntOrNull()
+                if (digits != null && digits > 0) digits else Int.MAX_VALUE
+            }
+            else -> Int.MAX_VALUE
+        }
+    }
+
+    private fun parseChildSnapshot(child: DataSnapshot, snapshotOrder: Int): RawAdminSong? {
         return try {
             val key = child.key ?: ""
             val id = child.child("id").getValue(String::class.java)?.takeIf { it.isNotBlank() } ?: key
@@ -355,14 +428,14 @@ class FirebaseSongsService(private val context: Context) {
                 ?: child.child("image").getValue(String::class.java)
                 ?: ""
 
-            val rankObj = child.child("rank").value
-            val rank = when (rankObj) {
-                is Long -> rankObj.toInt()
-                is Int -> rankObj
-                is Double -> rankObj.toInt()
-                is String -> rankObj.toIntOrNull() ?: Int.MAX_VALUE
-                else -> Int.MAX_VALUE
-            }.let { if (it <= 0) Int.MAX_VALUE else it }
+            var explicitRank = Int.MAX_VALUE
+            for (fieldName in RANK_FIELD_NAMES) {
+                val parsed = parseRankNumber(child.child(fieldName).value)
+                if (parsed in 1 until Int.MAX_VALUE) {
+                    explicitRank = parsed
+                    break
+                }
+            }
 
             val isTopChart = parseBooleanField(child.child("isTopChart").value)
 
@@ -388,16 +461,35 @@ class FirebaseSongsService(private val context: Context) {
                 else -> 0L
             }
 
-            Song(
+            val updatedAtObj = child.child("updatedAt").value
+                ?: child.child("rankUpdatedAt").value
+                ?: child.child("lastModified").value
+            val updatedAt = when (updatedAtObj) {
+                is Long -> updatedAtObj
+                is Int -> updatedAtObj.toLong()
+                is Double -> updatedAtObj.toLong()
+                is String -> updatedAtObj.toLongOrNull() ?: 0L
+                else -> 0L
+            }
+
+            val song = Song(
                 id = id,
                 title = title,
                 artist = artist,
                 videoId = Song.extractYoutubeVideoId(videoId),
                 bannerUrl = bannerUrl,
-                rank = rank,
+                rank = explicitRank,
                 isTopChart = isTopChart,
                 timestamp = timestamp,
                 allowDownload = allowDownload
+            )
+
+            RawAdminSong(
+                firebaseKey = key,
+                song = song,
+                explicitRank = explicitRank,
+                snapshotOrder = snapshotOrder,
+                updatedAt = updatedAt
             )
         } catch (e: Exception) {
             Log.e(TAG, "Failed to parse child song snapshot", e)
@@ -426,14 +518,14 @@ class FirebaseSongsService(private val context: Context) {
 
                 val bodyStr = response.body?.string()?.trim() ?: "null"
                 if (bodyStr == "null" || bodyStr.isEmpty()) {
-                    _songs.value = DEFAULT_CURATED_SONGS
+                    _songs.value = emptyList()
                     _isLoading.value = false
                     _connectionError.value = null
                     return@withContext
                 }
 
-                val list = parseSongsJson(bodyStr)
-                _songs.value = mergeWithDefaultCatalog(list)
+                val rawList = parseSongsJsonRaw(bodyStr)
+                _songs.value = resolveSmartSwapsAndSort(rawList)
                 _connectionError.value = null
                 _isLoading.value = false
             }
@@ -447,23 +539,34 @@ class FirebaseSongsService(private val context: Context) {
     }
 
     fun parseSongsJson(jsonStr: String): List<Song> {
-        val result = mutableListOf<Song>()
+        return resolveSmartSwapsAndSort(parseSongsJsonRaw(jsonStr))
+    }
+
+    private fun parseSongsJsonRaw(jsonStr: String): List<RawAdminSong> {
+        val result = mutableListOf<RawAdminSong>()
         try {
+            var idx = 0
             if (jsonStr.startsWith("{")) {
                 val root = JSONObject(jsonStr)
                 val keys = root.keys()
                 while (keys.hasNext()) {
                     val key = keys.next()
                     val obj = root.optJSONObject(key) ?: continue
-                    val song = parseJsonObject(key, obj)
-                    if (song != null) result.add(song)
+                    val parsed = parseJsonObject(key, obj, idx)
+                    if (parsed != null) {
+                        result.add(parsed)
+                        idx++
+                    }
                 }
             } else if (jsonStr.startsWith("[")) {
                 val arr = JSONArray(jsonStr)
                 for (i in 0 until arr.length()) {
                     val obj = arr.optJSONObject(i) ?: continue
-                    val song = parseJsonObject(i.toString(), obj)
-                    if (song != null) result.add(song)
+                    val parsed = parseJsonObject(i.toString(), obj, idx)
+                    if (parsed != null) {
+                        result.add(parsed)
+                        idx++
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -472,7 +575,7 @@ class FirebaseSongsService(private val context: Context) {
         return result
     }
 
-    private fun parseJsonObject(fallbackKey: String, obj: JSONObject): Song? {
+    private fun parseJsonObject(fallbackKey: String, obj: JSONObject, snapshotOrder: Int): RawAdminSong? {
         val id = obj.optString("id").ifBlank { fallbackKey }
         val title = obj.optString("title").ifBlank { obj.optString("name") }
         val artist = obj.optString("artist").ifBlank { obj.optString("subtitle", "Unknown Artist") }
@@ -483,10 +586,24 @@ class FirebaseSongsService(private val context: Context) {
         val bannerUrl = obj.optString("bannerUrl").ifBlank {
             obj.optString("thumbnail").ifBlank { obj.optString("image") }
         }
-        val rawRank = obj.optInt("rank", Int.MAX_VALUE)
-        val rank = if (rawRank <= 0) Int.MAX_VALUE else rawRank
+
+        var explicitRank = Int.MAX_VALUE
+        for (fieldName in RANK_FIELD_NAMES) {
+            if (obj.has(fieldName)) {
+                val parsed = parseRankNumber(obj.opt(fieldName))
+                if (parsed in 1 until Int.MAX_VALUE) {
+                    explicitRank = parsed
+                    break
+                }
+            }
+        }
+
         val isTopChart = obj.optBoolean("isTopChart", false)
-        val timestamp = obj.optLong("timestamp", System.currentTimeMillis())
+        val timestamp = obj.optLong("timestamp", 0L)
+        val updatedAt = obj.optLong(
+            "updatedAt",
+            obj.optLong("rankUpdatedAt", obj.optLong("lastModified", 0L))
+        )
 
         val allowDownload = listOf(
             "allowDownload",
@@ -503,16 +620,24 @@ class FirebaseSongsService(private val context: Context) {
 
         if (title.isBlank() && videoId.isBlank()) return null
 
-        return Song(
+        val song = Song(
             id = id,
             title = title.ifBlank { "Untitled Track" },
             artist = artist,
             videoId = videoId,
             bannerUrl = bannerUrl,
-            rank = rank,
+            rank = explicitRank,
             isTopChart = isTopChart,
             timestamp = timestamp,
             allowDownload = allowDownload
+        )
+
+        return RawAdminSong(
+            firebaseKey = fallbackKey,
+            song = song,
+            explicitRank = explicitRank,
+            snapshotOrder = snapshotOrder,
+            updatedAt = updatedAt
         )
     }
 
@@ -533,12 +658,14 @@ class FirebaseSongsService(private val context: Context) {
                 "https://img.youtube.com/vi/$cleanVideoId/hqdefault.jpg"
             }
 
+            val nextRank = (_songs.value.size) + 1
             val song = Song(
                 id = id,
                 title = title.trim().ifBlank { "Untitled Track" },
                 artist = artist.trim().ifBlank { "Unknown Artist" },
                 videoId = cleanVideoId,
                 bannerUrl = resolvedBanner,
+                rank = nextRank,
                 timestamp = now
             )
 
@@ -548,6 +675,7 @@ class FirebaseSongsService(private val context: Context) {
                 put("artist", song.artist)
                 put("videoId", song.videoId)
                 put("bannerUrl", song.bannerUrl)
+                put("rank", song.rank)
                 put("timestamp", song.timestamp)
             }
 
@@ -570,6 +698,7 @@ class FirebaseSongsService(private val context: Context) {
                     "artist" to song.artist,
                     "videoId" to song.videoId,
                     "bannerUrl" to song.bannerUrl,
+                    "rank" to song.rank,
                     "timestamp" to song.timestamp
                 )
                 songsRef?.child(id)?.setValue(map)

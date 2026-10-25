@@ -477,24 +477,15 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     val downloadedSongs: StateFlow<List<DownloadedSongEntity>> = libraryDao.getAllDownloadedSongs()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    // Charts Computed List
+    // Charts Computed List (Strict Admin Ranking Order: 1, 2, 3...)
     val chartSongs: StateFlow<List<Song>> = combine(
         firebaseService.songs,
-        sessionHistoryEntities,
         _selectedChartTab
-    ) { songs, history, chartTab ->
-        val playCountMap = history.associate { it.id to it.playCount }
-        when (chartTab) {
-            ChartTab.LOCAL -> {
-                songs.sortedWith(
-                    compareByDescending<Song> { playCountMap[it.id] ?: 0 }
-                        .thenByDescending { it.timestamp }
-                )
-            }
-            ChartTab.GLOBAL -> {
-                songs.sortedByDescending { it.timestamp }
-            }
-        }
+    ) { songs, _ ->
+        songs.sortedWith(
+            compareBy<Song> { if (it.rank > 0) it.rank else Int.MAX_VALUE }
+                .thenByDescending { it.timestamp }
+        )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     // Playback State

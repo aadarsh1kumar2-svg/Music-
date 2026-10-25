@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
@@ -400,14 +401,15 @@ fun HomeScreen(
                     }
                 }
             } else {
-                items(
+                itemsIndexed(
                     items = songs,
-                    key = { it.id }
-                ) { song ->
+                    key = { _, song -> song.id }
+                ) { index, song ->
                     SongListRow(
                         song = song,
                         isCurrentSong = currentSong?.id == song.id,
                         isPlaying = isPlaying,
+                        rankNumber = song.rank.takeIf { it in 1..99999 } ?: (index + 1),
                         onSongClick = { onSongClick(song, songs) },
                         onMoreClick = { onSongMoreClick(song) }
                     )

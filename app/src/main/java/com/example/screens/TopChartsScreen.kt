@@ -183,7 +183,7 @@ fun TopChartsScreen(
                         song = song,
                         isCurrentSong = currentSong?.id == song.id,
                         isPlaying = isPlaying,
-                        rankNumber = index + 1,
+                        rankNumber = song.rank.takeIf { it in 1..99999 } ?: (index + 1),
                         subtitlePrefix = "",
                         onSongClick = { onSongClick(song, chartSongs) },
                         onMoreClick = { onSongMoreClick(song) }
