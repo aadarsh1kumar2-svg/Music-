@@ -144,20 +144,21 @@ class MusicPlaybackService : MediaSessionService() {
         }
 
         /**
-         * Generates a 180-second (3-minute) silent WAV file used by MusicPlaybackService to keep the
-         * Foreground MediaSession, WakeLock, WifiLock, Lock Screen, and Notification Bar
+         * Generates a 60-second standard 16-bit signed PCM silent WAV file used by MusicPlaybackService
+         * to keep the Foreground MediaSession, WakeLock, WifiLock, Lock Screen, and Notification Bar
          * media controls active while BackstageYouTubePlayerController streams online audio.
          */
         fun getOrCreateSilentWavUri(context: Context): String {
-            val file = File(context.cacheDir, "aadify_keepalive_silence_180s.wav")
-            if (file.exists() && file.length() > 10_000L) {
+            val file = File(context.cacheDir, "aadify_keepalive_16bit_60s.wav")
+            if (file.exists() && file.length() > 100_000L) {
                 return Uri.fromFile(file).toString()
             }
             try {
-                val sampleRate = 4000
-                val durationSeconds = 180
+                val sampleRate = 8000
+                val durationSeconds = 60
                 val numSamples = sampleRate * durationSeconds
-                val dataSize = numSamples // 8-bit unsigned mono (0x80 = silence)
+                val bytesPerSample = 2 // 16-bit signed PCM (0x0000 = pure silence)
+                val dataSize = numSamples * bytesPerSample
                 val buffer = ByteBuffer.allocate(44 + dataSize).order(ByteOrder.LITTLE_ENDIAN)
 
                 // RIFF header
@@ -168,16 +169,15 @@ class MusicPlaybackService : MediaSessionService() {
                 buffer.put("fmt ".toByteArray(Charsets.US_ASCII))
                 buffer.putInt(16) // PCM
                 buffer.putShort(1.toShort()) // AudioFormat = 1 (PCM)
-                buffer.putShort(1.toShort()) // NumChannels = 1
+                buffer.putShort(1.toShort()) // NumChannels = 1 (Mono)
                 buffer.putInt(sampleRate)
-                buffer.putInt(sampleRate) // ByteRate (8-bit mono = 1 byte/sample)
-                buffer.putShort(1.toShort()) // BlockAlign = 1
-                buffer.putShort(8.toShort()) // BitsPerSample = 8
-                // data subchunk
+                buffer.putInt(sampleRate * bytesPerSample) // ByteRate
+                buffer.putShort(bytesPerSample.toShort()) // BlockAlign
+                buffer.putShort(16.toShort()) // BitsPerSample = 16
+                // data subchunk (all zero bytes = 16-bit signed silence)
                 buffer.put("data".toByteArray(Charsets.US_ASCII))
                 buffer.putInt(dataSize)
-                val silenceBytes = ByteArray(dataSize) { 0x80.toByte() }
-                buffer.put(silenceBytes)
+                buffer.position(44 + dataSize)
 
                 FileOutputStream(file).use { out ->
                     out.write(buffer.array())
@@ -261,7 +261,7 @@ class MusicPlaybackService : MediaSessionService() {
         val exoPlayer = ExoPlayer.Builder(this)
             .setMediaSourceFactory(mediaSourceFactory)
             .setAudioAttributes(audioAttributes, false)
-            .setHandleAudioBecomingNoisy(true)
+            .setHandleAudioBecomingNoisy(false)
             .setWakeMode(C.WAKE_MODE_NETWORK)
             .build()
 
@@ -270,7 +270,7 @@ class MusicPlaybackService : MediaSessionService() {
         exoPlayer.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 try {
-                    if (isPlaying) {
+                    if (isPlaying || pendingSync?.isPlaying == true) {
                         if (wakeLock?.isHeld == false) wakeLock?.acquire(6 * 60 * 60 * 1000L)
                         if (wifiLock?.isHeld == false) wifiLock?.acquire()
                     }
@@ -280,8 +280,27 @@ class MusicPlaybackService : MediaSessionService() {
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 if (isInternalSync) return
+                val itemId = mediaItem?.mediaId.orEmpty()
+                if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_SEEK) {
+                    if (itemId.endsWith("_next")) {
+                        onSkipNextCallback?.invoke()
+                        return
+                    } else if (itemId.endsWith("_prev")) {
+                        onSkipPreviousCallback?.invoke()
+                        return
+                    }
+                }
                 if (isDirectAudioMode && reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
                     onExoPlayerTrackEndedCallback?.invoke()
+                } else if (!isDirectAudioMode && reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO && pendingSync?.isPlaying == true) {
+                    isInternalSync = true
+                    try {
+                        exoPlayer.seekTo(1, 0L)
+                        exoPlayer.play()
+                    } catch (_: Exception) {
+                    } finally {
+                        isInternalSync = false
+                    }
                 }
             }
 
@@ -289,6 +308,15 @@ class MusicPlaybackService : MediaSessionService() {
                 if (isInternalSync) return
                 if (isDirectAudioMode && playbackState == Player.STATE_ENDED) {
                     onExoPlayerTrackEndedCallback?.invoke()
+                } else if (!isDirectAudioMode && playbackState == Player.STATE_ENDED && pendingSync?.isPlaying == true) {
+                    isInternalSync = true
+                    try {
+                        exoPlayer.seekTo(1, 0L)
+                        exoPlayer.play()
+                    } catch (_: Exception) {
+                    } finally {
+                        isInternalSync = false
+                    }
                 }
             }
         })

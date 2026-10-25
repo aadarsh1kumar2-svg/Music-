@@ -265,17 +265,10 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     lastPersistedPosBucket = bucket
                     prefs.edit().putLong("last_position_ms", posMs).apply()
                 }
-                val dur = _durationMs.value
-                if (dur > 8000L && posMs >= dur - 650L) {
-                    hasHandledEndForCurrentSong = true
-                    _isBuffering.value = false
-                    _isPlaying.value = false
-                    handleTrackEnded()
-                }
             }
         },
         onDurationUpdate = { durMs ->
-            if (!isUsingExoPlayerFallback && durMs > 0L) {
+            if (!isUsingExoPlayerFallback && !hasHandledEndForCurrentSong && durMs > 0L) {
                 if (_durationMs.value != durMs) {
                     _durationMs.value = durMs
                     prefs.edit().putLong("last_duration_ms", durMs).apply()
@@ -339,9 +332,14 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                             startExoPlayerWithUri(active, resolved.streamUrl)
                         },
                         onFailure = {
-                            _isBuffering.value = false
-                            _isPlaying.value = false
-                            emitSnackbar("Unable to play this track right now.")
+                            if (_queue.value.size > 1 && !hasHandledEndForCurrentSong) {
+                                hasHandledEndForCurrentSong = true
+                                skipToNext()
+                            } else {
+                                _isBuffering.value = false
+                                _isPlaying.value = false
+                                emitSnackbar("Unable to play this track right now.")
+                            }
                         }
                     )
                 }
@@ -677,6 +675,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun startProgressPoller() {
         viewModelScope.launch {
+            var backgroundKeepAliveTick = 0
             while (isActive) {
                 if (isUsingExoPlayerFallback && isCurrentSongLoadedInEngine) {
                     val isPlayingNow = MusicPlaybackService.isExoPlaying()
@@ -701,6 +700,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                                 handleTrackEnded()
                             }
                         }
+                    }
+                } else if (!isUsingExoPlayerFallback && isCurrentSongLoadedInEngine && _isPlaying.value && !hasHandledEndForCurrentSong) {
+                    backgroundKeepAliveTick++
+                    if (backgroundKeepAliveTick >= 8) {
+                        backgroundKeepAliveTick = 0
+                        backstagePlayer.keepAwake()
                     }
                 }
                 delay(250L)
@@ -838,6 +843,10 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
         _queue.value = resolvedQueue
 
+        // Synchronously invalidate the previous track in BackstageYouTubePlayerController BEFORE
+        // any coroutine suspension so trailing callbacks from the previous song can never skip the new song!
+        backstagePlayer.prepareForNewTrack()
+
         hasRetriedCurrentTrack = false
         hasHandledEndForCurrentSong = false
         isCurrentSongLoadedInEngine = true
@@ -846,6 +855,15 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         _durationMs.value = 0L
         _isBuffering.value = true
         _isPlaying.value = true
+
+        // Immediately sync Foreground Service notification & WakeLock so there is zero gap between tracks
+        MusicPlaybackService.syncNowPlaying(
+            context = appContext,
+            song = song,
+            isPlaying = true,
+            directStreamUri = null,
+            playbackSpeed = _playbackSpeed.value
+        )
 
         persistPlaybackSelection(song, resolvedQueue)
 
