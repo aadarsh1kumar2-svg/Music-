@@ -1,5 +1,6 @@
 package com.example.models
 
+import android.net.Uri
 import androidx.room.Dao
 import androidx.room.Database
 import androidx.room.Entity
@@ -8,7 +9,10 @@ import androidx.room.OnConflictStrategy
 import androidx.room.PrimaryKey
 import androidx.room.Query
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
+import java.io.File
 
 @Entity(tableName = "favorite_songs")
 data class FavoriteSongEntity(
@@ -18,7 +22,8 @@ data class FavoriteSongEntity(
     val videoId: String,
     val bannerUrl: String,
     val timestamp: Long,
-    val addedAt: Long = System.currentTimeMillis()
+    val addedAt: Long = System.currentTimeMillis(),
+    val localContentUri: String = ""
 ) {
     fun toSong() = Song(
         id = id,
@@ -26,7 +31,8 @@ data class FavoriteSongEntity(
         artist = artist,
         videoId = videoId,
         bannerUrl = bannerUrl,
-        timestamp = timestamp
+        timestamp = timestamp,
+        localContentUri = localContentUri
     )
 
     companion object {
@@ -36,7 +42,8 @@ data class FavoriteSongEntity(
             artist = song.artist,
             videoId = song.videoId,
             bannerUrl = song.bannerUrl,
-            timestamp = song.timestamp
+            timestamp = song.timestamp,
+            localContentUri = song.resolvedLocalUri
         )
     }
 }
@@ -50,7 +57,8 @@ data class SessionHistoryEntity(
     val bannerUrl: String,
     val timestamp: Long,
     val playedAt: Long = System.currentTimeMillis(),
-    val playCount: Int = 1
+    val playCount: Int = 1,
+    val localContentUri: String = ""
 ) {
     fun toSong() = Song(
         id = id,
@@ -58,7 +66,8 @@ data class SessionHistoryEntity(
         artist = artist,
         videoId = videoId,
         bannerUrl = bannerUrl,
-        timestamp = timestamp
+        timestamp = timestamp,
+        localContentUri = localContentUri
     )
 }
 
@@ -81,7 +90,8 @@ data class PlaylistSongEntity(
     val videoId: String,
     val bannerUrl: String,
     val timestamp: Long,
-    val addedAt: Long = System.currentTimeMillis()
+    val addedAt: Long = System.currentTimeMillis(),
+    val localContentUri: String = ""
 ) {
     fun toSong() = Song(
         id = songId,
@@ -89,7 +99,8 @@ data class PlaylistSongEntity(
         artist = artist,
         videoId = videoId,
         bannerUrl = bannerUrl,
-        timestamp = timestamp
+        timestamp = timestamp,
+        localContentUri = localContentUri
     )
 }
 
@@ -103,16 +114,27 @@ data class DownloadedSongEntity(
     val timestamp: Long,
     val localFilePath: String,
     val fileSizeBytes: Long,
-    val downloadedAt: Long = System.currentTimeMillis()
+    val downloadedAt: Long = System.currentTimeMillis(),
+    val localContentUri: String = ""
 ) {
-    fun toSong() = Song(
-        id = id,
-        title = title,
-        artist = artist,
-        videoId = videoId,
-        bannerUrl = bannerUrl,
-        timestamp = timestamp
-    )
+    fun toSong(): Song {
+        val resolvedUri = if (localContentUri.isNotBlank()) {
+            localContentUri
+        } else if (localFilePath.isNotBlank()) {
+            Uri.fromFile(File(localFilePath)).toString()
+        } else {
+            ""
+        }
+        return Song(
+            id = id,
+            title = title,
+            artist = artist,
+            videoId = videoId,
+            bannerUrl = bannerUrl,
+            timestamp = timestamp,
+            localContentUri = resolvedUri
+        )
+    }
 }
 
 @Dao
@@ -126,7 +148,7 @@ interface MusicLibraryDao {
     @Query("DELETE FROM favorite_songs WHERE id = :songId")
     suspend fun removeFavorite(songId: String)
 
-    @Query("SELECT * FROM session_history ORDER BY playedAt DESC LIMIT 30")
+    @Query("SELECT * FROM session_history ORDER BY playedAt DESC LIMIT 50")
     fun getRecentSessionHistory(): Flow<List<SessionHistoryEntity>>
 
     @Query("SELECT * FROM session_history WHERE id = :songId LIMIT 1")
@@ -177,9 +199,20 @@ interface MusicLibraryDao {
         PlaylistSongEntity::class,
         DownloadedSongEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class AKMusicDatabase : RoomDatabase() {
     abstract fun musicLibraryDao(): MusicLibraryDao
+
+    companion object {
+        val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE favorite_songs ADD COLUMN localContentUri TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE session_history ADD COLUMN localContentUri TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE playlist_songs ADD COLUMN localContentUri TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE downloaded_songs ADD COLUMN localContentUri TEXT NOT NULL DEFAULT ''")
+            }
+        }
+    }
 }

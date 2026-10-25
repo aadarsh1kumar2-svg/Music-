@@ -1,5 +1,7 @@
 package com.example.models
 
+import org.json.JSONObject
+
 data class Song(
     val id: String = "",
     val title: String = "",
@@ -12,8 +14,20 @@ data class Song(
     val allowDownload: Boolean = false,
     val localContentUri: String = ""
 ) {
+    val resolvedLocalUri: String
+        get() {
+            if (localContentUri.isNotBlank()) return localContentUri
+            if (id.startsWith("local_media_")) {
+                val mediaId = id.removePrefix("local_media_").trim()
+                if (mediaId.isNotEmpty() && mediaId.all { it.isDigit() }) {
+                    return "content://media/external/audio/media/$mediaId"
+                }
+            }
+            return ""
+        }
+
     val isLocalDeviceSong: Boolean
-        get() = localContentUri.isNotBlank()
+        get() = resolvedLocalUri.isNotBlank()
 
     val resolvedBannerUrl: String
         get() = if (bannerUrl.isNotBlank()) {
@@ -36,7 +50,37 @@ data class Song(
     val cleanVideoId: String
         get() = extractYoutubeVideoId(videoId)
 
+    fun toJsonObject(): JSONObject {
+        return JSONObject().apply {
+            put("id", id)
+            put("title", title)
+            put("artist", artist)
+            put("videoId", videoId)
+            put("bannerUrl", bannerUrl)
+            put("rank", rank)
+            put("isTopChart", isTopChart)
+            put("timestamp", timestamp)
+            put("allowDownload", allowDownload)
+            put("localContentUri", resolvedLocalUri)
+        }
+    }
+
     companion object {
+        fun fromJsonObject(obj: JSONObject): Song {
+            return Song(
+                id = obj.optString("id", ""),
+                title = obj.optString("title", ""),
+                artist = obj.optString("artist", ""),
+                videoId = obj.optString("videoId", ""),
+                bannerUrl = obj.optString("bannerUrl", ""),
+                rank = obj.optInt("rank", Int.MAX_VALUE),
+                isTopChart = obj.optBoolean("isTopChart", false),
+                timestamp = obj.optLong("timestamp", 0L),
+                allowDownload = obj.optBoolean("allowDownload", false),
+                localContentUri = obj.optString("localContentUri", "")
+            )
+        }
+
         fun extractYoutubeVideoId(input: String): String {
             val trimmed = input.trim()
             if (trimmed.isEmpty()) return ""

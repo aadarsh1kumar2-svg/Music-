@@ -6,7 +6,6 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.provider.Settings
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.activity.ComponentActivity
@@ -37,7 +36,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
@@ -68,11 +66,13 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -87,7 +87,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
-import androidx.compose.runtime.DisposableEffect
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -97,6 +96,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.providers.LibrarySubScreen
 import com.example.providers.MainTab
 import com.example.providers.MusicViewModel
+import com.example.screens.DeveloperIntroScreen
 import com.example.screens.ExploreScreen
 import com.example.screens.FullScreenPlayerModal
 import com.example.screens.HomeScreen
@@ -122,6 +122,13 @@ import com.example.widgets.SongOptionsBottomSheet
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+
+private enum class LaunchStage {
+    ENTER_NAME,
+    LOADING,
+    DEVELOPER_INTRO,
+    MAIN_APP
+}
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -190,9 +197,11 @@ fun AKMusicAppRoot(
     val selectedTab by musicViewModel.selectedTab.collectAsStateWithLifecycle()
     val librarySubScreen by musicViewModel.librarySubScreen.collectAsStateWithLifecycle()
     val allSongs by musicViewModel.allSongs.collectAsStateWithLifecycle()
-    val filteredSongs by musicViewModel.filteredSongs.collectAsStateWithLifecycle()
+    val exploreSongs by musicViewModel.exploreSongs.collectAsStateWithLifecycle()
     val chartSongs by musicViewModel.chartSongs.collectAsStateWithLifecycle()
-    val searchQuery by musicViewModel.searchQuery.collectAsStateWithLifecycle()
+    val homeSearchQuery by musicViewModel.homeSearchQuery.collectAsStateWithLifecycle()
+    val exploreSearchQuery by musicViewModel.exploreSearchQuery.collectAsStateWithLifecycle()
+    val isSearchingOnline by musicViewModel.isSearchingOnline.collectAsStateWithLifecycle()
     val isLoadingSongs by musicViewModel.isLoadingSongs.collectAsStateWithLifecycle()
     val selectedChartTab by musicViewModel.selectedChartTab.collectAsStateWithLifecycle()
     val selectedCountry by musicViewModel.selectedCountry.collectAsStateWithLifecycle()
@@ -221,10 +230,20 @@ fun AKMusicAppRoot(
     val isUpNextSheetOpen by musicViewModel.isUpNextSheetOpen.collectAsStateWithLifecycle()
     val isLyricsOverlayOpen by musicViewModel.isLyricsOverlayOpen.collectAsStateWithLifecycle()
 
-    var showSplash by remember { mutableStateOf(true) }
-    LaunchedEffect(Unit) {
-        delay(1700L)
-        showSplash = false
+    // Launch flow:
+    // - New User (userName is blank): ENTER_NAME -> LOADING -> DEVELOPER_INTRO -> MAIN_APP
+    // - Returning User (userName is already saved): LOADING -> DEVELOPER_INTRO -> MAIN_APP
+    var launchStage by rememberSaveable {
+        mutableStateOf(
+            if (userName.isBlank()) LaunchStage.ENTER_NAME else LaunchStage.LOADING
+        )
+    }
+
+    LaunchedEffect(launchStage) {
+        if (launchStage == LaunchStage.LOADING) {
+            delay(1800L)
+            launchStage = LaunchStage.DEVELOPER_INTRO
+        }
     }
 
     LaunchedEffect(musicViewModel) {
@@ -233,7 +252,7 @@ fun AKMusicAppRoot(
         }
     }
 
-    if (selectedTab != MainTab.HOME && !isFullScreenPlayerOpen && userName.isNotBlank()) {
+    if (launchStage == LaunchStage.MAIN_APP && selectedTab != MainTab.HOME && !isFullScreenPlayerOpen && !isEditNameDialogOpen) {
         BackHandler {
             musicViewModel.selectTab(MainTab.HOME)
         }
@@ -285,332 +304,355 @@ fun AKMusicAppRoot(
             )
         }
 
-        if (!showSplash && (userName.isBlank() || isEditNameDialogOpen)) {
-            NameOnboardingScreen(
-                initialName = userName,
-                onSubmitName = { entered ->
-                    musicViewModel.saveUserName(entered)
-                }
-            )
-        } else {
-            ModalNavigationDrawer(
-                drawerState = drawerState,
-                drawerContent = {
-                    ModalDrawerSheet(
-                        drawerContainerColor = DeepCharcoal,
-                        modifier = Modifier.width(300.dp)
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(24.dp)
+        when {
+            launchStage == LaunchStage.ENTER_NAME -> {
+                NameOnboardingScreen(
+                    initialName = userName,
+                    onSubmitName = { entered ->
+                        musicViewModel.saveUserName(entered)
+                        launchStage = LaunchStage.LOADING
+                    }
+                )
+            }
+            launchStage == LaunchStage.LOADING -> {
+                SplashScreen()
+            }
+            launchStage == LaunchStage.DEVELOPER_INTRO -> {
+                DeveloperIntroScreen(
+                    onContinue = {
+                        launchStage = LaunchStage.MAIN_APP
+                    }
+                )
+            }
+            isEditNameDialogOpen -> {
+                NameOnboardingScreen(
+                    initialName = userName,
+                    onSubmitName = { entered ->
+                        musicViewModel.saveUserName(entered)
+                    }
+                )
+            }
+            else -> {
+                ModalNavigationDrawer(
+                    drawerState = drawerState,
+                    drawerContent = {
+                        ModalDrawerSheet(
+                            drawerContainerColor = DeepCharcoal,
+                            modifier = Modifier.width(300.dp)
                         ) {
-                            Image(
-                                painter = painterResource(id = R.drawable.aadify_logo),
-                                contentDescription = "AADIFY Logo",
-                                contentScale = ContentScale.Fit,
+                            Column(
                                 modifier = Modifier
-                                    .size(56.dp)
-                                    .clip(RoundedCornerShape(12.dp))
-                            )
-                            Spacer(modifier = Modifier.height(12.dp))
-                            Text(
-                                text = "AADIFY",
-                                style = MaterialTheme.typography.headlineMedium.copy(
-                                    color = PrimaryWhite,
-                                    fontWeight = FontWeight.ExtraBold
+                                    .fillMaxWidth()
+                                    .padding(24.dp)
+                            ) {
+                                Image(
+                                    painter = painterResource(id = R.drawable.aadify_logo),
+                                    contentDescription = "AADIFY Logo",
+                                    contentScale = ContentScale.Fit,
+                                    modifier = Modifier
+                                        .size(56.dp)
+                                        .clip(RoundedCornerShape(12.dp))
                                 )
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = "Hi There, $userName",
-                                style = MaterialTheme.typography.bodyMedium.copy(
-                                    color = SpotifyVibrantGreen,
-                                    fontWeight = FontWeight.SemiBold,
-                                    fontSize = 14.sp
+                                Spacer(modifier = Modifier.height(12.dp))
+                                Text(
+                                    text = "AADIFY",
+                                    style = MaterialTheme.typography.headlineMedium.copy(
+                                        color = PrimaryWhite,
+                                        fontWeight = FontWeight.ExtraBold
+                                    )
                                 )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = "Hi There, $userName",
+                                    style = MaterialTheme.typography.bodyMedium.copy(
+                                        color = SpotifyVibrantGreen,
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = 14.sp
+                                    )
+                                )
+                                Text(
+                                    text = "Your Music Universe",
+                                    style = MaterialTheme.typography.labelSmall.copy(color = MutedGray)
+                                )
+                            }
+
+                            HorizontalDivider(color = DividerDark)
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            NavigationDrawerItem(
+                                label = { Text("Home") },
+                                icon = { Icon(Icons.Default.Home, contentDescription = null) },
+                                selected = selectedTab == MainTab.HOME,
+                                onClick = {
+                                    musicViewModel.selectTab(MainTab.HOME)
+                                    coroutineScope.launch { drawerState.close() }
+                                },
+                                colors = NavigationDrawerItemDefaults.colors(
+                                    selectedContainerColor = SpotifyDarkGreenPill,
+                                    selectedIconColor = SpotifyVibrantGreen,
+                                    selectedTextColor = SpotifyVibrantGreen,
+                                    unselectedIconColor = MutedGray,
+                                    unselectedTextColor = PrimaryWhite
+                                ),
+                                modifier = Modifier.padding(horizontal = 12.dp)
                             )
-                            Text(
-                                text = "Your Music Universe",
-                                style = MaterialTheme.typography.labelSmall.copy(color = MutedGray)
+
+                            NavigationDrawerItem(
+                                label = { Text("Top Charts") },
+                                icon = { Icon(Icons.AutoMirrored.Filled.TrendingUp, contentDescription = null) },
+                                selected = selectedTab == MainTab.TOP_CHARTS,
+                                onClick = {
+                                    musicViewModel.selectTab(MainTab.TOP_CHARTS)
+                                    coroutineScope.launch { drawerState.close() }
+                                },
+                                colors = NavigationDrawerItemDefaults.colors(
+                                    selectedContainerColor = SpotifyDarkGreenPill,
+                                    selectedIconColor = SpotifyVibrantGreen,
+                                    selectedTextColor = SpotifyVibrantGreen,
+                                    unselectedIconColor = MutedGray,
+                                    unselectedTextColor = PrimaryWhite
+                                ),
+                                modifier = Modifier.padding(horizontal = 12.dp)
+                            )
+
+                            NavigationDrawerItem(
+                                label = { Text("Explore") },
+                                icon = { Icon(Icons.Default.Explore, contentDescription = null) },
+                                selected = selectedTab == MainTab.EXPLORE,
+                                onClick = {
+                                    musicViewModel.selectTab(MainTab.EXPLORE)
+                                    coroutineScope.launch { drawerState.close() }
+                                },
+                                colors = NavigationDrawerItemDefaults.colors(
+                                    selectedContainerColor = SpotifyDarkGreenPill,
+                                    selectedIconColor = SpotifyVibrantGreen,
+                                    selectedTextColor = SpotifyVibrantGreen,
+                                    unselectedIconColor = MutedGray,
+                                    unselectedTextColor = PrimaryWhite
+                                ),
+                                modifier = Modifier.padding(horizontal = 12.dp)
+                            )
+
+                            NavigationDrawerItem(
+                                label = { Text("Library & Favorites") },
+                                icon = { Icon(Icons.Default.LibraryMusic, contentDescription = null) },
+                                selected = selectedTab == MainTab.LIBRARY,
+                                onClick = {
+                                    musicViewModel.selectTab(MainTab.LIBRARY)
+                                    coroutineScope.launch { drawerState.close() }
+                                },
+                                colors = NavigationDrawerItemDefaults.colors(
+                                    selectedContainerColor = SpotifyDarkGreenPill,
+                                    selectedIconColor = SpotifyVibrantGreen,
+                                    selectedTextColor = SpotifyVibrantGreen,
+                                    unselectedIconColor = MutedGray,
+                                    unselectedTextColor = PrimaryWhite
+                                ),
+                                modifier = Modifier.padding(horizontal = 12.dp)
+                            )
+
+                            HorizontalDivider(
+                                color = DividerDark,
+                                modifier = Modifier.padding(vertical = 12.dp)
+                            )
+
+                            NavigationDrawerItem(
+                                label = { Text("Change User Name ($userName)") },
+                                icon = { Icon(Icons.Default.Person, contentDescription = null) },
+                                selected = false,
+                                onClick = {
+                                    coroutineScope.launch { drawerState.close() }
+                                    musicViewModel.setEditNameDialogOpen(true)
+                                },
+                                colors = NavigationDrawerItemDefaults.colors(
+                                    unselectedIconColor = MutedGray,
+                                    unselectedTextColor = PrimaryWhite
+                                ),
+                                modifier = Modifier.padding(horizontal = 12.dp)
+                            )
+
+                            NavigationDrawerItem(
+                                label = { Text("Sleep Timer") },
+                                icon = { Icon(Icons.Default.Timer, contentDescription = null) },
+                                selected = sleepTimerRemainingSeconds != null,
+                                onClick = {
+                                    coroutineScope.launch { drawerState.close() }
+                                    musicViewModel.setSleepTimerDialogOpen(true)
+                                },
+                                colors = NavigationDrawerItemDefaults.colors(
+                                    selectedContainerColor = SpotifyDarkGreenPill,
+                                    selectedIconColor = SpotifyVibrantGreen,
+                                    selectedTextColor = SpotifyVibrantGreen,
+                                    unselectedIconColor = MutedGray,
+                                    unselectedTextColor = PrimaryWhite
+                                ),
+                                modifier = Modifier.padding(horizontal = 12.dp)
+                            )
+
+                            // Developer Section in Left 3-Lines Drawer
+                            NavigationDrawerItem(
+                                label = { Text("Developer") },
+                                icon = { Icon(Icons.Default.Code, contentDescription = "Developer") },
+                                selected = isDeveloperScreenOpen,
+                                onClick = {
+                                    coroutineScope.launch { drawerState.close() }
+                                    musicViewModel.setDeveloperScreenOpen(true)
+                                },
+                                colors = NavigationDrawerItemDefaults.colors(
+                                    selectedContainerColor = SpotifyDarkGreenPill,
+                                    selectedIconColor = SpotifyVibrantGreen,
+                                    selectedTextColor = SpotifyVibrantGreen,
+                                    unselectedIconColor = SpotifyVibrantGreen,
+                                    unselectedTextColor = PrimaryWhite
+                                ),
+                                modifier = Modifier
+                                    .padding(horizontal = 12.dp)
+                                    .testTag("drawer_developer_item")
                             )
                         }
-
-                        HorizontalDivider(color = DividerDark)
-                        Spacer(modifier = Modifier.height(8.dp))
-
-                        NavigationDrawerItem(
-                            label = { Text("Home") },
-                            icon = { Icon(Icons.Default.Home, contentDescription = null) },
-                            selected = selectedTab == MainTab.HOME,
-                            onClick = {
-                                musicViewModel.selectTab(MainTab.HOME)
-                                coroutineScope.launch { drawerState.close() }
-                            },
-                            colors = NavigationDrawerItemDefaults.colors(
-                                selectedContainerColor = SpotifyDarkGreenPill,
-                                selectedIconColor = SpotifyVibrantGreen,
-                                selectedTextColor = SpotifyVibrantGreen,
-                                unselectedIconColor = MutedGray,
-                                unselectedTextColor = PrimaryWhite
-                            ),
-                            modifier = Modifier.padding(horizontal = 12.dp)
-                        )
-
-                        NavigationDrawerItem(
-                            label = { Text("Top Charts") },
-                            icon = { Icon(Icons.AutoMirrored.Filled.TrendingUp, contentDescription = null) },
-                            selected = selectedTab == MainTab.TOP_CHARTS,
-                            onClick = {
-                                musicViewModel.selectTab(MainTab.TOP_CHARTS)
-                                coroutineScope.launch { drawerState.close() }
-                            },
-                            colors = NavigationDrawerItemDefaults.colors(
-                                selectedContainerColor = SpotifyDarkGreenPill,
-                                selectedIconColor = SpotifyVibrantGreen,
-                                selectedTextColor = SpotifyVibrantGreen,
-                                unselectedIconColor = MutedGray,
-                                unselectedTextColor = PrimaryWhite
-                            ),
-                            modifier = Modifier.padding(horizontal = 12.dp)
-                        )
-
-                        NavigationDrawerItem(
-                            label = { Text("Explore") },
-                            icon = { Icon(Icons.Default.Explore, contentDescription = null) },
-                            selected = selectedTab == MainTab.EXPLORE,
-                            onClick = {
-                                musicViewModel.selectTab(MainTab.EXPLORE)
-                                coroutineScope.launch { drawerState.close() }
-                            },
-                            colors = NavigationDrawerItemDefaults.colors(
-                                selectedContainerColor = SpotifyDarkGreenPill,
-                                selectedIconColor = SpotifyVibrantGreen,
-                                selectedTextColor = SpotifyVibrantGreen,
-                                unselectedIconColor = MutedGray,
-                                unselectedTextColor = PrimaryWhite
-                            ),
-                            modifier = Modifier.padding(horizontal = 12.dp)
-                        )
-
-                        NavigationDrawerItem(
-                            label = { Text("Library & Favorites") },
-                            icon = { Icon(Icons.Default.LibraryMusic, contentDescription = null) },
-                            selected = selectedTab == MainTab.LIBRARY,
-                            onClick = {
-                                musicViewModel.selectTab(MainTab.LIBRARY)
-                                coroutineScope.launch { drawerState.close() }
-                            },
-                            colors = NavigationDrawerItemDefaults.colors(
-                                selectedContainerColor = SpotifyDarkGreenPill,
-                                selectedIconColor = SpotifyVibrantGreen,
-                                selectedTextColor = SpotifyVibrantGreen,
-                                unselectedIconColor = MutedGray,
-                                unselectedTextColor = PrimaryWhite
-                            ),
-                            modifier = Modifier.padding(horizontal = 12.dp)
-                        )
-
-                        HorizontalDivider(
-                            color = DividerDark,
-                            modifier = Modifier.padding(vertical = 12.dp)
-                        )
-
-                        NavigationDrawerItem(
-                            label = { Text("Change User Name ($userName)") },
-                            icon = { Icon(Icons.Default.Person, contentDescription = null) },
-                            selected = false,
-                            onClick = {
-                                coroutineScope.launch { drawerState.close() }
-                                musicViewModel.setEditNameDialogOpen(true)
-                            },
-                            colors = NavigationDrawerItemDefaults.colors(
-                                unselectedIconColor = MutedGray,
-                                unselectedTextColor = PrimaryWhite
-                            ),
-                            modifier = Modifier.padding(horizontal = 12.dp)
-                        )
-
-                        NavigationDrawerItem(
-                            label = { Text("Sleep Timer") },
-                            icon = { Icon(Icons.Default.Timer, contentDescription = null) },
-                            selected = sleepTimerRemainingSeconds != null,
-                            onClick = {
-                                coroutineScope.launch { drawerState.close() }
-                                musicViewModel.setSleepTimerDialogOpen(true)
-                            },
-                            colors = NavigationDrawerItemDefaults.colors(
-                                selectedContainerColor = SpotifyDarkGreenPill,
-                                selectedIconColor = SpotifyVibrantGreen,
-                                selectedTextColor = SpotifyVibrantGreen,
-                                unselectedIconColor = MutedGray,
-                                unselectedTextColor = PrimaryWhite
-                            ),
-                            modifier = Modifier.padding(horizontal = 12.dp)
-                        )
-
-                        // Developer Section in Left 3-Lines Drawer
-                        NavigationDrawerItem(
-                            label = { Text("Developer") },
-                            icon = { Icon(Icons.Default.Code, contentDescription = "Developer") },
-                            selected = isDeveloperScreenOpen,
-                            onClick = {
-                                coroutineScope.launch { drawerState.close() }
-                                musicViewModel.setDeveloperScreenOpen(true)
-                            },
-                            colors = NavigationDrawerItemDefaults.colors(
-                                selectedContainerColor = SpotifyDarkGreenPill,
-                                selectedIconColor = SpotifyVibrantGreen,
-                                selectedTextColor = SpotifyVibrantGreen,
-                                unselectedIconColor = SpotifyVibrantGreen,
-                                unselectedTextColor = PrimaryWhite
-                            ),
-                            modifier = Modifier
-                                .padding(horizontal = 12.dp)
-                                .testTag("drawer_developer_item")
-                        )
                     }
-                }
-            ) {
-                Scaffold(
-                    containerColor = PureBlack,
-                    contentWindowInsets = WindowInsets.safeDrawing,
-                    snackbarHost = {
-                        SnackbarHost(hostState = snackbarHostState) { data ->
-                            Snackbar(
-                                snackbarData = data,
-                                containerColor = SurfaceDarkCard,
-                                contentColor = PrimaryWhite,
-                                actionColor = SpotifyVibrantGreen,
-                                shape = RoundedCornerShape(12.dp)
-                            )
+                ) {
+                    Scaffold(
+                        containerColor = PureBlack,
+                        contentWindowInsets = WindowInsets.safeDrawing,
+                        snackbarHost = {
+                            SnackbarHost(hostState = snackbarHostState) { data ->
+                                Snackbar(
+                                    snackbarData = data,
+                                    containerColor = SurfaceDarkCard,
+                                    contentColor = PrimaryWhite,
+                                    actionColor = SpotifyVibrantGreen,
+                                    shape = RoundedCornerShape(12.dp)
+                                )
+                            }
+                        },
+                        bottomBar = {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(PureBlack)
+                            ) {
+                                val activeSong = currentSong
+                                if (activeSong != null) {
+                                    val isFav = favorites.any { it.id == activeSong.id }
+                                    PersistentMiniPlayer(
+                                        song = activeSong,
+                                        isPlaying = isPlaying,
+                                        isBuffering = isBuffering,
+                                        isFavorite = isFav,
+                                        currentPositionMs = currentPositionMs,
+                                        durationMs = durationMs,
+                                        onExpandPlayer = { musicViewModel.openFullScreenPlayer() },
+                                        onToggleFavorite = { musicViewModel.toggleFavorite(activeSong) },
+                                        onTogglePlayPause = { musicViewModel.togglePlayPause() },
+                                        onSkipNext = { musicViewModel.skipToNext() }
+                                    )
+                                }
+
+                                BottomNavBar(
+                                    selectedTab = selectedTab,
+                                    onSelectTab = { musicViewModel.selectTab(it) }
+                                )
+                            }
                         }
-                    },
-                    bottomBar = {
-                        Column(
+                    ) { innerPadding ->
+                        Box(
                             modifier = Modifier
-                                .fillMaxWidth()
-                                .background(PureBlack)
+                                .fillMaxSize()
+                                .padding(top = innerPadding.calculateTopPadding())
                         ) {
-                            val activeSong = currentSong
-                            if (activeSong != null) {
-                                val isFav = favorites.any { it.id == activeSong.id }
-                                PersistentMiniPlayer(
-                                    song = activeSong,
-                                    isPlaying = isPlaying,
-                                    isBuffering = isBuffering,
-                                    isFavorite = isFav,
-                                    currentPositionMs = currentPositionMs,
-                                    durationMs = durationMs,
-                                    onExpandPlayer = { musicViewModel.openFullScreenPlayer() },
-                                    onToggleFavorite = { musicViewModel.toggleFavorite(activeSong) },
-                                    onTogglePlayPause = { musicViewModel.togglePlayPause() },
-                                    onSkipNext = { musicViewModel.skipToNext() }
-                                )
-                            }
-
-                            BottomNavBar(
-                                selectedTab = selectedTab,
-                                onSelectTab = { musicViewModel.selectTab(it) }
-                            )
-                        }
-                    }
-                ) { innerPadding ->
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(top = innerPadding.calculateTopPadding())
-                    ) {
-                        when (selectedTab) {
-                            MainTab.HOME -> {
-                                HomeScreen(
-                                    userName = userName,
-                                    songs = filteredSongs,
-                                    recentSessionHistory = sessionHistory,
-                                    searchQuery = searchQuery,
-                                    isLoading = isLoadingSongs,
-                                    currentSong = currentSong,
-                                    isPlaying = isPlaying,
-                                    onSearchQueryChange = { musicViewModel.updateSearchQuery(it) },
-                                    onSongClick = { song, list -> musicViewModel.playSong(song, list) },
-                                    onSongMoreClick = { musicViewModel.openSongOptions(it) },
-                                    onOpenDrawerMenu = {
-                                        coroutineScope.launch { drawerState.open() }
-                                    },
-                                    onRefreshCatalog = {
-                                        musicViewModel.refreshFirebaseCatalog()
-                                    },
-                                    onEditUserName = {
-                                        musicViewModel.setEditNameDialogOpen(true)
-                                    }
-                                )
-                            }
-                            MainTab.TOP_CHARTS -> {
-                                TopChartsScreen(
-                                    chartSongs = chartSongs,
-                                    selectedChartTab = selectedChartTab,
-                                    currentSong = currentSong,
-                                    isPlaying = isPlaying,
-                                    onSelectChartTab = { musicViewModel.selectChartTab(it) },
-                                    onSongClick = { song, list -> musicViewModel.playSong(song, list) },
-                                    onSongMoreClick = { musicViewModel.openSongOptions(it) },
-                                    onOpenDrawerMenu = {
-                                        coroutineScope.launch { drawerState.open() }
-                                    },
-                                    onRefreshCatalog = {
-                                        musicViewModel.refreshFirebaseCatalog()
-                                    }
-                                )
-                            }
-                            MainTab.EXPLORE -> {
-                                ExploreScreen(
-                                    songs = filteredSongs,
-                                    searchQuery = searchQuery,
-                                    selectedCountry = selectedCountry,
-                                    currentSong = currentSong,
-                                    isPlaying = isPlaying,
-                                    onSearchQueryChange = { musicViewModel.updateSearchQuery(it) },
-                                    onSelectCountry = { musicViewModel.selectCountry(it) },
-                                    onSongClick = { song, list -> musicViewModel.playSong(song, list) },
-                                    onSongMoreClick = { musicViewModel.openSongOptions(it) },
-                                    onOpenDrawerMenu = {
-                                        coroutineScope.launch { drawerState.open() }
-                                    }
-                                )
-                            }
-                            MainTab.LIBRARY -> {
-                                LibraryScreen(
-                                    subScreen = librarySubScreen,
-                                    allSongs = allSongs,
-                                    favorites = favorites,
-                                    downloadedSongs = downloadedSongs,
-                                    deviceLocalSongs = deviceLocalSongs,
-                                    hasAudioStoragePermission = hasAudioStoragePermission,
-                                    playlists = playlists,
-                                    allPlaylistSongs = allPlaylistSongs,
-                                    sessionHistory = sessionHistory,
-                                    currentQueue = queue,
-                                    currentSong = currentSong,
-                                    isPlaying = isPlaying,
-                                    repeatMode = repeatMode,
-                                    onNavigateSubScreen = { musicViewModel.openLibrarySubScreen(it) },
-                                    onSongClick = { song, list -> musicViewModel.playSong(song, list) },
-                                    onSongMoreClick = { musicViewModel.openSongOptions(it) },
-                                    onCreatePlaylist = { musicViewModel.createNewPlaylist(it) },
-                                    onDeletePlaylist = { musicViewModel.deletePlaylist(it) },
-                                    onDeleteDownloadedSong = { musicViewModel.deleteDownloadedSong(it) },
-                                    onRequestStoragePermission = {
-                                        if (musicViewModel.checkAudioPermissionGranted()) {
-                                            musicViewModel.onAudioStoragePermissionResult(true)
-                                        } else {
-                                            audioPermissionLauncher.launch(audioPermissionName)
+                            when (selectedTab) {
+                                MainTab.HOME -> {
+                                    HomeScreen(
+                                        userName = userName,
+                                        songs = allSongs,
+                                        recentSessionHistory = sessionHistory,
+                                        searchQuery = homeSearchQuery,
+                                        isLoading = isLoadingSongs,
+                                        currentSong = currentSong,
+                                        isPlaying = isPlaying,
+                                        onSearchQueryChange = { musicViewModel.updateHomeSearchQuery(it) },
+                                        onSongClick = { song, list -> musicViewModel.playSong(song, list) },
+                                        onSongMoreClick = { musicViewModel.openSongOptions(it) },
+                                        onOpenDrawerMenu = {
+                                            coroutineScope.launch { drawerState.open() }
+                                        },
+                                        onRefreshCatalog = {
+                                            musicViewModel.refreshFirebaseCatalog()
+                                        },
+                                        onEditUserName = {
+                                            musicViewModel.setEditNameDialogOpen(true)
                                         }
-                                    },
-                                    onCycleRepeatMode = { musicViewModel.cycleRepeatMode() },
-                                    onOpenDrawerMenu = {
-                                        coroutineScope.launch { drawerState.open() }
-                                    }
-                                )
+                                    )
+                                }
+                                MainTab.TOP_CHARTS -> {
+                                    TopChartsScreen(
+                                        chartSongs = chartSongs,
+                                        selectedChartTab = selectedChartTab,
+                                        currentSong = currentSong,
+                                        isPlaying = isPlaying,
+                                        onSelectChartTab = { musicViewModel.selectChartTab(it) },
+                                        onSongClick = { song, list -> musicViewModel.playSong(song, list) },
+                                        onSongMoreClick = { musicViewModel.openSongOptions(it) },
+                                        onOpenDrawerMenu = {
+                                            coroutineScope.launch { drawerState.open() }
+                                        },
+                                        onRefreshCatalog = {
+                                            musicViewModel.refreshFirebaseCatalog()
+                                        }
+                                    )
+                                }
+                                MainTab.EXPLORE -> {
+                                    ExploreScreen(
+                                        songs = exploreSongs,
+                                        searchQuery = exploreSearchQuery,
+                                        isSearchingOnline = isSearchingOnline,
+                                        selectedCountry = selectedCountry,
+                                        currentSong = currentSong,
+                                        isPlaying = isPlaying,
+                                        onSearchQueryChange = { musicViewModel.updateExploreSearchQuery(it) },
+                                        onSelectCountry = { musicViewModel.selectCountry(it) },
+                                        onSongClick = { song, list -> musicViewModel.playSong(song, list) },
+                                        onSongMoreClick = { musicViewModel.openSongOptions(it) },
+                                        onOpenDrawerMenu = {
+                                            coroutineScope.launch { drawerState.open() }
+                                        }
+                                    )
+                                }
+                                MainTab.LIBRARY -> {
+                                    LibraryScreen(
+                                        subScreen = librarySubScreen,
+                                        allSongs = allSongs,
+                                        favorites = favorites,
+                                        downloadedSongs = downloadedSongs,
+                                        deviceLocalSongs = deviceLocalSongs,
+                                        hasAudioStoragePermission = hasAudioStoragePermission,
+                                        playlists = playlists,
+                                        allPlaylistSongs = allPlaylistSongs,
+                                        sessionHistory = sessionHistory,
+                                        currentQueue = queue,
+                                        currentSong = currentSong,
+                                        isPlaying = isPlaying,
+                                        repeatMode = repeatMode,
+                                        onNavigateSubScreen = { musicViewModel.openLibrarySubScreen(it) },
+                                        onSongClick = { song, list -> musicViewModel.playSong(song, list) },
+                                        onSongMoreClick = { musicViewModel.openSongOptions(it) },
+                                        onCreatePlaylist = { musicViewModel.createNewPlaylist(it) },
+                                        onDeletePlaylist = { musicViewModel.deletePlaylist(it) },
+                                        onDeleteDownloadedSong = { musicViewModel.deleteDownloadedSong(it) },
+                                        onRequestStoragePermission = {
+                                            if (musicViewModel.checkAudioPermissionGranted()) {
+                                                musicViewModel.onAudioStoragePermissionResult(true)
+                                            } else {
+                                                audioPermissionLauncher.launch(audioPermissionName)
+                                            }
+                                        },
+                                        onCycleRepeatMode = { musicViewModel.cycleRepeatMode() },
+                                        onOpenDrawerMenu = {
+                                            coroutineScope.launch { drawerState.open() }
+                                        }
+                                    )
+                                }
                             }
                         }
                     }
@@ -621,7 +663,7 @@ fun AKMusicAppRoot(
         // Slide-Up Full-Screen Player Modal
         val activePlayerSong = currentSong
         AnimatedVisibility(
-            visible = isFullScreenPlayerOpen && activePlayerSong != null,
+            visible = isFullScreenPlayerOpen && activePlayerSong != null && launchStage == LaunchStage.MAIN_APP,
             enter = slideInVertically(
                 initialOffsetY = { it },
                 animationSpec = tween(durationMillis = 320)
@@ -719,15 +761,6 @@ fun AKMusicAppRoot(
             DeveloperProfileDialog(
                 onDismiss = { musicViewModel.setDeveloperScreenOpen(false) }
             )
-        }
-
-        // Animated Neon Splash Screen Overlay on Launch
-        AnimatedVisibility(
-            visible = showSplash,
-            enter = fadeIn(),
-            exit = fadeOut(animationSpec = tween(durationMillis = 450))
-        ) {
-            SplashScreen()
         }
     }
 }

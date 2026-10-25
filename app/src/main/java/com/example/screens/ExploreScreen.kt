@@ -21,9 +21,12 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -65,6 +68,7 @@ import com.example.widgets.SongListRow
 fun ExploreScreen(
     songs: List<Song>,
     searchQuery: String,
+    isSearchingOnline: Boolean = false,
     selectedCountry: CountryOption,
     currentSong: Song?,
     isPlaying: Boolean,
@@ -109,17 +113,23 @@ fun ExploreScreen(
                             tint = PrimaryWhite
                         )
                     }
-                    Spacer(modifier = Modifier.width(8.dp))
+                    Icon(
+                        imageVector = Icons.Default.Search,
+                        contentDescription = "Search Online",
+                        tint = SpotifyVibrantGreen,
+                        modifier = Modifier.size(22.dp)
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
                     Box(
                         modifier = Modifier.weight(1f),
                         contentAlignment = Alignment.CenterStart
                     ) {
                         if (searchQuery.isEmpty()) {
                             Text(
-                                text = stringResource(id = R.string.search_placeholder),
+                                text = "Search any song in ${selectedCountry.name}...",
                                 style = MaterialTheme.typography.bodyLarge.copy(
                                     color = MutedGray,
-                                    fontSize = 16.sp
+                                    fontSize = 15.sp
                                 )
                             )
                         }
@@ -137,108 +147,301 @@ fun ExploreScreen(
                                 .testTag("explore_search_input")
                         )
                     }
+                    if (isSearchingOnline) {
+                        CircularProgressIndicator(
+                            color = SpotifyVibrantGreen,
+                            strokeWidth = 2.dp,
+                            modifier = Modifier
+                                .size(22.dp)
+                                .padding(end = 4.dp)
+                        )
+                    }
+                    if (searchQuery.isNotEmpty()) {
+                        IconButton(
+                            onClick = { onSearchQueryChange("") },
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Clear,
+                                contentDescription = "Clear search",
+                                tint = MutedGray
+                            )
+                        }
+                    }
                 }
             }
         }
 
         // Country Badge Selector (e.g., "🇮🇳 India ⌄")
         item {
-            Box(
+            Row(
                 modifier = Modifier
-                    .padding(horizontal = 16.dp, vertical = 6.dp)
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
+                Box {
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(24.dp))
+                            .background(SpotifyDarkGreenPill)
+                            .border(
+                                width = 1.dp,
+                                color = SpotifyGreenBorder,
+                                shape = RoundedCornerShape(24.dp)
+                            )
+                            .clickable { countryMenuExpanded = true }
+                            .padding(horizontal = 18.dp, vertical = 10.dp)
+                            .testTag("explore_country_selector"),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = selectedCountry.flagEmoji,
+                            fontSize = 18.sp
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text(
+                            text = selectedCountry.name,
+                            style = MaterialTheme.typography.titleMedium.copy(
+                                color = PrimaryWhite,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 16.sp
+                            )
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Icon(
+                            imageVector = Icons.Default.KeyboardArrowDown,
+                            contentDescription = "Select Country",
+                            tint = SpotifyVibrantGreen,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+
+                    DropdownMenu(
+                        expanded = countryMenuExpanded,
+                        onDismissRequest = { countryMenuExpanded = false },
+                        modifier = Modifier.background(SurfaceDarkCard)
+                    ) {
+                        SUPPORTED_COUNTRIES.forEach { option ->
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        text = "${option.flagEmoji}  ${option.name}",
+                                        color = if (option.code == selectedCountry.code) SpotifyVibrantGreen else PrimaryWhite,
+                                        fontWeight = if (option.code == selectedCountry.code) FontWeight.Bold else FontWeight.Normal
+                                    )
+                                },
+                                onClick = {
+                                    countryMenuExpanded = false
+                                    onSelectCountry(option)
+                                }
+                            )
+                        }
+                    }
+                }
+
+                Text(
+                    text = "${songs.size} tracks ready",
+                    style = MaterialTheme.typography.bodySmall.copy(
+                        color = MutedGray,
+                        fontSize = 13.sp
+                    )
+                )
+            }
+            Spacer(modifier = Modifier.height(10.dp))
+        }
+
+        // If user is actively searching in Explore, show Search Results immediately at the top!
+        if (searchQuery.isNotBlank()) {
+            item {
                 Row(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(24.dp))
-                        .background(SpotifyDarkGreenPill)
-                        .border(
-                            width = 1.dp,
-                            color = SpotifyGreenBorder,
-                            shape = RoundedCornerShape(24.dp)
-                        )
-                        .clickable { countryMenuExpanded = true }
-                        .padding(horizontal = 18.dp, vertical = 10.dp)
-                        .testTag("explore_country_selector"),
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = selectedCountry.flagEmoji,
-                        fontSize = 18.sp
-                    )
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Text(
-                        text = selectedCountry.name,
-                        style = MaterialTheme.typography.titleMedium.copy(
-                            color = PrimaryWhite,
-                            fontWeight = FontWeight.SemiBold,
-                            fontSize = 16.sp
+                        text = "${selectedCountry.flagEmoji} Results for \"$searchQuery\" (${songs.size})",
+                        style = MaterialTheme.typography.headlineMedium.copy(
+                            color = SpotifyVibrantGreen,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 19.sp
                         )
                     )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Icon(
-                        imageVector = Icons.Default.KeyboardArrowDown,
-                        contentDescription = "Select Country",
-                        tint = SpotifyVibrantGreen,
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
-
-                DropdownMenu(
-                    expanded = countryMenuExpanded,
-                    onDismissRequest = { countryMenuExpanded = false },
-                    modifier = Modifier.background(SurfaceDarkCard)
-                ) {
-                    SUPPORTED_COUNTRIES.forEach { option ->
-                        DropdownMenuItem(
-                            text = {
-                                Text(
-                                    text = "${option.flagEmoji}  ${option.name}",
-                                    color = PrimaryWhite
-                                )
-                            },
-                            onClick = {
-                                countryMenuExpanded = false
-                                onSelectCountry(option)
-                            }
-                        )
-                    }
                 }
             }
-            Spacer(modifier = Modifier.height(12.dp))
-        }
 
-        // Horizontal Sliding Carousel Cards for Trending Releases
-        item {
-            if (songs.isNotEmpty()) {
+            if (songs.isEmpty() && isSearchingOnline) {
+                item {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 48.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            CircularProgressIndicator(color = SpotifyVibrantGreen)
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text(
+                                text = "Searching songs in ${selectedCountry.name}...",
+                                style = MaterialTheme.typography.bodyMedium.copy(color = MutedGray)
+                            )
+                        }
+                    }
+                }
+            } else {
+                items(
+                    items = songs,
+                    key = { "explore_search_${it.id}" }
+                ) { song ->
+                    SongListRow(
+                        song = song,
+                        isCurrentSong = currentSong?.id == song.id,
+                        isPlaying = isPlaying,
+                        onSongClick = { onSongClick(song, songs) },
+                        onMoreClick = { onSongMoreClick(song) }
+                    )
+                }
+            }
+        } else {
+            // Horizontal Sliding Carousel Cards for Trending Releases in Selected Country
+            item {
+                if (songs.isNotEmpty()) {
+                    LazyRow(
+                        contentPadding = PaddingValues(horizontal = 16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(14.dp)
+                    ) {
+                        items(
+                            items = songs.take(12),
+                            key = { "carousel_${it.id}" }
+                        ) { song ->
+                            Column(
+                                modifier = Modifier
+                                    .width(275.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .clickable { onSongClick(song, songs) }
+                            ) {
+                                SongArtwork(
+                                    imageUrl = song.highResBannerUrl,
+                                    contentDescription = song.title,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(175.dp),
+                                    cornerRadius = 12.dp
+                                )
+                                Spacer(modifier = Modifier.height(10.dp))
+                                Text(
+                                    text = "${song.artist} - ${song.title}",
+                                    style = MaterialTheme.typography.titleMedium.copy(
+                                        color = PrimaryWhite,
+                                        fontWeight = FontWeight.SemiBold,
+                                        fontSize = 16.sp
+                                    ),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(24.dp))
+            }
+
+            // "Video charts" Section with Modern Squared Music Cards
+            item {
+                Text(
+                    text = stringResource(id = R.string.video_charts),
+                    style = MaterialTheme.typography.headlineMedium.copy(
+                        color = SpotifyVibrantGreen,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 22.sp
+                    ),
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
+                )
+            }
+
+            item {
+                val chartCategories = listOf(
+                    "Trending 20 ${selectedCountry.name}" to "Chart • ${selectedCountry.flagEmoji} Top Hits",
+                    "Daily Top Music Videos" to "Chart • Global & Local",
+                    "Top Artists ${selectedCountry.name}" to "Chart • Most Streamed"
+                )
+
                 LazyRow(
                     contentPadding = PaddingValues(horizontal = 16.dp),
                     horizontalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
-                    items(
-                        items = songs,
-                        key = { "carousel_${it.id}" }
-                    ) { song ->
+                    items(chartCategories.size) { idx ->
+                        val (chartTitle, chartSubtitle) = chartCategories[idx]
+                        val previewSong = songs.getOrNull(idx)
+
                         Column(
                             modifier = Modifier
-                                .width(275.dp)
+                                .width(164.dp)
                                 .clip(RoundedCornerShape(12.dp))
-                                .clickable { onSongClick(song, songs) }
+                                .clickable {
+                                    if (previewSong != null) {
+                                        onSongClick(previewSong, songs)
+                                    } else if (songs.isNotEmpty()) {
+                                        onSongClick(songs.first(), songs)
+                                    }
+                                }
                         ) {
-                            SongArtwork(
-                                imageUrl = song.highResBannerUrl,
-                                contentDescription = song.title,
+                            Box(
                                 modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(175.dp),
-                                cornerRadius = 12.dp
-                            )
+                                    .size(164.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(SurfaceDarkCard),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (previewSong != null) {
+                                    SongArtwork(
+                                        imageUrl = previewSong.resolvedBannerUrl,
+                                        contentDescription = chartTitle,
+                                        modifier = Modifier.fillMaxSize(),
+                                        cornerRadius = 12.dp
+                                    )
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .background(DeepCharcoal.copy(alpha = 0.45f)),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.MusicNote,
+                                            contentDescription = null,
+                                            tint = PrimaryWhite.copy(alpha = 0.85f),
+                                            modifier = Modifier.size(64.dp)
+                                        )
+                                    }
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Default.MusicNote,
+                                        contentDescription = null,
+                                        tint = MutedGray,
+                                        modifier = Modifier.size(68.dp)
+                                    )
+                                }
+                            }
                             Spacer(modifier = Modifier.height(10.dp))
                             Text(
-                                text = "${song.artist} - ${song.title}",
+                                text = chartTitle,
                                 style = MaterialTheme.typography.titleMedium.copy(
                                     color = PrimaryWhite,
-                                    fontWeight = FontWeight.SemiBold,
-                                    fontSize = 16.sp
+                                    fontWeight = FontWeight.Medium,
+                                    fontSize = 15.sp
+                                ),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = chartSubtitle,
+                                style = MaterialTheme.typography.bodyMedium.copy(
+                                    color = MutedGray,
+                                    fontSize = 13.sp
                                 ),
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
@@ -246,152 +449,33 @@ fun ExploreScreen(
                         }
                     }
                 }
-            } else {
-                Surface(
-                    color = SurfaceDarkCard,
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp)
-                        .height(175.dp)
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Text(
-                            text = "Trending releases in your music library will appear here",
-                            style = MaterialTheme.typography.bodyMedium.copy(color = MutedGray)
-                        )
-                    }
+                Spacer(modifier = Modifier.height(24.dp))
+            }
+
+            if (songs.isNotEmpty()) {
+                item {
+                    Text(
+                        text = "${selectedCountry.flagEmoji} Discover in ${selectedCountry.name} (${songs.size})",
+                        style = MaterialTheme.typography.headlineMedium.copy(
+                            color = SpotifyVibrantGreen,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 20.sp
+                        ),
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                    )
                 }
-            }
-            Spacer(modifier = Modifier.height(26.dp))
-        }
-
-        // "Video charts" Section with Modern Squared Music Cards
-        item {
-            Text(
-                text = stringResource(id = R.string.video_charts),
-                style = MaterialTheme.typography.headlineMedium.copy(
-                    color = SpotifyVibrantGreen,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 22.sp
-                ),
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
-            )
-        }
-
-        item {
-            val chartCategories = listOf(
-                "Trending 20 ${selectedCountry.name}" to "Chart • YouTube Charts",
-                "Daily Top Music Videos" to "Chart • YouTube Charts",
-                "Top Artists ${selectedCountry.name}" to "Chart • YouTube Charts"
-            )
-
-            LazyRow(
-                contentPadding = PaddingValues(horizontal = 16.dp),
-                horizontalArrangement = Arrangement.spacedBy(14.dp)
-            ) {
-                items(chartCategories.size) { idx ->
-                    val (chartTitle, chartSubtitle) = chartCategories[idx]
-                    val previewSong = songs.getOrNull(idx)
-
-                    Column(
-                        modifier = Modifier
-                            .width(164.dp)
-                            .clip(RoundedCornerShape(12.dp))
-                            .clickable {
-                                if (previewSong != null) {
-                                    onSongClick(previewSong, songs)
-                                } else if (songs.isNotEmpty()) {
-                                    onSongClick(songs.first(), songs)
-                                }
-                            }
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(164.dp)
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(SurfaceDarkCard),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            if (previewSong != null) {
-                                SongArtwork(
-                                    imageUrl = previewSong.resolvedBannerUrl,
-                                    contentDescription = chartTitle,
-                                    modifier = Modifier.fillMaxSize(),
-                                    cornerRadius = 12.dp
-                                )
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxSize()
-                                        .background(DeepCharcoal.copy(alpha = 0.45f)),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.MusicNote,
-                                        contentDescription = null,
-                                        tint = PrimaryWhite.copy(alpha = 0.85f),
-                                        modifier = Modifier.size(64.dp)
-                                    )
-                                }
-                            } else {
-                                Icon(
-                                    imageVector = Icons.Default.MusicNote,
-                                    contentDescription = null,
-                                    tint = MutedGray,
-                                    modifier = Modifier.size(68.dp)
-                                )
-                            }
-                        }
-                        Spacer(modifier = Modifier.height(10.dp))
-                        Text(
-                            text = chartTitle,
-                            style = MaterialTheme.typography.titleMedium.copy(
-                                color = PrimaryWhite,
-                                fontWeight = FontWeight.Medium,
-                                fontSize = 15.sp
-                            ),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = chartSubtitle,
-                            style = MaterialTheme.typography.bodyMedium.copy(
-                                color = MutedGray,
-                                fontSize = 13.sp
-                            ),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
+                items(
+                    items = songs,
+                    key = { "explore_row_${it.id}" }
+                ) { song ->
+                    SongListRow(
+                        song = song,
+                        isCurrentSong = currentSong?.id == song.id,
+                        isPlaying = isPlaying,
+                        onSongClick = { onSongClick(song, songs) },
+                        onMoreClick = { onSongMoreClick(song) }
+                    )
                 }
-            }
-            Spacer(modifier = Modifier.height(24.dp))
-        }
-
-        if (songs.isNotEmpty()) {
-            item {
-                Text(
-                    text = "Discover in ${selectedCountry.name}",
-                    style = MaterialTheme.typography.headlineMedium.copy(
-                        color = SpotifyVibrantGreen,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 20.sp
-                    ),
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-                )
-            }
-            items(
-                items = songs,
-                key = { "explore_row_${it.id}" }
-            ) { song ->
-                SongListRow(
-                    song = song,
-                    isCurrentSong = currentSong?.id == song.id,
-                    isPlaying = isPlaying,
-                    onSongClick = { onSongClick(song, songs) },
-                    onMoreClick = { onSongMoreClick(song) }
-                )
             }
         }
     }

@@ -13,11 +13,6 @@ import android.view.ViewGroup
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import androidx.media3.common.MediaItem
-import androidx.media3.common.MediaMetadata
-import androidx.media3.common.PlaybackException
-import androidx.media3.common.PlaybackParameters
-import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import androidx.room.Room
@@ -49,6 +44,8 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
 
 enum class MainTab {
@@ -234,12 +231,15 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // Database
+    // Database (with non-destructive MIGRATION_1_2 so user's songs & playlists are preserved across updates!)
     private val db = Room.databaseBuilder(
         appContext,
         AKMusicDatabase::class.java,
         "ak_music_local.db"
-    ).fallbackToDestructiveMigration(true).build()
+    )
+        .addMigrations(AKMusicDatabase.MIGRATION_1_2)
+        .fallbackToDestructiveMigration(true)
+        .build()
     private val libraryDao = db.musicLibraryDao()
 
     // Services
@@ -251,6 +251,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private var mediaController: MediaController? = null
     private var isUsingExoPlayerFallback = false
     private var hasHandledEndForCurrentSong = false
+    private var isCurrentSongLoadedInEngine = false
+    private var lastPersistedPosBucket = -1L
 
     // Hidden Backstage YouTube Player Controller (Primary Engine for all Admin & Online Songs!)
     private val backstagePlayer: BackstageYouTubePlayerController = BackstageYouTubePlayerController(
@@ -258,6 +260,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         onProgressUpdate = { posMs ->
             if (!isUsingExoPlayerFallback && !hasHandledEndForCurrentSong) {
                 _currentPositionMs.value = posMs
+                val bucket = posMs / 5000L
+                if (bucket != lastPersistedPosBucket) {
+                    lastPersistedPosBucket = bucket
+                    prefs.edit().putLong("last_position_ms", posMs).apply()
+                }
                 val dur = _durationMs.value
                 if (dur > 8000L && posMs >= dur - 650L) {
                     hasHandledEndForCurrentSong = true
@@ -269,7 +276,10 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         },
         onDurationUpdate = { durMs ->
             if (!isUsingExoPlayerFallback && durMs > 0L) {
-                _durationMs.value = durMs
+                if (_durationMs.value != durMs) {
+                    _durationMs.value = durMs
+                    prefs.edit().putLong("last_duration_ms", durMs).apply()
+                }
             }
         },
         onStateChangeUpdate = { state ->
@@ -306,8 +316,16 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         onErrorUpdate = { _ ->
             val active = _currentSong.value ?: return@BackstageYouTubePlayerController
             if (!isUsingExoPlayerFallback) {
-                isUsingExoPlayerFallback = true
                 viewModelScope.launch {
+                    if (!hasRetriedCurrentTrack) {
+                        hasRetriedCurrentTrack = true
+                        val altVideoId = audioExtractor.findPlayableVideoIdForSong(active)
+                        if (!altVideoId.isNullOrBlank() && altVideoId != active.cleanVideoId) {
+                            backstagePlayer.loadVideoById(altVideoId)
+                            return@launch
+                        }
+                    }
+                    isUsingExoPlayerFallback = true
                     val fallbackResult = audioExtractor.extractBestAudioStream(
                         rawVideoId = active.videoId,
                         songTitle = active.title,
@@ -316,6 +334,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     )
                     fallbackResult.fold(
                         onSuccess = { resolved ->
+                            backstagePlayer.stopAndClear()
                             _activeStreamEngine.value = resolved.sourceEngine
                             startExoPlayerWithUri(active, resolved.streamUrl)
                         },
@@ -326,6 +345,14 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     )
                 }
+            }
+        },
+        onMediaButtonAction = { action ->
+            when (action) {
+                "play" -> if (!_isPlaying.value) togglePlayPause()
+                "pause" -> if (_isPlaying.value) togglePlayPause()
+                "next" -> skipToNext()
+                "prev" -> skipToPrevious()
             }
         }
     )
@@ -369,12 +396,25 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private val _isLyricsOverlayOpen = MutableStateFlow(false)
     val isLyricsOverlayOpen: StateFlow<Boolean> = _isLyricsOverlayOpen.asStateFlow()
 
-    // Search & Live Online Search Engine
-    private val _searchQuery = MutableStateFlow("")
-    val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
+    // Separate Search States:
+    // 1) Home Search Query -> Filters played songs from Last Session on Home
+    // 2) Explore Search Query -> Fast Online Search Engine with Country Patching on Explore
+    private val _homeSearchQuery = MutableStateFlow("")
+    val homeSearchQuery: StateFlow<String> = _homeSearchQuery.asStateFlow()
+
+    private val _exploreSearchQuery = MutableStateFlow("")
+    val exploreSearchQuery: StateFlow<String> = _exploreSearchQuery.asStateFlow()
+
+    // Keep backward-compatible alias if referenced anywhere
+    val searchQuery: StateFlow<String> = _homeSearchQuery.asStateFlow()
 
     private val _onlineSearchResults = MutableStateFlow<List<Song>>(emptyList())
+    private val _countryTrendingSongs = MutableStateFlow<List<Song>>(emptyList())
+    private val _isSearchingOnline = MutableStateFlow(false)
+    val isSearchingOnline: StateFlow<Boolean> = _isSearchingOnline.asStateFlow()
+
     private var searchJob: Job? = null
+    private var countryFetchJob: Job? = null
 
     private val _selectedChartTab = MutableStateFlow(ChartTab.LOCAL)
     val selectedChartTab: StateFlow<ChartTab> = _selectedChartTab.asStateFlow()
@@ -382,32 +422,44 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private val _selectedCountry = MutableStateFlow(SUPPORTED_COUNTRIES.first())
     val selectedCountry: StateFlow<CountryOption> = _selectedCountry.asStateFlow()
 
-    // Catalog Songs & Filtered State (Admin Catalog + Live Online Search Engine)
+    // Catalog Songs (Admin Firebase Catalog + Curated Default Catalog)
     val allSongs: StateFlow<List<Song>> = firebaseService.songs
     val isLoadingSongs: StateFlow<Boolean> = firebaseService.isLoading
     val firebaseError: StateFlow<String?> = firebaseService.connectionError
 
-    val filteredSongs: StateFlow<List<Song>> = combine(
+    // Explore Songs StateFlow (Combines Catalog + Country Trending + Live Online Search Results)
+    val exploreSongs: StateFlow<List<Song>> = combine(
         firebaseService.songs,
-        _searchQuery,
-        _onlineSearchResults
-    ) { songs, query, onlineMatches ->
+        _exploreSearchQuery,
+        _onlineSearchResults,
+        _countryTrendingSongs,
+        _selectedCountry
+    ) { catalogSongs, query, onlineMatches, countrySongs, country ->
         val trimmed = query.trim()
         if (trimmed.isEmpty()) {
-            songs
+            if (countrySongs.isNotEmpty()) {
+                val seenIds = countrySongs.map { it.cleanVideoId.lowercase() }.filter { it.isNotBlank() }.toSet()
+                val extraCatalog = catalogSongs.filter { it.cleanVideoId.lowercase() !in seenIds }
+                countrySongs + extraCatalog
+            } else {
+                catalogSongs
+            }
         } else {
             val tokens = trimmed.lowercase().split(Regex("\\s+")).filter { it.isNotBlank() }
-            val localMatches = songs.filter { song ->
+            val localPool = (catalogSongs + countrySongs).distinctBy { it.cleanVideoId.ifBlank { it.id } }
+            val localMatches = localPool.filter { song ->
                 val haystack = "${song.title} ${song.artist} ${song.videoId}".lowercase()
                 tokens.all { token -> haystack.contains(token) } ||
                         song.title.contains(trimmed, ignoreCase = true) ||
                         song.artist.contains(trimmed, ignoreCase = true)
             }
-            val existingVideoIds = localMatches.map { it.cleanVideoId }.toSet()
-            val extraOnline = onlineMatches.filter { it.cleanVideoId !in existingVideoIds }
+            val existingVideoIds = localMatches.map { it.cleanVideoId.lowercase() }.toSet()
+            val extraOnline = onlineMatches.filter { it.cleanVideoId.lowercase() !in existingVideoIds }
             localMatches + extraOnline
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val filteredSongs: StateFlow<List<Song>> = firebaseService.songs
 
     // Local Room Flows
     val favoriteEntities: StateFlow<List<FavoriteSongEntity>> = libraryDao.getAllFavorites()
@@ -501,6 +553,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
         MusicPlaybackService.onTogglePlayPauseCallback = { shouldPlay ->
             viewModelScope.launch {
+                val active = _currentSong.value ?: return@launch
+                if (!isCurrentSongLoadedInEngine && shouldPlay) {
+                    playSong(active, _queue.value)
+                    return@launch
+                }
                 if (isUsingExoPlayerFallback) {
                     _isPlaying.value = shouldPlay
                     if (shouldPlay) _isBuffering.value = false
@@ -531,9 +588,76 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         // Create hidden backstage WebView on main thread
         backstagePlayer.getOrCreateWebView()
         initializeMediaController()
+        restorePersistedPlaybackState()
         startProgressPoller()
         if (checkAudioPermissionGranted()) {
             loadDeviceLocalSongs()
+        }
+        fetchCountryTrendingSongs(_selectedCountry.value)
+    }
+
+    /**
+     * Restores the last selected/playing song and queue when the app is reopened so the
+     * bottom mini-player never resets or loses the user's selected song!
+     */
+    private fun restorePersistedPlaybackState() {
+        try {
+            val activeFromService = MusicPlaybackService.getCurrentSyncedSong()
+            val savedQueueJson = prefs.getString("last_queue_json", null)
+            val restoredQueue = mutableListOf<Song>()
+            if (!savedQueueJson.isNullOrBlank()) {
+                val arr = JSONArray(savedQueueJson)
+                for (i in 0 until arr.length()) {
+                    val obj = arr.optJSONObject(i) ?: continue
+                    val s = Song.fromJsonObject(obj)
+                    if (s.id.isNotBlank() && s.title.isNotBlank()) {
+                        restoredQueue.add(s)
+                    }
+                }
+            }
+
+            if (activeFromService != null) {
+                _currentSong.value = activeFromService
+                _queue.value = restoredQueue.ifEmpty { listOf(activeFromService) }
+                _isPlaying.value = MusicPlaybackService.isCurrentlyPlaying()
+                isCurrentSongLoadedInEngine = true
+                return
+            }
+
+            val savedSongJson = prefs.getString("last_song_json", null)
+            if (!savedSongJson.isNullOrBlank()) {
+                val restoredSong = Song.fromJsonObject(JSONObject(savedSongJson))
+                if (restoredSong.id.isNotBlank() && restoredSong.title.isNotBlank()) {
+                    _currentSong.value = restoredSong
+                    _queue.value = if (restoredQueue.isNotEmpty()) {
+                        restoredQueue
+                    } else {
+                        listOf(restoredSong)
+                    }
+                    _currentPositionMs.value = prefs.getLong("last_position_ms", 0L).coerceAtLeast(0L)
+                    _durationMs.value = prefs.getLong("last_duration_ms", 0L).coerceAtLeast(0L)
+                    _isPlaying.value = false
+                    _isBuffering.value = false
+                    isCurrentSongLoadedInEngine = false
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to restore last song state", e)
+        }
+    }
+
+    private fun persistPlaybackSelection(song: Song, currentQueue: List<Song>) {
+        try {
+            val queueArr = JSONArray()
+            currentQueue.take(50).forEach { item ->
+                queueArr.put(item.toJsonObject())
+            }
+            prefs.edit()
+                .putString("last_song_json", song.toJsonObject().toString())
+                .putString("last_queue_json", queueArr.toString())
+                .putLong("last_position_ms", 0L)
+                .apply()
+        } catch (_: Exception) {
         }
     }
 
@@ -563,7 +687,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private fun startProgressPoller() {
         viewModelScope.launch {
             while (isActive) {
-                if (isUsingExoPlayerFallback) {
+                if (isUsingExoPlayerFallback && isCurrentSongLoadedInEngine) {
                     val isPlayingNow = MusicPlaybackService.isExoPlaying()
                     _isPlaying.value = isPlayingNow
                     if (isPlayingNow) {
@@ -571,8 +695,16 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                         val pos = MusicPlaybackService.getCurrentExoPositionMs()
                         val total = MusicPlaybackService.getCurrentExoDurationMs()
                         _currentPositionMs.value = pos
+                        val bucket = pos / 5000L
+                        if (bucket != lastPersistedPosBucket) {
+                            lastPersistedPosBucket = bucket
+                            prefs.edit().putLong("last_position_ms", pos).apply()
+                        }
                         if (total > 0L) {
-                            _durationMs.value = total
+                            if (_durationMs.value != total) {
+                                _durationMs.value = total
+                                prefs.edit().putLong("last_duration_ms", total).apply()
+                            }
                             if (!hasHandledEndForCurrentSong && total > 4000L && pos >= total - 500L) {
                                 hasHandledEndForCurrentSong = true
                                 handleTrackEnded()
@@ -600,19 +732,35 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun updateHomeSearchQuery(query: String) {
+        _homeSearchQuery.value = query
+    }
+
     fun updateSearchQuery(query: String) {
-        _searchQuery.value = query
+        updateExploreSearchQuery(query)
+    }
+
+    fun updateExploreSearchQuery(query: String) {
+        _exploreSearchQuery.value = query
         searchJob?.cancel()
         val trimmed = query.trim()
         if (trimmed.length < 2) {
             _onlineSearchResults.value = emptyList()
+            _isSearchingOnline.value = false
             return
         }
+        val country = _selectedCountry.value
         searchJob = viewModelScope.launch {
-            delay(350L)
-            val results = audioExtractor.searchSongsOnline(trimmed)
-            if (_searchQuery.value.trim() == trimmed) {
+            _isSearchingOnline.value = true
+            delay(150L)
+            val results = audioExtractor.searchSongsOnline(
+                query = trimmed,
+                countryCode = country.code,
+                countryName = country.name
+            )
+            if (_exploreSearchQuery.value.trim() == trimmed) {
                 _onlineSearchResults.value = results
+                _isSearchingOnline.value = false
             }
         }
     }
@@ -624,6 +772,25 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     fun selectCountry(country: CountryOption) {
         _selectedCountry.value = country
         emitSnackbar("Explore region switched to ${country.flagEmoji} ${country.name}")
+        fetchCountryTrendingSongs(country)
+        val currentExploreQuery = _exploreSearchQuery.value.trim()
+        if (currentExploreQuery.length >= 2) {
+            updateExploreSearchQuery(currentExploreQuery)
+        }
+    }
+
+    private fun fetchCountryTrendingSongs(country: CountryOption) {
+        countryFetchJob?.cancel()
+        countryFetchJob = viewModelScope.launch {
+            _isSearchingOnline.value = true
+            val trending = audioExtractor.searchSongsOnline(
+                query = country.trendingQuery,
+                countryCode = country.code,
+                countryName = country.name
+            )
+            _countryTrendingSongs.value = trending
+            _isSearchingOnline.value = false
+        }
     }
 
     fun openFullScreenPlayer() {
@@ -673,19 +840,23 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             ?: allSongs.value.takeIf { it.isNotEmpty() }
             ?: listOf(song)
 
-        _queue.value = if (currentList.any { it.id == song.id }) {
+        val resolvedQueue = if (currentList.any { it.id == song.id }) {
             currentList
         } else {
             listOf(song) + currentList
         }
+        _queue.value = resolvedQueue
 
         hasRetriedCurrentTrack = false
         hasHandledEndForCurrentSong = false
+        isCurrentSongLoadedInEngine = true
         _currentSong.value = song
         _currentPositionMs.value = 0L
         _durationMs.value = 0L
         _isBuffering.value = true
         _isPlaying.value = true
+
+        persistPlaybackSelection(song, resolvedQueue)
 
         viewModelScope.launch {
             val existing = libraryDao.getHistoryItem(song.id)
@@ -699,19 +870,23 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     bannerUrl = song.bannerUrl,
                     timestamp = song.timestamp,
                     playedAt = System.currentTimeMillis(),
-                    playCount = newCount
+                    playCount = newCount,
+                    localContentUri = song.resolvedLocalUri
                 )
             )
         }
 
         playbackJob?.cancel()
         playbackJob = viewModelScope.launch {
-            // 1. Check if song is a local device audio file from MediaStore
-            if (song.localContentUri.isNotBlank()) {
+            // 1. Check if song is a local device audio file from MediaStore (works 100% online AND offline!)
+            val deviceMatchUri = song.resolvedLocalUri.ifBlank {
+                _deviceLocalSongs.value.firstOrNull { it.id == song.id }?.resolvedLocalUri.orEmpty()
+            }
+            if (deviceMatchUri.isNotBlank()) {
                 isUsingExoPlayerFallback = true
-                backstagePlayer.pauseVideo()
+                backstagePlayer.stopAndClear()
                 _activeStreamEngine.value = "Device Local Audio"
-                startExoPlayerWithUri(song, song.localContentUri)
+                startExoPlayerWithUri(song, deviceMatchUri)
                 return@launch
             }
 
@@ -721,19 +896,38 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 val localFile = File(downloaded.localFilePath)
                 if (localFile.exists()) {
                     isUsingExoPlayerFallback = true
-                    backstagePlayer.pauseVideo()
+                    backstagePlayer.stopAndClear()
                     _activeStreamEngine.value = "Offline Storage"
                     startExoPlayerWithUri(song, Uri.fromFile(localFile).toString())
                     return@launch
                 }
             }
 
-            // 3. Primary Engine for ALL Admin & Online Songs:
+            // 3. Resolve playable YouTube Video ID (even if a legacy history/library row had a blank videoId)
+            var playableVideoId = song.cleanVideoId
+            if (playableVideoId.isBlank()) {
+                val catalogMatch = allSongs.value.firstOrNull {
+                    it.id == song.id || it.title.equals(song.title, ignoreCase = true)
+                }
+                playableVideoId = catalogMatch?.cleanVideoId.orEmpty()
+                if (playableVideoId.isBlank()) {
+                    playableVideoId = audioExtractor.findPlayableVideoIdForSong(song).orEmpty()
+                }
+            }
+
+            if (playableVideoId.isBlank()) {
+                _isBuffering.value = false
+                _isPlaying.value = false
+                emitSnackbar("Could not locate audio stream for \"${song.title}\".")
+                return@launch
+            }
+
+            // 4. Primary Engine for ALL Admin & Online Songs:
             // Play immediately via BackstageYouTubePlayerController AND sync the Foreground
-            // MediaSessionService Notification Bar + WakeLock!
+            // MediaSessionService Notification Bar + Lock Screen + WakeLock!
             isUsingExoPlayerFallback = false
             _activeStreamEngine.value = "Backstage YouTube Engine"
-            backstagePlayer.loadVideoById(song.cleanVideoId)
+            backstagePlayer.loadVideoById(playableVideoId)
             MusicPlaybackService.syncNowPlaying(
                 context = appContext,
                 song = song,
@@ -758,6 +952,10 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     fun togglePlayPause() {
         val activeSong = _currentSong.value ?: return
+        if (!isCurrentSongLoadedInEngine) {
+            playSong(activeSong, _queue.value)
+            return
+        }
         if (isUsingExoPlayerFallback) {
             val nextPlay = !_isPlaying.value
             _isPlaying.value = nextPlay
@@ -785,6 +983,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         val maxDur = _durationMs.value.takeIf { it > 0L } ?: Long.MAX_VALUE
         val clampedMs = positionMs.coerceIn(0L, maxDur)
         _currentPositionMs.value = clampedMs
+        prefs.edit().putLong("last_position_ms", clampedMs).apply()
 
         if (isUsingExoPlayerFallback) {
             MusicPlaybackService.syncSeekPosition(clampedMs)
@@ -911,7 +1110,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                         artist = initialSong.artist,
                         videoId = initialSong.videoId,
                         bannerUrl = initialSong.bannerUrl,
-                        timestamp = initialSong.timestamp
+                        timestamp = initialSong.timestamp,
+                        localContentUri = initialSong.resolvedLocalUri
                     )
                 )
                 emitSnackbar("Created \"$trimmed\" and added \"${initialSong.title}\"")
@@ -931,7 +1131,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     artist = song.artist,
                     videoId = song.videoId,
                     bannerUrl = song.bannerUrl,
-                    timestamp = song.timestamp
+                    timestamp = song.timestamp,
+                    localContentUri = song.resolvedLocalUri
                 )
             )
             emitSnackbar("Added \"${song.title}\" to ${playlist.name}")
@@ -967,7 +1168,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                             bannerUrl = song.bannerUrl,
                             timestamp = song.timestamp,
                             localFilePath = file.absolutePath,
-                            fileSizeBytes = file.length()
+                            fileSizeBytes = file.length(),
+                            localContentUri = Uri.fromFile(file).toString()
                         )
                     )
                     emitSnackbar("Downloaded \"${song.title}\" to My Music")
@@ -1011,7 +1213,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             if (remaining <= 0L) {
                 _sleepTimerRemainingSeconds.value = null
                 backstagePlayer.pauseVideo()
-                mediaController?.pause()
+                MusicPlaybackService.syncPlayState(false)
                 _isPlaying.value = false
                 emitSnackbar("Sleep timer ended — playback paused")
             }

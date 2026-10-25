@@ -37,6 +37,189 @@ class FirebaseSongsService(private val context: Context) {
         const val STORAGE_BUCKET = "file-66f59.firebasestorage.app"
         private const val APP_ID = "1:237773536493:android:a7740030a05679148c60e4"
         private const val API_KEY = "AIzaSyDFYXjGLUHYu9whP7cawDwsunYR2f1elaE"
+
+        val DEFAULT_CURATED_SONGS = listOf(
+            Song(
+                id = "default_kesariya",
+                title = "Kesariya - Brahmastra",
+                artist = "Arijit Singh, Pritam",
+                videoId = "BddP6PYo2gs",
+                bannerUrl = "https://img.youtube.com/vi/BddP6PYo2gs/hqdefault.jpg",
+                rank = 101,
+                isTopChart = true,
+                timestamp = 1710000020000L
+            ),
+            Song(
+                id = "default_apna_bana_le",
+                title = "Apna Bana Le - Bhediya",
+                artist = "Arijit Singh, Sachin-Jigar",
+                videoId = "ElZfdU54Cp8",
+                bannerUrl = "https://img.youtube.com/vi/ElZfdU54Cp8/hqdefault.jpg",
+                rank = 102,
+                isTopChart = true,
+                timestamp = 1710000019000L
+            ),
+            Song(
+                id = "default_chaleya",
+                title = "Chaleya - Jawan",
+                artist = "Arijit Singh, Shilpa Rao, Anirudh",
+                videoId = "VAdGW7QDJiU",
+                bannerUrl = "https://img.youtube.com/vi/VAdGW7QDJiU/hqdefault.jpg",
+                rank = 103,
+                isTopChart = true,
+                timestamp = 1710000018000L
+            ),
+            Song(
+                id = "default_heeriye",
+                title = "Heeriye",
+                artist = "Jasleen Royal, Arijit Singh",
+                videoId = "RLzC55ai0eo",
+                bannerUrl = "https://img.youtube.com/vi/RLzC55ai0eo/hqdefault.jpg",
+                rank = 104,
+                isTopChart = true,
+                timestamp = 1710000017000L
+            ),
+            Song(
+                id = "default_o_maahi",
+                title = "O Maahi - Dunki",
+                artist = "Arijit Singh, Pritam",
+                videoId = "Zlqf9cuaOBw",
+                bannerUrl = "https://img.youtube.com/vi/Zlqf9cuaOBw/hqdefault.jpg",
+                rank = 105,
+                isTopChart = true,
+                timestamp = 1710000016000L
+            ),
+            Song(
+                id = "default_satranga",
+                title = "Satranga - Animal",
+                artist = "Arijit Singh, Shreyas Puranik",
+                videoId = "HrnrqYxYrbk",
+                bannerUrl = "https://img.youtube.com/vi/HrnrqYxYrbk/hqdefault.jpg",
+                rank = 106,
+                isTopChart = true,
+                timestamp = 1710000015000L
+            ),
+            Song(
+                id = "default_tauba_tauba",
+                title = "Tauba Tauba - Bad Newz",
+                artist = "Karan Aujla",
+                videoId = "LK7-_dgAVQE",
+                bannerUrl = "https://img.youtube.com/vi/LK7-_dgAVQE/hqdefault.jpg",
+                rank = 107,
+                isTopChart = true,
+                timestamp = 1710000014000L
+            ),
+            Song(
+                id = "default_aaj_ki_raat",
+                title = "Aaj Ki Raat - Stree 2",
+                artist = "Madhubanti Bagchi, Divya Kumar, Sachin-Jigar",
+                videoId = "rozTr9_s77A",
+                bannerUrl = "https://img.youtube.com/vi/rozTr9_s77A/hqdefault.jpg",
+                rank = 108,
+                isTopChart = true,
+                timestamp = 1710000013000L
+            ),
+            Song(
+                id = "default_sajni",
+                title = "Sajni - Laapataa Ladies",
+                artist = "Arijit Singh, Ram Sampath",
+                videoId = "k3g_WjLCsXM",
+                bannerUrl = "https://img.youtube.com/vi/k3g_WjLCsXM/hqdefault.jpg",
+                rank = 109,
+                isTopChart = true,
+                timestamp = 1710000012000L
+            ),
+            Song(
+                id = "default_husn",
+                title = "Husn",
+                artist = "Anuv Jain",
+                videoId = "gJLVTKhTnog",
+                bannerUrl = "https://img.youtube.com/vi/gJLVTKhTnog/hqdefault.jpg",
+                rank = 110,
+                isTopChart = true,
+                timestamp = 1710000011000L
+            ),
+            Song(
+                id = "default_tum_hi_ho",
+                title = "Tum Hi Ho - Aashiqui 2",
+                artist = "Arijit Singh, Mithoon",
+                videoId = "IJq0yyWug1k",
+                bannerUrl = "https://img.youtube.com/vi/IJq0yyWug1k/hqdefault.jpg",
+                rank = 111,
+                isTopChart = true,
+                timestamp = 1710000010000L
+            ),
+            Song(
+                id = "default_raataan_lambiyan",
+                title = "Raataan Lambiyan - Shershaah",
+                artist = "Jubin Nautiyal, Asees Kaur, Tanishk Bagchi",
+                videoId = "gvyUuxdRdR4",
+                bannerUrl = "https://img.youtube.com/vi/gvyUuxdRdR4/hqdefault.jpg",
+                rank = 112,
+                isTopChart = true,
+                timestamp = 1710000009000L
+            ),
+            Song(
+                id = "default_pasoori",
+                title = "Pasoori",
+                artist = "Ali Sethi, Shae Gill",
+                videoId = "5Eqb_-j3FDA",
+                bannerUrl = "https://img.youtube.com/vi/5Eqb_-j3FDA/hqdefault.jpg",
+                rank = 113,
+                isTopChart = true,
+                timestamp = 1710000008000L
+            ),
+            Song(
+                id = "default_blinding_lights",
+                title = "Blinding Lights",
+                artist = "The Weeknd",
+                videoId = "4NRXx6U8ABQ",
+                bannerUrl = "https://img.youtube.com/vi/4NRXx6U8ABQ/hqdefault.jpg",
+                rank = 114,
+                isTopChart = true,
+                timestamp = 1710000007000L
+            ),
+            Song(
+                id = "default_shape_of_you",
+                title = "Shape of You",
+                artist = "Ed Sheeran",
+                videoId = "JGwWNGJdvx8",
+                bannerUrl = "https://img.youtube.com/vi/JGwWNGJdvx8/hqdefault.jpg",
+                rank = 115,
+                isTopChart = true,
+                timestamp = 1710000006000L
+            ),
+            Song(
+                id = "default_starboy",
+                title = "Starboy",
+                artist = "The Weeknd, Daft Punk",
+                videoId = "34Na4j8AVgA",
+                bannerUrl = "https://img.youtube.com/vi/34Na4j8AVgA/hqdefault.jpg",
+                rank = 116,
+                isTopChart = true,
+                timestamp = 1710000005000L
+            ),
+            Song(
+                id = "default_believer",
+                title = "Believer",
+                artist = "Imagine Dragons",
+                videoId = "7wtfhZwyrcc",
+                bannerUrl = "https://img.youtube.com/vi/7wtfhZwyrcc/hqdefault.jpg",
+                rank = 117,
+                isTopChart = true,
+                timestamp = 1710000004000L
+            ),
+            Song(
+                id = "default_calm_down",
+                title = "Calm Down",
+                artist = "Rema, Selena Gomez",
+                videoId = "WcIcVapfqXw",
+                bannerUrl = "https://img.youtube.com/vi/WcIcVapfqXw/hqdefault.jpg",
+                rank = 118,
+                isTopChart = true,
+                timestamp = 1710000003000L
+            )
+        )
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -45,10 +228,10 @@ class FirebaseSongsService(private val context: Context) {
         .readTimeout(10, TimeUnit.SECONDS)
         .build()
 
-    private val _songs = MutableStateFlow<List<Song>>(emptyList())
+    private val _songs = MutableStateFlow<List<Song>>(DEFAULT_CURATED_SONGS)
     val songs: StateFlow<List<Song>> = _songs.asStateFlow()
 
-    private val _isLoading = MutableStateFlow(true)
+    private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
 
     private val _connectionError = MutableStateFlow<String?>(null)
@@ -59,6 +242,13 @@ class FirebaseSongsService(private val context: Context) {
 
     init {
         initializeCloudAndListen()
+    }
+
+    private fun mergeWithDefaultCatalog(adminSongs: List<Song>): List<Song> {
+        val sortedAdmin = sortCatalogTracks(adminSongs)
+        val adminVideoIds = sortedAdmin.map { it.cleanVideoId.lowercase() }.filter { it.isNotBlank() }.toSet()
+        val extras = DEFAULT_CURATED_SONGS.filter { it.cleanVideoId.lowercase() !in adminVideoIds }
+        return sortedAdmin + extras
     }
 
     private fun initializeCloudAndListen() {
@@ -89,7 +279,7 @@ class FirebaseSongsService(private val context: Context) {
             val listener = object : ValueEventListener {
                 override fun onDataChange(snapshot: DataSnapshot) {
                     val parsedList = parseSnapshot(snapshot)
-                    _songs.value = sortCatalogTracks(parsedList)
+                    _songs.value = mergeWithDefaultCatalog(parsedList)
                     _isLoading.value = false
                     _connectionError.value = null
                 }
@@ -116,7 +306,7 @@ class FirebaseSongsService(private val context: Context) {
 
     private fun sortCatalogTracks(list: List<Song>): List<Song> {
         return list.sortedWith(
-            compareBy<Song> { if (it.rank > 0) it.rank else Int.MAX_VALUE }
+            compareBy<Song> { if (it.rank in 1..99) it.rank else Int.MAX_VALUE }
                 .thenByDescending { it.timestamp }
         )
     }
@@ -176,7 +366,6 @@ class FirebaseSongsService(private val context: Context) {
 
             val isTopChart = parseBooleanField(child.child("isTopChart").value)
 
-            // Parse Admin-controlled download permission flag across common key names
             val allowDownload = listOf(
                 "allowDownload",
                 "canDownload",
@@ -237,14 +426,14 @@ class FirebaseSongsService(private val context: Context) {
 
                 val bodyStr = response.body?.string()?.trim() ?: "null"
                 if (bodyStr == "null" || bodyStr.isEmpty()) {
-                    _songs.value = emptyList()
+                    _songs.value = DEFAULT_CURATED_SONGS
                     _isLoading.value = false
                     _connectionError.value = null
                     return@withContext
                 }
 
                 val list = parseSongsJson(bodyStr)
-                _songs.value = sortCatalogTracks(list)
+                _songs.value = mergeWithDefaultCatalog(list)
                 _connectionError.value = null
                 _isLoading.value = false
             }

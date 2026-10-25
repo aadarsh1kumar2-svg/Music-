@@ -3,6 +3,7 @@ package com.example.services
 import android.util.Log
 import com.example.models.Song
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
@@ -86,16 +87,17 @@ class AudioStreamExtractor {
     }
 
     private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(5, TimeUnit.SECONDS)
-        .readTimeout(5, TimeUnit.SECONDS)
-        .writeTimeout(5, TimeUnit.SECONDS)
-        .callTimeout(6, TimeUnit.SECONDS)
+        .connectTimeout(4, TimeUnit.SECONDS)
+        .readTimeout(4, TimeUnit.SECONDS)
+        .writeTimeout(4, TimeUnit.SECONDS)
+        .callTimeout(5, TimeUnit.SECONDS)
         .followRedirects(true)
         .followSslRedirects(true)
         .build()
 
     // Cache resolved stream URLs for 20 minutes
     private val streamCache = ConcurrentHashMap<String, Pair<Long, ResolvedAudioStream>>()
+    private val searchCache = ConcurrentHashMap<String, List<Song>>()
     private val cacheTtlMs = 20 * 60 * 1000L
 
     fun invalidateCachedStream(rawVideoId: String) {
@@ -110,23 +112,72 @@ class AudioStreamExtractor {
     }
 
     /**
-     * Live Online Search Engine: Searches YouTube for any song title/artist query
-     * and returns playable Song items so the user can search and play any song!
+     * Ultra-Fast Live Online Search Engine with Country Region Patching:
+     * Searches YouTube in parallel (WEB + Regional Query) and returns up to 40 playable songs!
      */
-    suspend fun searchSongsOnline(query: String): List<Song> = withContext(Dispatchers.IO) {
+    suspend fun searchSongsOnline(
+        query: String,
+        countryCode: String = "IN",
+        countryName: String = "India"
+    ): List<Song> = withContext(Dispatchers.IO) {
         val trimmed = query.trim()
         if (trimmed.length < 2) return@withContext emptyList()
 
-        // 1. Primary: YouTube InnerTube Search API (fast & rich metadata)
-        val innerTubeResults = searchViaInnerTube(trimmed)
-        if (innerTubeResults.isNotEmpty()) {
-            return@withContext innerTubeResults
+        val resolvedGl = if (countryCode.equals("GLOBAL", ignoreCase = true) || countryCode.length != 2) {
+            "US"
+        } else {
+            countryCode.uppercase()
         }
 
-        // 2. Fallback: Piped Search API
+        val cacheKey = "${resolvedGl}_${trimmed.lowercase()}"
+        searchCache[cacheKey]?.takeIf { it.isNotEmpty() }?.let { return@withContext it }
+
+        val merged = coroutineScope {
+            val primaryDeferred = async {
+                searchViaInnerTube(
+                    query = "$trimmed song",
+                    gl = resolvedGl,
+                    maxResults = 35
+                )
+            }
+            val regionalDeferred = async {
+                if (!countryCode.equals("GLOBAL", ignoreCase = true) &&
+                    !trimmed.contains(countryName, ignoreCase = true)
+                ) {
+                    searchViaInnerTube(
+                        query = "$trimmed $countryName song",
+                        gl = resolvedGl,
+                        maxResults = 20
+                    )
+                } else {
+                    emptyList()
+                }
+            }
+
+            val primaryList = primaryDeferred.await()
+            val regionalList = regionalDeferred.await()
+
+            val combined = mutableListOf<Song>()
+            val seenVideoIds = mutableSetOf<String>()
+            for (song in primaryList + regionalList) {
+                if (song.cleanVideoId.isNotBlank() && seenVideoIds.add(song.cleanVideoId)) {
+                    combined.add(song)
+                }
+                if (combined.size >= 40) break
+            }
+            combined
+        }
+
+        if (merged.isNotEmpty()) {
+            searchCache[cacheKey] = merged
+            return@withContext merged
+        }
+
+        // Fallback: Piped Search API
         for (baseUrl in PIPED_MIRRORS.take(2)) {
             val pipedResults = searchViaPiped(baseUrl, trimmed)
             if (pipedResults.isNotEmpty()) {
+                searchCache[cacheKey] = pipedResults
                 return@withContext pipedResults
             }
         }
@@ -134,17 +185,21 @@ class AudioStreamExtractor {
         emptyList()
     }
 
-    private fun searchViaInnerTube(query: String): List<Song> {
+    private fun searchViaInnerTube(
+        query: String,
+        gl: String = "IN",
+        maxResults: Int = 35
+    ): List<Song> {
         return try {
             val clientObj = JSONObject().apply {
                 put("clientName", "WEB")
                 put("clientVersion", "2.20241118.01.00")
                 put("hl", "en")
-                put("gl", "IN")
+                put("gl", gl)
             }
             val payload = JSONObject().apply {
                 put("context", JSONObject().put("client", clientObj))
-                put("query", "$query song")
+                put("query", query)
             }
             val request = Request.Builder()
                 .url("https://www.youtube.com/youtubei/v1/search?prettyPrint=false")
@@ -171,22 +226,22 @@ class AudioStreamExtractor {
                         .replace("\\\"", "\"")
                         .replace("\\u0026", "&")
                         .replace("&amp;", "&")
-                    val artist = if (rawTitle.contains(" - ")) {
-                        rawTitle.substringBefore(" - ").trim()
-                    } else {
-                        "AADIFY Music"
+                    val artist = when {
+                        rawTitle.contains(" - ") -> rawTitle.substringBefore(" - ").trim()
+                        rawTitle.contains(" | ") -> rawTitle.substringAfter(" | ").trim()
+                        else -> "AADIFY Music"
                     }
                     results.add(
                         Song(
                             id = "yt_search_$vid",
                             title = rawTitle,
-                            artist = artist,
+                            artist = artist.ifBlank { "AADIFY Music" },
                             videoId = vid,
                             bannerUrl = "https://img.youtube.com/vi/$vid/hqdefault.jpg",
                             timestamp = System.currentTimeMillis()
                         )
                     )
-                    if (results.size >= 15) break
+                    if (results.size >= maxResults) break
                 }
                 results
             }
@@ -234,13 +289,20 @@ class AudioStreamExtractor {
                             timestamp = System.currentTimeMillis()
                         )
                     )
-                    if (results.size >= 15) break
+                    if (results.size >= 30) break
                 }
                 results
             }
         } catch (_: Exception) {
             emptyList()
         }
+    }
+
+    suspend fun findPlayableVideoIdForSong(song: Song): String? = withContext(Dispatchers.IO) {
+        val q = "${song.title} ${song.artist}".trim()
+        if (q.isBlank()) return@withContext null
+        val ids = searchPlayableVideoIds("$q official audio")
+        ids.firstOrNull { it != song.cleanVideoId } ?: ids.firstOrNull()
     }
 
     suspend fun extractBestAudioStream(

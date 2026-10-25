@@ -19,14 +19,11 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -34,6 +31,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.SolidColor
@@ -70,6 +68,25 @@ fun HomeScreen(
     onEditUserName: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val allSessionSongs = remember(recentSessionHistory) {
+        recentSessionHistory.map { it.toSong() }
+    }
+
+    val matchingPlayedSongs = remember(allSessionSongs, searchQuery) {
+        val trimmed = searchQuery.trim()
+        if (trimmed.isEmpty()) {
+            allSessionSongs
+        } else {
+            val tokens = trimmed.lowercase().split(Regex("\\s+")).filter { it.isNotBlank() }
+            allSessionSongs.filter { song ->
+                val haystack = "${song.title} ${song.artist}".lowercase()
+                tokens.all { token -> haystack.contains(token) } ||
+                        song.title.contains(trimmed, ignoreCase = true) ||
+                        song.artist.contains(trimmed, ignoreCase = true)
+            }
+        }
+    }
+
     LazyColumn(
         modifier = modifier
             .fillMaxSize()
@@ -147,7 +164,7 @@ fun HomeScreen(
             }
         }
 
-        // Rounded Pill Search Bar ("Songs, albums or artists")
+        // Home Search Bar — Specifically searches the user's Last Session played songs!
         item {
             Surface(
                 color = SurfaceDarkCard,
@@ -165,7 +182,7 @@ fun HomeScreen(
                 ) {
                     Icon(
                         imageVector = Icons.Default.Search,
-                        contentDescription = "Search",
+                        contentDescription = "Search Last Session",
                         tint = SpotifyVibrantGreen,
                         modifier = Modifier.size(26.dp)
                     )
@@ -176,10 +193,10 @@ fun HomeScreen(
                     ) {
                         if (searchQuery.isEmpty()) {
                             Text(
-                                text = stringResource(id = R.string.search_placeholder),
+                                text = "Search your played songs (Last Session)...",
                                 style = MaterialTheme.typography.bodyLarge.copy(
                                     color = MutedGray,
-                                    fontSize = 16.sp
+                                    fontSize = 15.sp
                                 )
                             )
                         }
@@ -211,148 +228,190 @@ fun HomeScreen(
                     }
                 }
             }
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(22.dp))
         }
 
-        if (searchQuery.isBlank() && recentSessionHistory.isNotEmpty()) {
+        if (searchQuery.isNotBlank()) {
+            // When searching in Home Search Box: ONLY show matching songs played in Last Session!
             item {
-                Text(
-                    text = stringResource(id = R.string.last_session),
-                    style = MaterialTheme.typography.headlineMedium.copy(
-                        color = SpotifyVibrantGreen,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 21.sp
-                    ),
-                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp)
-                )
-            }
-            val sessionSongs = recentSessionHistory.take(4).map { it.toSong() }
-            items(
-                items = sessionSongs,
-                key = { "session_${it.id}" }
-            ) { song ->
-                SongListRow(
-                    song = song,
-                    isCurrentSong = currentSong?.id == song.id,
-                    isPlaying = isPlaying,
-                    onSongClick = { onSongClick(song, sessionSongs) },
-                    onMoreClick = { onSongMoreClick(song) }
-                )
-            }
-            item {
-                Spacer(modifier = Modifier.height(16.dp))
-            }
-        }
-
-        item {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 20.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = if (searchQuery.isBlank()) {
-                        stringResource(id = R.string.recent_uploads)
-                    } else {
-                        "Search Results (${songs.size})"
-                    },
-                    style = MaterialTheme.typography.headlineMedium.copy(
-                        color = SpotifyVibrantGreen,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 21.sp
-                    )
-                )
-                if (songs.isNotEmpty()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     Text(
-                        text = "${songs.size} tracks",
-                        style = MaterialTheme.typography.bodyMedium.copy(
-                            color = MutedGray,
-                            fontSize = 13.sp
+                        text = "Played Songs in Last Session (${matchingPlayedSongs.size})",
+                        style = MaterialTheme.typography.headlineMedium.copy(
+                            color = SpotifyVibrantGreen,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 20.sp
                         )
                     )
                 }
             }
-        }
 
-        if (isLoading && songs.isEmpty()) {
-            item {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 56.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        CircularProgressIndicator(color = SpotifyVibrantGreen)
-                        Spacer(modifier = Modifier.height(14.dp))
-                        Text(
-                            text = "Loading your music library...",
-                            style = MaterialTheme.typography.bodyMedium.copy(color = MutedGray)
-                        )
-                    }
-                }
-            }
-        } else if (songs.isEmpty()) {
-            item {
-                Surface(
-                    color = SurfaceDarkCard,
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 12.dp)
-                ) {
-                    Column(
+            if (matchingPlayedSongs.isEmpty()) {
+                item {
+                    Surface(
+                        color = SurfaceDarkCard,
+                        shape = RoundedCornerShape(12.dp),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(24.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
+                            .padding(horizontal = 16.dp, vertical = 12.dp)
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.MusicNote,
-                            contentDescription = null,
-                            tint = SpotifyVibrantGreen,
-                            modifier = Modifier.size(48.dp)
-                        )
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Text(
-                            text = if (searchQuery.isBlank()) {
-                                "No Songs in Library Yet"
-                            } else {
-                                "No matching songs for \"$searchQuery\""
-                            },
-                            style = MaterialTheme.typography.titleLarge.copy(
-                                color = PrimaryWhite,
-                                fontWeight = FontWeight.Bold
-                            ),
-                            textAlign = TextAlign.Center
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = if (searchQuery.isBlank()) {
-                                "New tracks added to your music library will appear here automatically in real time."
-                            } else {
-                                "Try searching by another song title, artist, or track ID."
-                            },
-                            style = MaterialTheme.typography.bodyMedium.copy(color = MutedGray),
-                            textAlign = TextAlign.Center
-                        )
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(24.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.MusicNote,
+                                contentDescription = null,
+                                tint = SpotifyVibrantGreen,
+                                modifier = Modifier.size(44.dp)
+                            )
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Text(
+                                text = "No played song matching \"$searchQuery\" in Last Session",
+                                style = MaterialTheme.typography.titleMedium.copy(
+                                    color = PrimaryWhite,
+                                    fontWeight = FontWeight.Bold
+                                ),
+                                textAlign = TextAlign.Center
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = "Home search filters songs you have already played. To discover & search any new song worldwide, open the Explore tab!",
+                                style = MaterialTheme.typography.bodyMedium.copy(color = MutedGray),
+                                textAlign = TextAlign.Center
+                            )
+                        }
                     }
+                }
+            } else {
+                items(
+                    items = matchingPlayedSongs,
+                    key = { "home_session_search_${it.id}" }
+                ) { song ->
+                    SongListRow(
+                        song = song,
+                        isCurrentSong = currentSong?.id == song.id,
+                        isPlaying = isPlaying,
+                        onSongClick = { onSongClick(song, matchingPlayedSongs) },
+                        onMoreClick = { onSongMoreClick(song) }
+                    )
                 }
             }
         } else {
-            items(
-                items = songs,
-                key = { it.id }
-            ) { song ->
-                SongListRow(
-                    song = song,
-                    isCurrentSong = currentSong?.id == song.id,
-                    isPlaying = isPlaying,
-                    onSongClick = { onSongClick(song, songs) },
-                    onMoreClick = { onSongMoreClick(song) }
-                )
+            // Default Home View (when Home search box is empty):
+            // 1. Last Session (Recently Played Songs)
+            if (allSessionSongs.isNotEmpty()) {
+                item {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 20.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = stringResource(id = R.string.last_session),
+                            style = MaterialTheme.typography.headlineMedium.copy(
+                                color = SpotifyVibrantGreen,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 21.sp
+                            )
+                        )
+                        Text(
+                            text = "${allSessionSongs.size} played",
+                            style = MaterialTheme.typography.bodyMedium.copy(
+                                color = MutedGray,
+                                fontSize = 13.sp
+                            )
+                        )
+                    }
+                }
+                val previewSessionSongs = allSessionSongs.take(6)
+                items(
+                    items = previewSessionSongs,
+                    key = { "session_${it.id}" }
+                ) { song ->
+                    SongListRow(
+                        song = song,
+                        isCurrentSong = currentSong?.id == song.id,
+                        isPlaying = isPlaying,
+                        onSongClick = { onSongClick(song, allSessionSongs) },
+                        onMoreClick = { onSongMoreClick(song) }
+                    )
+                }
+                item {
+                    Spacer(modifier = Modifier.height(16.dp))
+                }
+            }
+
+            // 2. All Top & Recent Catalog Songs
+            item {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = stringResource(id = R.string.recent_uploads),
+                        style = MaterialTheme.typography.headlineMedium.copy(
+                            color = SpotifyVibrantGreen,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 21.sp
+                        )
+                    )
+                    if (songs.isNotEmpty()) {
+                        Text(
+                            text = "${songs.size} tracks",
+                            style = MaterialTheme.typography.bodyMedium.copy(
+                                color = MutedGray,
+                                fontSize = 13.sp
+                            )
+                        )
+                    }
+                }
+            }
+
+            if (isLoading && songs.isEmpty()) {
+                item {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 56.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            CircularProgressIndicator(color = SpotifyVibrantGreen)
+                            Spacer(modifier = Modifier.height(14.dp))
+                            Text(
+                                text = "Loading your music library...",
+                                style = MaterialTheme.typography.bodyMedium.copy(color = MutedGray)
+                            )
+                        }
+                    }
+                }
+            } else {
+                items(
+                    items = songs,
+                    key = { it.id }
+                ) { song ->
+                    SongListRow(
+                        song = song,
+                        isCurrentSong = currentSong?.id == song.id,
+                        isPlaying = isPlaying,
+                        onSongClick = { onSongClick(song, songs) },
+                        onMoreClick = { onSongMoreClick(song) }
+                    )
+                }
             }
         }
     }

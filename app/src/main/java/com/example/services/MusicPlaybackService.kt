@@ -1,10 +1,14 @@
 package com.example.services
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.net.wifi.WifiManager
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
@@ -22,6 +26,7 @@ import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.ResolvingDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.session.DefaultMediaNotificationProvider
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import com.example.MainActivity
@@ -43,6 +48,8 @@ class MusicPlaybackService : MediaSessionService() {
     )
 
     companion object {
+        private const val NOTIFICATION_CHANNEL_ID = "aadify_playback_channel_v2"
+        private const val NOTIFICATION_ID = 1001
         private val mainHandler = Handler(Looper.getMainLooper())
 
         @Volatile
@@ -63,9 +70,13 @@ class MusicPlaybackService : MediaSessionService() {
         @Volatile
         var onExoPlayerTrackEndedCallback: (() -> Unit)? = null
 
+        fun getCurrentSyncedSong(): Song? = pendingSync?.song
+
+        fun isCurrentlyPlaying(): Boolean = pendingSync?.isPlaying == true
+
         /**
          * Updates the Foreground MediaSessionService directly in-process so there is zero IPC
-         * URI stripping and all Notification Bar buttons (Previous, Play/Pause, Next, Stop)
+         * URI stripping and all Notification Bar & Lock Screen buttons (Previous, Play/Pause, Next, Stop)
          * work instantaneously on every Android version.
          */
         fun syncNowPlaying(
@@ -84,8 +95,17 @@ class MusicPlaybackService : MediaSessionService() {
                 } else {
                     try {
                         val intent = Intent(context.applicationContext, MusicPlaybackService::class.java)
-                        context.applicationContext.startService(intent)
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            context.applicationContext.startForegroundService(intent)
+                        } else {
+                            context.applicationContext.startService(intent)
+                        }
                     } catch (_: Exception) {
+                        try {
+                            val intent = Intent(context.applicationContext, MusicPlaybackService::class.java)
+                            context.applicationContext.startService(intent)
+                        } catch (_: Exception) {
+                        }
                     }
                 }
             }
@@ -124,20 +144,20 @@ class MusicPlaybackService : MediaSessionService() {
         }
 
         /**
-         * Generates a 30-second silent WAV file used by MusicPlaybackService to keep the
+         * Generates a 180-second (3-minute) silent WAV file used by MusicPlaybackService to keep the
          * Foreground MediaSession, WakeLock, WifiLock, Lock Screen, and Notification Bar
          * media controls active while BackstageYouTubePlayerController streams online audio.
          */
         fun getOrCreateSilentWavUri(context: Context): String {
-            val file = File(context.cacheDir, "aadify_keepalive_silence_30s.wav")
-            if (file.exists() && file.length() > 1000L) {
+            val file = File(context.cacheDir, "aadify_keepalive_silence_180s.wav")
+            if (file.exists() && file.length() > 10_000L) {
                 return Uri.fromFile(file).toString()
             }
             try {
-                val sampleRate = 8000
-                val durationSeconds = 30
+                val sampleRate = 4000
+                val durationSeconds = 180
                 val numSamples = sampleRate * durationSeconds
-                val dataSize = numSamples * 2 // 16-bit mono
+                val dataSize = numSamples // 8-bit unsigned mono (0x80 = silence)
                 val buffer = ByteBuffer.allocate(44 + dataSize).order(ByteOrder.LITTLE_ENDIAN)
 
                 // RIFF header
@@ -150,12 +170,14 @@ class MusicPlaybackService : MediaSessionService() {
                 buffer.putShort(1.toShort()) // AudioFormat = 1 (PCM)
                 buffer.putShort(1.toShort()) // NumChannels = 1
                 buffer.putInt(sampleRate)
-                buffer.putInt(sampleRate * 2) // ByteRate
-                buffer.putShort(2.toShort()) // BlockAlign
-                buffer.putShort(16.toShort()) // BitsPerSample
+                buffer.putInt(sampleRate) // ByteRate (8-bit mono = 1 byte/sample)
+                buffer.putShort(1.toShort()) // BlockAlign = 1
+                buffer.putShort(8.toShort()) // BitsPerSample = 8
                 // data subchunk
                 buffer.put("data".toByteArray(Charsets.US_ASCII))
                 buffer.putInt(dataSize)
+                val silenceBytes = ByteArray(dataSize) { 0x80.toByte() }
+                buffer.put(silenceBytes)
 
                 FileOutputStream(file).use { out ->
                     out.write(buffer.array())
@@ -177,6 +199,17 @@ class MusicPlaybackService : MediaSessionService() {
     override fun onCreate() {
         super.onCreate()
         instance = this
+
+        ensurePublicLockscreenNotificationChannel()
+
+        try {
+            val notifProvider = DefaultMediaNotificationProvider.Builder(this)
+                .setChannelId(NOTIFICATION_CHANNEL_ID)
+                .setNotificationId(NOTIFICATION_ID)
+                .build()
+            setMediaNotificationProvider(notifProvider)
+        } catch (_: Exception) {
+        }
 
         try {
             val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
@@ -247,8 +280,6 @@ class MusicPlaybackService : MediaSessionService() {
 
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                 if (isInternalSync) return
-                // If playing a direct local/offline song at index 1 and it naturally transitions to index 2,
-                // notify ViewModel that the track ended so the next song in queue plays!
                 if (isDirectAudioMode && reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
                     onExoPlayerTrackEndedCallback?.invoke()
                 }
@@ -263,7 +294,7 @@ class MusicPlaybackService : MediaSessionService() {
         })
 
         // Wrap ExoPlayer in a ForwardingPlayer that ALWAYS enables Next, Previous, Play/Pause, and Stop
-        // in the Android System Notification Bar and Lock Screen controls!
+        // in the Android System Notification Bar and Lock Screen (password screen) controls!
         val forwardingPlayer = object : ForwardingPlayer(exoPlayer) {
             private fun buildAllCommands(base: Player.Commands): Player.Commands {
                 return base.buildUpon()
@@ -439,6 +470,25 @@ class MusicPlaybackService : MediaSessionService() {
         }
     }
 
+    private fun ensurePublicLockscreenNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            try {
+                val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+                val channel = NotificationChannel(
+                    NOTIFICATION_CHANNEL_ID,
+                    "AADIFY Music Playback",
+                    NotificationManager.IMPORTANCE_LOW
+                ).apply {
+                    description = "Shows Lock Screen and Notification Bar playback controls"
+                    lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                    setShowBadge(false)
+                }
+                nm.createNotificationChannel(channel)
+            } catch (_: Exception) {
+            }
+        }
+    }
+
     private fun applySyncRequest(req: SyncRequest) {
         val player = exoPlayerInstance ?: return
         isInternalSync = true
@@ -457,8 +507,11 @@ class MusicPlaybackService : MediaSessionService() {
             val metadataBuilder = MediaMetadata.Builder()
                 .setTitle(song.title)
                 .setArtist(song.artist)
+                .setAlbumTitle("AADIFY Music")
                 .setDisplayTitle(song.title)
                 .setSubtitle(song.artist)
+                .setIsBrowsable(false)
+                .setIsPlayable(true)
             if (artworkUri != null) {
                 metadataBuilder.setArtworkUri(artworkUri)
             }
@@ -499,6 +552,12 @@ class MusicPlaybackService : MediaSessionService() {
             } else {
                 player.pause()
             }
+            mediaSession?.let { session ->
+                try {
+                    onUpdateNotification(session, req.isPlaying)
+                } catch (_: Exception) {
+                }
+            }
         } catch (_: Exception) {
         } finally {
             isInternalSync = false
@@ -513,6 +572,9 @@ class MusicPlaybackService : MediaSessionService() {
                 if (player.mediaItemCount == 0 && pendingSync != null) {
                     applySyncRequest(pendingSync!!)
                 } else {
+                    if (player.playbackState == Player.STATE_IDLE || player.playbackState == Player.STATE_ENDED) {
+                        player.prepare()
+                    }
                     player.play()
                 }
                 try {
@@ -523,6 +585,12 @@ class MusicPlaybackService : MediaSessionService() {
             } else {
                 player.pause()
             }
+            mediaSession?.let { session ->
+                try {
+                    onUpdateNotification(session, shouldPlay)
+                } catch (_: Exception) {
+                }
+            }
         } catch (_: Exception) {
         } finally {
             isInternalSync = false
@@ -531,7 +599,6 @@ class MusicPlaybackService : MediaSessionService() {
 
     private fun applySeekInternal(positionMs: Long) {
         val player = exoPlayerInstance ?: return
-        if (!isDirectAudioMode) return
         isInternalSync = true
         try {
             player.seekTo(1, positionMs.coerceAtLeast(0L))

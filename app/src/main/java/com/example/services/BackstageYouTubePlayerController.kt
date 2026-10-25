@@ -44,7 +44,8 @@ class BackstageYouTubePlayerController(
     private val onProgressUpdate: (Long) -> Unit,
     private val onDurationUpdate: (Long) -> Unit,
     private val onStateChangeUpdate: (Int) -> Unit,
-    private val onErrorUpdate: (Int) -> Unit
+    private val onErrorUpdate: (Int) -> Unit,
+    private val onMediaButtonAction: ((String) -> Unit)? = null
 ) {
     companion object {
         private const val TAG = "BackstageYTPlayer"
@@ -67,6 +68,9 @@ class BackstageYouTubePlayerController(
 
     @Volatile
     private var hasFiredEndedForCurrentTrack: Boolean = false
+
+    @Volatile
+    private var hasFiredErrorForCurrentTrack: Boolean = false
 
     @SuppressLint("SetJavaScriptEnabled")
     fun getOrCreateWebView(): BackstageAudioWebView {
@@ -125,19 +129,23 @@ class BackstageYouTubePlayerController(
             webViewClient = object : WebViewClient() {
                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                     super.onPageStarted(view, url, favicon)
-                    injectVideoBridgeScript()
+                    if (currentLoadedVideoId.isNotBlank()) {
+                        injectVideoBridgeScript()
+                    }
                 }
 
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
-                    injectVideoBridgeScript()
+                    if (currentLoadedVideoId.isNotBlank()) {
+                        injectVideoBridgeScript()
+                    }
                 }
 
                 override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
                     super.doUpdateVisitedHistory(view, url, isReload)
-                    // Prevent YouTube mobile SPA from auto-navigating to a random recommendation video!
                     val targetId = currentLoadedVideoId
-                    if (url != null && targetId.isNotBlank() && url.contains("youtube.com/watch") && !url.contains(targetId)) {
+                    if (targetId.isBlank()) return
+                    if (url != null && url.contains("youtube.com/watch") && !url.contains(targetId)) {
                         if (!hasFiredEndedForCurrentTrack) {
                             hasFiredEndedForCurrentTrack = true
                             mainHandler.post {
@@ -157,7 +165,8 @@ class BackstageYouTubePlayerController(
                     return !(reqUrl.contains("youtube.com") ||
                             reqUrl.contains("youtu.be") ||
                             reqUrl.contains("google.com") ||
-                            reqUrl.contains("googlevideo.com"))
+                            reqUrl.contains("googlevideo.com") ||
+                            reqUrl.startsWith("about:blank"))
                 }
             }
 
@@ -208,6 +217,7 @@ class BackstageYouTubePlayerController(
         currentLoadedVideoId = cleanId
         isUserPaused = false
         hasFiredEndedForCurrentTrack = false
+        hasFiredErrorForCurrentTrack = false
 
         mainHandler.post {
             val view = getOrCreateWebView()
@@ -218,7 +228,39 @@ class BackstageYouTubePlayerController(
         }
     }
 
+    /**
+     * Completely stops and unloads the WebView media player so that when the user plays a
+     * local device song or offline downloaded song (even while internet is ON), the WebView
+     * releases all audio focus and stops all background intervals.
+     */
+    fun stopAndClear() {
+        isUserPaused = true
+        currentLoadedVideoId = ""
+        hasFiredEndedForCurrentTrack = true
+        mainHandler.post {
+            try {
+                evaluateJs(
+                    """
+                    (function() {
+                        window.__akUserPaused = true;
+                        window.__akTrackEndedFired = true;
+                        var v = document.querySelector('video');
+                        if (v) {
+                            try { v.pause(); } catch(e) {}
+                            try { v.removeAttribute('src'); v.load(); } catch(e) {}
+                        }
+                    })();
+                    """.trimIndent()
+                )
+                webView?.stopLoading()
+                webView?.loadUrl("about:blank")
+            } catch (_: Exception) {
+            }
+        }
+    }
+
     fun playVideo() {
+        if (currentLoadedVideoId.isBlank()) return
         isUserPaused = false
         mainHandler.post {
             webView?.onResume()
@@ -268,6 +310,7 @@ class BackstageYouTubePlayerController(
     }
 
     fun seekToSeconds(targetSeconds: Double) {
+        if (currentLoadedVideoId.isBlank()) return
         val clamped = targetSeconds.coerceAtLeast(0.0)
         mainHandler.post {
             evaluateJs(
@@ -293,6 +336,7 @@ class BackstageYouTubePlayerController(
 
     fun setPlaybackSpeed(speed: Float) {
         currentPlaybackRate = speed
+        if (currentLoadedVideoId.isBlank()) return
         mainHandler.post {
             evaluateJs(
                 """
@@ -313,9 +357,10 @@ class BackstageYouTubePlayerController(
     }
 
     private fun injectVideoBridgeScript() {
+        val targetId = currentLoadedVideoId
+        if (targetId.isBlank()) return
         val pausedFlag = if (isUserPaused) "true" else "false"
         val rate = currentPlaybackRate
-        val targetId = currentLoadedVideoId
         val script = """
             (function() {
                 window.__akUserPaused = $pausedFlag;
@@ -323,6 +368,7 @@ class BackstageYouTubePlayerController(
                 if (window.__akTargetVideoId !== '$targetId') {
                     window.__akTargetVideoId = '$targetId';
                     window.__akTrackEndedFired = false;
+                    window.__akErrorFired = false;
                     window.__akLastPlayAttempt = 0;
                 }
 
@@ -333,6 +379,28 @@ class BackstageYouTubePlayerController(
                     Object.defineProperty(document, 'visibilityState', { get: function() { return 'visible'; }, configurable: true });
                     Object.defineProperty(document, 'webkitVisibilityState', { get: function() { return 'visible'; }, configurable: true });
                     document.hasFocus = function() { return true; };
+                } catch (e) {}
+
+                // Route any WebView navigator.mediaSession actions directly to AndroidBridge
+                // so Lock Screen and Notification buttons work 100% seamlessly!
+                try {
+                    if (navigator.mediaSession && typeof navigator.mediaSession.setActionHandler === 'function') {
+                        navigator.mediaSession.setActionHandler('play', function() {
+                            if (window.AndroidBridge) window.AndroidBridge.onMediaAction('play');
+                        });
+                        navigator.mediaSession.setActionHandler('pause', function() {
+                            if (window.AndroidBridge) window.AndroidBridge.onMediaAction('pause');
+                        });
+                        navigator.mediaSession.setActionHandler('previoustrack', function() {
+                            if (window.AndroidBridge) window.AndroidBridge.onMediaAction('prev');
+                        });
+                        navigator.mediaSession.setActionHandler('nexttrack', function() {
+                            if (window.AndroidBridge) window.AndroidBridge.onMediaAction('next');
+                        });
+                        navigator.mediaSession.setActionHandler('stop', function() {
+                            if (window.AndroidBridge) window.AndroidBridge.onMediaAction('pause');
+                        });
+                    }
                 } catch (e) {}
 
                 // Disable YouTube's built-in Up Next / Auto-navigation so our app controls the queue!
@@ -405,6 +473,13 @@ class BackstageYouTubePlayerController(
                     if (window.__akPlaybackRate) {
                         v.playbackRate = window.__akPlaybackRate;
                     }
+
+                    v.addEventListener('error', function() {
+                        if (!window.__akErrorFired && window.AndroidBridge) {
+                            window.__akErrorFired = true;
+                            window.AndroidBridge.onError(150);
+                        }
+                    });
 
                     v.addEventListener('canplay', function() {
                         if (!window.__akUserPaused && !window.__akTrackEndedFired && v.paused) {
@@ -506,6 +581,13 @@ class BackstageYouTubePlayerController(
 
                 setInterval(function() {
                     try {
+                        var errEl = document.querySelector('.ytm-player-error-message-renderer, .player-error-message-container');
+                        if (errEl && !window.__akErrorFired && window.AndroidBridge) {
+                            window.__akErrorFired = true;
+                            window.AndroidBridge.onError(150);
+                            return;
+                        }
+
                         var v = document.querySelector('video');
                         if (!v) return;
                         hookVideoElement(v);
@@ -585,10 +667,10 @@ class BackstageYouTubePlayerController(
 
         @JavascriptInterface
         fun onProgress(currentTimeSeconds: Double) {
-            if (currentTimeSeconds.isNaN() || currentTimeSeconds < 0.0 || hasFiredEndedForCurrentTrack) return
+            if (currentTimeSeconds.isNaN() || currentTimeSeconds < 0.0 || hasFiredEndedForCurrentTrack || currentLoadedVideoId.isBlank()) return
             val posMs = (currentTimeSeconds * 1000.0).toLong()
             mainHandler.post {
-                if (!hasFiredEndedForCurrentTrack) {
+                if (!hasFiredEndedForCurrentTrack && currentLoadedVideoId.isNotBlank()) {
                     onProgressUpdate(posMs)
                 }
             }
@@ -596,16 +678,19 @@ class BackstageYouTubePlayerController(
 
         @JavascriptInterface
         fun onDuration(durationSeconds: Double) {
-            if (durationSeconds.isNaN() || durationSeconds <= 0.0) return
+            if (durationSeconds.isNaN() || durationSeconds <= 0.0 || currentLoadedVideoId.isBlank()) return
             val durMs = (durationSeconds * 1000.0).toLong()
             mainHandler.post {
-                onDurationUpdate(durMs)
+                if (currentLoadedVideoId.isNotBlank()) {
+                    onDurationUpdate(durMs)
+                }
             }
         }
 
         @JavascriptInterface
         fun onStateChange(state: Int) {
             mainHandler.post {
+                if (currentLoadedVideoId.isBlank()) return@post
                 if (state == STATE_ENDED) {
                     if (hasFiredEndedForCurrentTrack) return@post
                     hasFiredEndedForCurrentTrack = true
@@ -623,9 +708,18 @@ class BackstageYouTubePlayerController(
 
         @JavascriptInterface
         fun onError(errorCode: Int) {
+            if (currentLoadedVideoId.isBlank() || hasFiredErrorForCurrentTrack) return
+            hasFiredErrorForCurrentTrack = true
             Log.w(TAG, "Backstage player error code: $errorCode for $currentLoadedVideoId")
             mainHandler.post {
                 onErrorUpdate(errorCode)
+            }
+        }
+
+        @JavascriptInterface
+        fun onMediaAction(action: String) {
+            mainHandler.post {
+                onMediaButtonAction?.invoke(action)
             }
         }
     }

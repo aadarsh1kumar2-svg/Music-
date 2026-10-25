@@ -36,14 +36,22 @@ object TimeFormatUtils {
 data class CountryOption(
     val code: String,
     val name: String,
-    val flagEmoji: String
+    val flagEmoji: String,
+    val trendingQuery: String
 )
 
 val SUPPORTED_COUNTRIES = listOf(
-    CountryOption("IN", "India", "🇮🇳"),
-    CountryOption("GLOBAL", "Global", "🌍"),
-    CountryOption("US", "United States", "🇺🇸"),
-    CountryOption("GB", "United Kingdom", "🇬🇧"),
-    CountryOption("CA", "Canada", "🇨🇦"),
-    CountryOption("AU", "Australia", "🇦🇺")
+    CountryOption("IN", "India", "🇮🇳", "Top Hindi Bollywood Songs India Hits"),
+    CountryOption("GLOBAL", "Global", "🌍", "Global Top 50 Music Hits Songs"),
+    CountryOption("US", "United States", "🇺🇸", "Billboard Hot 100 Top Songs USA"),
+    CountryOption("GB", "United Kingdom", "🇬🇧", "UK Top 40 Singles Official Charts Songs"),
+    CountryOption("CA", "Canada", "🇨🇦", "Canada Top Hits Music Songs"),
+    CountryOption("AU", "Australia", "🇦🇺", "Australia ARIA Top Hits Songs"),
+    CountryOption("PK", "Pakistan", "🇵🇰", "Top Pakistani Coke Studio Urdu Hits Songs"),
+    CountryOption("NP", "Nepal", "🇳🇵", "Top Nepali Trending Songs Hits"),
+    CountryOption("BD", "Bangladesh", "🇧🇩", "Top Bangla Trending Songs Hits"),
+    CountryOption("KR", "South Korea", "🇰🇷", "Top K-Pop Korean Hits Songs"),
+    CountryOption("JP", "Japan", "🇯🇵", "Top J-Pop Japanese Anime Hits Songs"),
+    CountryOption("BR", "Brazil", "🇧🇷", "Top Brazil Pop Sertanejo Hits Songs"),
+    CountryOption("AE", "UAE", "🇦🇪", "Top Arabic & International Trending Songs UAE")
 )

@@ -52,10 +52,13 @@ jobs:
       - name: Create temporary debug keystore
         run: |
           set -euo pipefail
-          if [ -f "./debug.keystore" ]; then
-            echo "Temporary ./debug.keystore already exists."
+          if [ -f "./debug.keystore" ] && [ -s "./debug.keystore" ]; then
+            echo "Existing ./debug.keystore found."
+          elif [ -f "./debug.keystore.base64" ] && [ -s "./debug.keystore.base64" ]; then
+            echo "Restoring persistent ./debug.keystore from ./debug.keystore.base64..."
+            base64 -d ./debug.keystore.base64 > ./debug.keystore || base64 --decode ./debug.keystore.base64 > ./debug.keystore
           else
-            echo "Generating temporary ./debug.keystore using Java 17 keytool..."
+            echo "Generating fallback ./debug.keystore using Java 17 keytool..."
             "${JAVA_HOME}/bin/keytool" -genkeypair -v \
               -keystore ./debug.keystore \
               -storepass android \
