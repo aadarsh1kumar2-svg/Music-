@@ -308,7 +308,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         },
         onErrorUpdate = { _ ->
             val active = _currentSong.value ?: return@BackstageYouTubePlayerController
-            if (!isUsingExoPlayerFallback) {
+            if (!isUsingExoPlayerFallback && _currentPositionMs.value == 0L) {
                 viewModelScope.launch {
                     if (!hasRetriedCurrentTrack) {
                         hasRetriedCurrentTrack = true
@@ -318,30 +318,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                             return@launch
                         }
                     }
-                    isUsingExoPlayerFallback = true
-                    val fallbackResult = audioExtractor.extractBestAudioStream(
-                        rawVideoId = active.videoId,
-                        songTitle = active.title,
-                        songArtist = active.artist,
-                        forceFresh = true
-                    )
-                    fallbackResult.fold(
-                        onSuccess = { resolved ->
-                            backstagePlayer.stopAndClear()
-                            _activeStreamEngine.value = resolved.sourceEngine
-                            startExoPlayerWithUri(active, resolved.streamUrl)
-                        },
-                        onFailure = {
-                            if (_queue.value.size > 1 && !hasHandledEndForCurrentSong) {
-                                hasHandledEndForCurrentSong = true
-                                skipToNext()
-                            } else {
-                                _isBuffering.value = false
-                                _isPlaying.value = false
-                                emitSnackbar("Unable to play this track right now.")
-                            }
-                        }
-                    )
+                    _isBuffering.value = false
+                    _isPlaying.value = false
+                    emitSnackbar("Unable to play this track right now.")
                 }
             }
         },
