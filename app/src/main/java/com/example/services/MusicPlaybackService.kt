@@ -44,7 +44,8 @@ class MusicPlaybackService : MediaSessionService() {
         val song: Song,
         val isPlaying: Boolean,
         val directStreamUri: String?,
-        val playbackSpeed: Float
+        val playbackSpeed: Float,
+        val startPositionMs: Long = 0L
     )
 
     companion object {
@@ -70,6 +71,19 @@ class MusicPlaybackService : MediaSessionService() {
         @Volatile
         var onExoPlayerTrackEndedCallback: (() -> Unit)? = null
 
+        @Volatile
+        var onKeepOnlineEngineAwakeCallback: (() -> Unit)? = null
+
+        private val serviceKeepAliveRunnable = object : Runnable {
+            override fun run() {
+                mainHandler.removeCallbacks(this)
+                if (pendingSync?.isPlaying == true) {
+                    onKeepOnlineEngineAwakeCallback?.invoke()
+                    mainHandler.postDelayed(this, 500L)
+                }
+            }
+        }
+
         fun getCurrentSyncedSong(): Song? = pendingSync?.song
 
         fun isCurrentlyPlaying(): Boolean = pendingSync?.isPlaying == true
@@ -84,11 +98,18 @@ class MusicPlaybackService : MediaSessionService() {
             song: Song,
             isPlaying: Boolean,
             directStreamUri: String? = null,
-            playbackSpeed: Float = 1.0f
+            playbackSpeed: Float = 1.0f,
+            startPositionMs: Long = 0L
         ) {
-            val req = SyncRequest(song, isPlaying, directStreamUri, playbackSpeed)
+            val req = SyncRequest(song, isPlaying, directStreamUri, playbackSpeed, startPositionMs.coerceAtLeast(0L))
             pendingSync = req
             mainHandler.post {
+                if (isPlaying) {
+                    mainHandler.removeCallbacks(serviceKeepAliveRunnable)
+                    mainHandler.postDelayed(serviceKeepAliveRunnable, 500L)
+                } else {
+                    mainHandler.removeCallbacks(serviceKeepAliveRunnable)
+                }
                 val svc = instance
                 if (svc != null) {
                     svc.applySyncRequest(req)
@@ -114,6 +135,12 @@ class MusicPlaybackService : MediaSessionService() {
         fun syncPlayState(isPlaying: Boolean) {
             pendingSync = pendingSync?.copy(isPlaying = isPlaying)
             mainHandler.post {
+                if (isPlaying) {
+                    mainHandler.removeCallbacks(serviceKeepAliveRunnable)
+                    mainHandler.postDelayed(serviceKeepAliveRunnable, 500L)
+                } else {
+                    mainHandler.removeCallbacks(serviceKeepAliveRunnable)
+                }
                 instance?.applyPlayStateInternal(isPlaying)
             }
         }
@@ -568,7 +595,8 @@ class MusicPlaybackService : MediaSessionService() {
             player.volume = if (isDirectAudioMode) 1.0f else 0.0f
             player.repeatMode = if (isDirectAudioMode) Player.REPEAT_MODE_OFF else Player.REPEAT_MODE_ONE
             player.playbackParameters = PlaybackParameters(req.playbackSpeed)
-            player.setMediaItems(listOf(prevItem, currentItem, nextItem), /* startIndex = */ 1, /* startPositionMs = */ 0L)
+            val startPos = if (isDirectAudioMode) req.startPositionMs.coerceAtLeast(0L) else 0L
+            player.setMediaItems(listOf(prevItem, currentItem, nextItem), /* startIndex = */ 1, /* startPositionMs = */ startPos)
             player.prepare()
             if (req.isPlaying) {
                 player.play()

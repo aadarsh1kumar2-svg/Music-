@@ -98,6 +98,7 @@ dependencies {
   implementation(libs.androidx.room.runtime)
   implementation(libs.coil.compose)
   implementation(libs.firebase.database)
+  implementation(libs.firebase.messaging)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
   implementation(libs.okhttp)

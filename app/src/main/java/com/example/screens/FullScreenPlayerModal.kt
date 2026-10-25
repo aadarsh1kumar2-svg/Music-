@@ -229,6 +229,8 @@ fun FullScreenPlayerModal(
                         onClick = { onOpenSongOptions(song) },
                         modifier = Modifier
                             .size(48.dp)
+                            .clip(CircleShape)
+                            .background(SurfaceDarkCard.copy(alpha = 0.75f))
                             .testTag("full_player_more_button")
                     ) {
                         Icon(

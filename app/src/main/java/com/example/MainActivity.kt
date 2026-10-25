@@ -77,16 +77,26 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.filled.Replay
+import androidx.compose.material.icons.filled.Verified
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -770,38 +780,100 @@ fun DeveloperProfileDialog(
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
+    val typewriterFont = remember { FontFamily(Font(R.font.jetbrains_mono)) }
+    val displayFont = remember { FontFamily(Font(R.font.space_grotesk)) }
 
-    Dialog(onDismissRequest = onDismiss) {
+    val fullDeveloperStory = remember {
+        "> developer: Aadarsh Kumar (Part of HIS)\n" +
+            "> app_engine: AADIFY v2.0 Pro\n\n" +
+            "\"I crafted AADIFY with countless hours of hard work, late-night debugging, and pure passion for music lovers.\n\n" +
+            "Every single system — from non-stop background playback while using other apps, real-time Cloud Top Charts, and Global Country Search to Offline Device Audio — was engineered by Aadarsh Kumar as a proud part of HIS.\""
+    }
+
+    var typedCharCount by remember { mutableIntStateOf(0) }
+    var cursorVisible by remember { mutableStateOf(true) }
+    var replayTrigger by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(replayTrigger) {
+        typedCharCount = 0
+        val totalLength = fullDeveloperStory.length
+        while (typedCharCount < totalLength) {
+            delay(18L)
+            typedCharCount++
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(480L)
+            cursorVisible = !cursorVisible
+        }
+    }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
         Surface(
             color = DeepCharcoal,
-            shape = RoundedCornerShape(22.dp),
+            shape = RoundedCornerShape(26.dp),
             modifier = Modifier
-                .fillMaxWidth()
+                .fillMaxWidth(0.92f)
                 .border(
                     width = 1.5.dp,
                     color = SpotifyGreenBorder,
-                    shape = RoundedCornerShape(22.dp)
+                    shape = RoundedCornerShape(26.dp)
                 )
                 .testTag("developer_profile_dialog")
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(24.dp),
+                    .verticalScroll(rememberScrollState())
+                    .padding(22.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
+                // Top Bar with Terminal Dots + Title + Close Button
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = "Developer Info",
-                        style = MaterialTheme.typography.titleLarge.copy(
-                            color = SpotifyVibrantGreen,
-                            fontWeight = FontWeight.Bold
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(10.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFFFF5F56))
                         )
-                    )
+                        Box(
+                            modifier = Modifier
+                                .size(10.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFFFFBD2E))
+                        )
+                        Box(
+                            modifier = Modifier
+                                .size(10.dp)
+                                .clip(CircleShape)
+                                .background(SpotifyVibrantGreen)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "DEVELOPER STUDIO",
+                            style = MaterialTheme.typography.labelLarge.copy(
+                                color = SpotifyVibrantGreen,
+                                fontFamily = typewriterFont,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 1.sp,
+                                fontSize = 12.sp
+                            )
+                        )
+                    }
+
                     IconButton(
                         onClick = onDismiss,
                         modifier = Modifier.size(36.dp)
@@ -814,41 +886,148 @@ fun DeveloperProfileDialog(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(14.dp))
 
-                Image(
-                    painter = painterResource(id = R.drawable.aadify_logo),
-                    contentDescription = "AADIFY Logo",
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier
-                        .size(84.dp)
-                        .clip(RoundedCornerShape(18.dp))
-                )
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                Text(
-                    text = "Developer Name",
-                    style = MaterialTheme.typography.labelLarge.copy(
-                        color = MutedGray,
-                        fontSize = 13.sp
+                // Logo + Verified Creator Badge
+                Box(contentAlignment = Alignment.BottomEnd) {
+                    Image(
+                        painter = painterResource(id = R.drawable.aadify_logo),
+                        contentDescription = "AADIFY Logo",
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier
+                            .size(86.dp)
+                            .clip(RoundedCornerShape(20.dp))
+                            .border(
+                                width = 1.5.dp,
+                                color = SpotifyVibrantGreen,
+                                shape = RoundedCornerShape(20.dp)
+                            )
                     )
-                )
-                Spacer(modifier = Modifier.height(4.dp))
+                    Surface(
+                        color = PureBlack,
+                        shape = CircleShape,
+                        modifier = Modifier.size(26.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Verified,
+                            contentDescription = "Verified Creator",
+                            tint = SpotifyVibrantGreen,
+                            modifier = Modifier
+                                .padding(2.dp)
+                                .fillMaxSize()
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Surface(
+                    color = SpotifyDarkGreenPill,
+                    shape = RoundedCornerShape(50),
+                    modifier = Modifier.border(
+                        width = 1.dp,
+                        color = SpotifyGreenBorder,
+                        shape = RoundedCornerShape(50)
+                    )
+                ) {
+                    Text(
+                        text = "FOUNDER & LEAD ARCHITECT • PART OF HIS",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            color = SpotifyVibrantGreen,
+                            fontFamily = typewriterFont,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 10.sp,
+                            letterSpacing = 0.8.sp
+                        ),
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
                 Text(
-                    text = "Aadarsh kumar",
+                    text = "Aadarsh Kumar",
                     style = MaterialTheme.typography.headlineMedium.copy(
                         color = PrimaryWhite,
+                        fontFamily = displayFont,
                         fontWeight = FontWeight.ExtraBold,
-                        fontSize = 24.sp
+                        fontSize = 26.sp
                     ),
                     textAlign = TextAlign.Center
                 )
 
-                Spacer(modifier = Modifier.height(20.dp))
-                HorizontalDivider(color = DividerDark)
-                Spacer(modifier = Modifier.height(20.dp))
+                Spacer(modifier = Modifier.height(14.dp))
 
+                // Live Typewriter Story Terminal Box
+                Surface(
+                    color = PureBlack,
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(
+                            width = 1.dp,
+                            color = SpotifyGreenBorder.copy(alpha = 0.7f),
+                            shape = RoundedCornerShape(16.dp)
+                        )
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "about_aadarsh.sh",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    color = SpotifyVibrantGreen,
+                                    fontFamily = typewriterFont,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 11.sp
+                                )
+                            )
+                            IconButton(
+                                onClick = { replayTrigger++ },
+                                modifier = Modifier.size(28.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Replay,
+                                    contentDescription = "Replay Typing",
+                                    tint = SpotifyVibrantGreen,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        }
+
+                        HorizontalDivider(
+                            color = DividerDark,
+                            modifier = Modifier.padding(vertical = 8.dp)
+                        )
+
+                        val visibleText = fullDeveloperStory.take(typedCharCount)
+                        val cursorChar = if (cursorVisible) " ▋" else "  "
+
+                        Text(
+                            text = visibleText + cursorChar,
+                            style = MaterialTheme.typography.bodyMedium.copy(
+                                color = PrimaryWhite,
+                                fontFamily = typewriterFont,
+                                fontSize = 12.8.sp,
+                                lineHeight = 20.sp
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("developer_typewriter_text")
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // Contact Card
                 Surface(
                     color = SurfaceDarkCard,
                     shape = RoundedCornerShape(16.dp),
@@ -857,27 +1036,29 @@ fun DeveloperProfileDialog(
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(18.dp),
+                            .padding(16.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
                         Text(
                             text = "Contact to Developer",
                             style = MaterialTheme.typography.titleMedium.copy(
                                 color = PrimaryWhite,
+                                fontFamily = displayFont,
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 17.sp
                             )
                         )
-                        Spacer(modifier = Modifier.height(6.dp))
+                        Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             text = "Telegram: @Devacoding1",
                             style = MaterialTheme.typography.bodyMedium.copy(
                                 color = SpotifyVibrantGreen,
+                                fontFamily = typewriterFont,
                                 fontWeight = FontWeight.SemiBold,
-                                fontSize = 15.sp
+                                fontSize = 13.5.sp
                             )
                         )
-                        Spacer(modifier = Modifier.height(16.dp))
+                        Spacer(modifier = Modifier.height(14.dp))
                         Button(
                             onClick = {
                                 try {
@@ -911,6 +1092,7 @@ fun DeveloperProfileDialog(
                                 text = "Go",
                                 style = MaterialTheme.typography.titleMedium.copy(
                                     color = PureBlack,
+                                    fontFamily = displayFont,
                                     fontWeight = FontWeight.ExtraBold,
                                     fontSize = 17.sp
                                 )

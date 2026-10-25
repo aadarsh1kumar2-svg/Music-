@@ -45,6 +45,21 @@
                 <action android:name="android.media.browse.MediaBrowserService" />
             </intent-filter>
         </service>
+
+        <service
+            android:name=".services.AADIFYMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_icon"
+            android:resource="@drawable/ic_aadify_notification" />
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="aadify_admin_broadcast_channel" />
     </application>
 
 </manifest>

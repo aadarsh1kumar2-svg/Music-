@@ -260,7 +260,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         onProgressUpdate = { posMs ->
             if (!isUsingExoPlayerFallback && !hasHandledEndForCurrentSong) {
                 _currentPositionMs.value = posMs
-                val bucket = posMs / 5000L
+                val bucket = posMs / 2000L
                 if (bucket != lastPersistedPosBucket) {
                     lastPersistedPosBucket = bucket
                     prefs.edit().putLong("last_position_ms", posMs).apply()
@@ -523,18 +523,23 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             viewModelScope.launch {
                 val active = _currentSong.value ?: return@launch
                 if (!isCurrentSongLoadedInEngine && shouldPlay) {
-                    playSong(active, _queue.value)
+                    playSong(active, _queue.value, startPositionMs = getValidResumePositionMs())
                     return@launch
                 }
                 if (isUsingExoPlayerFallback) {
                     _isPlaying.value = shouldPlay
-                    if (shouldPlay) _isBuffering.value = false
+                    if (shouldPlay) {
+                        _isBuffering.value = false
+                    } else {
+                        prefs.edit().putLong("last_position_ms", _currentPositionMs.value).apply()
+                    }
                 } else {
                     if (shouldPlay) {
                         backstagePlayer.playVideo()
                         _isPlaying.value = true
                         _isBuffering.value = false
                     } else {
+                        prefs.edit().putLong("last_position_ms", _currentPositionMs.value).apply()
                         backstagePlayer.pauseVideo()
                         _isPlaying.value = false
                         _isBuffering.value = false
@@ -550,6 +555,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     _isPlaying.value = false
                     handleTrackEnded()
                 }
+            }
+        }
+        MusicPlaybackService.onKeepOnlineEngineAwakeCallback = {
+            if (_currentSong.value != null && _isPlaying.value && !isUsingExoPlayerFallback && !hasHandledEndForCurrentSong) {
+                backstagePlayer.keepAwake()
             }
         }
 
@@ -614,7 +624,13 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun persistPlaybackSelection(song: Song, currentQueue: List<Song>) {
+    private fun getValidResumePositionMs(): Long {
+        val pos = _currentPositionMs.value.coerceAtLeast(prefs.getLong("last_position_ms", 0L)).coerceAtLeast(0L)
+        val dur = _durationMs.value.coerceAtLeast(prefs.getLong("last_duration_ms", 0L))
+        return if (dur > 5000L && pos >= dur - 2500L) 0L else pos
+    }
+
+    private fun persistPlaybackSelection(song: Song, currentQueue: List<Song>, initialPositionMs: Long = 0L) {
         try {
             val queueArr = JSONArray()
             currentQueue.take(50).forEach { item ->
@@ -623,7 +639,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             prefs.edit()
                 .putString("last_song_json", song.toJsonObject().toString())
                 .putString("last_queue_json", queueArr.toString())
-                .putLong("last_position_ms", 0L)
+                .putLong("last_position_ms", initialPositionMs.coerceAtLeast(0L))
                 .apply()
         } catch (_: Exception) {
         }
@@ -810,7 +826,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         _isLyricsOverlayOpen.value = open
     }
 
-    fun playSong(song: Song, customQueue: List<Song>? = null) {
+    fun playSong(
+        song: Song,
+        customQueue: List<Song>? = null,
+        startPositionMs: Long = 0L,
+        forceRestartFromBeginning: Boolean = false
+    ) {
         val currentList = customQueue?.takeIf { it.isNotEmpty() }
             ?: allSongs.value.takeIf { it.isNotEmpty() }
             ?: listOf(song)
@@ -822,6 +843,23 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
         _queue.value = resolvedQueue
 
+        // If the user taps the SAME song that is currently paused mid-way, resume it from where it stopped
+        // instead of restarting from 0:00!
+        val isSameActiveSong = _currentSong.value?.id == song.id && !forceRestartFromBeginning && !hasHandledEndForCurrentSong
+        if (isSameActiveSong && isCurrentSongLoadedInEngine && startPositionMs == 0L) {
+            if (!_isPlaying.value) {
+                togglePlayPause()
+            }
+            return
+        }
+
+        val resolvedStartMs = when {
+            forceRestartFromBeginning -> 0L
+            startPositionMs > 0L -> startPositionMs
+            isSameActiveSong -> getValidResumePositionMs()
+            else -> 0L
+        }
+
         // Synchronously invalidate the previous track in BackstageYouTubePlayerController BEFORE
         // any coroutine suspension so trailing callbacks from the previous song can never skip the new song!
         backstagePlayer.prepareForNewTrack()
@@ -830,8 +868,10 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         hasHandledEndForCurrentSong = false
         isCurrentSongLoadedInEngine = true
         _currentSong.value = song
-        _currentPositionMs.value = 0L
-        _durationMs.value = 0L
+        _currentPositionMs.value = resolvedStartMs
+        if (!isSameActiveSong) {
+            _durationMs.value = 0L
+        }
         _isBuffering.value = true
         _isPlaying.value = true
 
@@ -841,10 +881,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             song = song,
             isPlaying = true,
             directStreamUri = null,
-            playbackSpeed = _playbackSpeed.value
+            playbackSpeed = _playbackSpeed.value,
+            startPositionMs = resolvedStartMs
         )
 
-        persistPlaybackSelection(song, resolvedQueue)
+        persistPlaybackSelection(song, resolvedQueue, initialPositionMs = resolvedStartMs)
 
         viewModelScope.launch {
             val existing = libraryDao.getHistoryItem(song.id)
@@ -874,7 +915,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 isUsingExoPlayerFallback = true
                 backstagePlayer.stopAndClear()
                 _activeStreamEngine.value = "Device Local Audio"
-                startExoPlayerWithUri(song, deviceMatchUri)
+                startExoPlayerWithUri(song, deviceMatchUri, resolvedStartMs)
                 return@launch
             }
 
@@ -886,7 +927,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     isUsingExoPlayerFallback = true
                     backstagePlayer.stopAndClear()
                     _activeStreamEngine.value = "Offline Storage"
-                    startExoPlayerWithUri(song, Uri.fromFile(localFile).toString())
+                    startExoPlayerWithUri(song, Uri.fromFile(localFile).toString(), resolvedStartMs)
                     return@launch
                 }
             }
@@ -915,18 +956,19 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             // MediaSessionService Notification Bar + Lock Screen + WakeLock!
             isUsingExoPlayerFallback = false
             _activeStreamEngine.value = "Backstage YouTube Engine"
-            backstagePlayer.loadVideoById(playableVideoId)
+            backstagePlayer.loadVideoById(playableVideoId, startSeconds = resolvedStartMs / 1000.0)
             MusicPlaybackService.syncNowPlaying(
                 context = appContext,
                 song = song,
                 isPlaying = true,
                 directStreamUri = null,
-                playbackSpeed = _playbackSpeed.value
+                playbackSpeed = _playbackSpeed.value,
+                startPositionMs = resolvedStartMs
             )
         }
     }
 
-    private fun startExoPlayerWithUri(song: Song, streamUri: String) {
+    private fun startExoPlayerWithUri(song: Song, streamUri: String, startPositionMs: Long = 0L) {
         _isBuffering.value = false
         _isPlaying.value = true
         MusicPlaybackService.syncNowPlaying(
@@ -934,30 +976,35 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             song = song,
             isPlaying = true,
             directStreamUri = streamUri,
-            playbackSpeed = _playbackSpeed.value
+            playbackSpeed = _playbackSpeed.value,
+            startPositionMs = startPositionMs
         )
     }
 
     fun togglePlayPause() {
         val activeSong = _currentSong.value ?: return
         if (!isCurrentSongLoadedInEngine) {
-            playSong(activeSong, _queue.value)
+            playSong(activeSong, _queue.value, startPositionMs = getValidResumePositionMs())
             return
         }
         if (isUsingExoPlayerFallback) {
             val nextPlay = !_isPlaying.value
             _isPlaying.value = nextPlay
             _isBuffering.value = false
+            if (!nextPlay) {
+                prefs.edit().putLong("last_position_ms", _currentPositionMs.value).apply()
+            }
             MusicPlaybackService.syncPlayState(nextPlay)
         } else {
             if (_isPlaying.value) {
+                prefs.edit().putLong("last_position_ms", _currentPositionMs.value).apply()
                 backstagePlayer.pauseVideo()
                 MusicPlaybackService.syncPlayState(false)
                 _isPlaying.value = false
                 _isBuffering.value = false
             } else {
                 if (hasHandledEndForCurrentSong) {
-                    playSong(activeSong, _queue.value)
+                    playSong(activeSong, _queue.value, forceRestartFromBeginning = true)
                 } else {
                     backstagePlayer.playVideo()
                     MusicPlaybackService.syncPlayState(true)
@@ -1029,10 +1076,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
         when (_repeatMode.value) {
             RepeatModeState.ONE -> {
-                playSong(current, list)
+                playSong(current, list, forceRestartFromBeginning = true)
             }
             RepeatModeState.ALL, RepeatModeState.OFF -> {
-                skipToNext()
+                val idx = list.indexOfFirst { it.id == current.id }
+                val nextIndex = if (idx in 0 until list.lastIndex) idx + 1 else 0
+                playSong(list[nextIndex], list, forceRestartFromBeginning = true)
             }
         }
     }
@@ -1215,6 +1264,20 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun sendCloudNotificationFromAdmin(title: String, body: String, imageUrl: String = "") {
+        viewModelScope.launch {
+            val res = firebaseService.sendCloudNotificationFromAdmin(title, body, imageUrl)
+            res.fold(
+                onSuccess = {
+                    emitSnackbar("Cloud Notification broadcasted to all AADIFY users! 🔔")
+                },
+                onFailure = { err ->
+                    emitSnackbar("Failed to send notification: ${err.message}")
+                }
+            )
+        }
+    }
+
     fun emitSnackbar(message: String) {
         _snackbarMessage.tryEmit(message)
     }
@@ -1224,6 +1287,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         MusicPlaybackService.onSkipNextCallback = null
         MusicPlaybackService.onSkipPreviousCallback = null
         MusicPlaybackService.onTogglePlayPauseCallback = null
+        MusicPlaybackService.onKeepOnlineEngineAwakeCallback = null
         backstagePlayer.release()
         controllerFuture?.let { MediaController.releaseFuture(it) }
     }

@@ -87,7 +87,10 @@ class FirebaseSongsService(private val context: Context) {
     val connectionError: StateFlow<String?> = _connectionError.asStateFlow()
 
     private var songsRef: DatabaseReference? = null
+    private var notificationsRef: DatabaseReference? = null
+    private var messagesRef: DatabaseReference? = null
     private var valueListener: ValueEventListener? = null
+    private val appStartTimestampMs: Long = System.currentTimeMillis()
 
     init {
         loadSavedRankHistory()
@@ -154,6 +157,8 @@ class FirebaseSongsService(private val context: Context) {
                 FirebaseApp.getInstance()
             }
 
+            AADIFYMessagingService.initializeAndSubscribe(context)
+
             val database = FirebaseDatabase.getInstance(app, DATABASE_URL)
             try {
                 database.setPersistenceEnabled(true)
@@ -178,15 +183,31 @@ class FirebaseSongsService(private val context: Context) {
             }
             valueListener = listener
             songsRef?.addValueEventListener(listener)
+
+            val notifListener = object : ValueEventListener {
+                override fun onDataChange(snapshot: DataSnapshot) {
+                    handleNotificationSnapshot(snapshot)
+                }
+
+                override fun onCancelled(error: DatabaseError) {}
+            }
+            notificationsRef = database.getReference("notifications").also {
+                it.addValueEventListener(notifListener)
+            }
+            messagesRef = database.getReference("messages").also {
+                it.addValueEventListener(notifListener)
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Cloud init exception, using direct sync", e)
         }
 
         scope.launch {
             fetchSongsViaRest()
+            fetchNotificationsViaRest()
             while (true) {
                 delay(8_000L)
                 fetchSongsViaRest(silent = true)
+                fetchNotificationsViaRest()
             }
         }
     }
@@ -731,6 +752,225 @@ class FirebaseSongsService(private val context: Context) {
             fetchSongsViaRest(silent = true)
             Result.success(Unit)
         } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    private fun handleNotificationSnapshot(snapshot: DataSnapshot) {
+        if (!snapshot.exists()) return
+        try {
+            // Check if the snapshot itself is a direct notification object
+            val directTitle = snapshot.child("title").getValue(String::class.java)
+                ?: snapshot.child("heading").getValue(String::class.java)
+            val directBody = snapshot.child("body").getValue(String::class.java)
+                ?: snapshot.child("message").getValue(String::class.java)
+                ?: snapshot.child("paragraph").getValue(String::class.java)
+                ?: snapshot.child("text").getValue(String::class.java)
+            if (!directTitle.isNullOrBlank() || !directBody.isNullOrBlank()) {
+                val directImg = snapshot.child("imageUrl").getValue(String::class.java)
+                    ?: snapshot.child("image").getValue(String::class.java)
+                    ?: snapshot.child("bannerUrl").getValue(String::class.java)
+                val ts = snapshot.child("timestamp").value?.toString().orEmpty()
+                val key = "rtdb_direct_${directTitle.orEmpty()}_${directBody.orEmpty()}_$ts"
+                AdminNotificationHelper.showAdminNotificationAsync(
+                    context = context,
+                    uniqueKey = key,
+                    title = directTitle ?: "AADIFY",
+                    body = directBody ?: "",
+                    imageUrl = directImg
+                )
+                return
+            }
+
+            // Otherwise iterate over child notification entries
+            for (child in snapshot.children) {
+                val key = child.key ?: continue
+                val title = child.child("title").getValue(String::class.java)
+                    ?: child.child("heading").getValue(String::class.java)
+                    ?: child.child("subject").getValue(String::class.java)
+                    ?: ""
+                val body = child.child("body").getValue(String::class.java)
+                    ?: child.child("message").getValue(String::class.java)
+                    ?: child.child("paragraph").getValue(String::class.java)
+                    ?: child.child("text").getValue(String::class.java)
+                    ?: child.child("description").getValue(String::class.java)
+                    ?: ""
+                val imageUrl = child.child("imageUrl").getValue(String::class.java)
+                    ?: child.child("image").getValue(String::class.java)
+                    ?: child.child("image_url").getValue(String::class.java)
+                    ?: child.child("bannerUrl").getValue(String::class.java)
+                    ?: child.child("picture").getValue(String::class.java)
+
+                val tsObj = child.child("timestamp").value ?: child.child("createdAt").value
+                val timestamp = when (tsObj) {
+                    is Number -> tsObj.toLong()
+                    is String -> tsObj.toLongOrNull() ?: 0L
+                    else -> 0L
+                }
+
+                // Show if not yet shown on this device and either recent (within last 24h) or has no old timestamp
+                val isRecentEnough = timestamp == 0L || timestamp >= (appStartTimestampMs - 24 * 60 * 60 * 1000L)
+                if ((title.isNotBlank() || body.isNotBlank()) && isRecentEnough) {
+                    val uniqueKey = "rtdb_${key}_${timestamp}_${title}"
+                    AdminNotificationHelper.showAdminNotificationAsync(
+                        context = context,
+                        uniqueKey = uniqueKey,
+                        title = title.ifBlank { "AADIFY" },
+                        body = body,
+                        imageUrl = imageUrl
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Error parsing notification snapshot", e)
+        }
+    }
+
+    suspend fun fetchNotificationsViaRest() = withContext(Dispatchers.IO) {
+        val endpoints = listOf("notifications", "messages")
+        for (node in endpoints) {
+            try {
+                val request = Request.Builder()
+                    .url("$DATABASE_URL/$node.json")
+                    .get()
+                    .build()
+                httpClient.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) return@use
+                    val bodyStr = response.body?.string()?.trim().orEmpty()
+                    if (bodyStr.isEmpty() || bodyStr == "null" || !bodyStr.startsWith("{")) return@use
+                    val root = JSONObject(bodyStr)
+
+                    val directTitle = root.optString("title").ifBlank { root.optString("heading") }
+                    val directBody = root.optString("body").ifBlank {
+                        root.optString("message").ifBlank { root.optString("paragraph") }
+                    }
+                    if (directTitle.isNotBlank() || directBody.isNotBlank()) {
+                        val directImg = root.optString("imageUrl").ifBlank {
+                            root.optString("image").ifBlank { root.optString("bannerUrl") }
+                        }
+                        val ts = root.optLong("timestamp", 0L)
+                        val key = "rest_direct_${node}_${directTitle}_${directBody}_$ts"
+                        AdminNotificationHelper.showAdminNotificationBlocking(
+                            context = context,
+                            uniqueKey = key,
+                            title = directTitle.ifBlank { "AADIFY" },
+                            body = directBody,
+                            imageUrl = directImg.takeIf { it.isNotBlank() }
+                        )
+                        return@use
+                    }
+
+                    val keys = root.keys()
+                    while (keys.hasNext()) {
+                        val k = keys.next()
+                        val obj = root.optJSONObject(k) ?: continue
+                        val title = obj.optString("title").ifBlank {
+                            obj.optString("heading").ifBlank { obj.optString("subject") }
+                        }
+                        val body = obj.optString("body").ifBlank {
+                            obj.optString("message").ifBlank {
+                                obj.optString("paragraph").ifBlank {
+                                    obj.optString("text").ifBlank { obj.optString("description") }
+                                }
+                            }
+                        }
+                        val imageUrl = obj.optString("imageUrl").ifBlank {
+                            obj.optString("image").ifBlank {
+                                obj.optString("image_url").ifBlank {
+                                    obj.optString("bannerUrl").ifBlank { obj.optString("picture") }
+                                }
+                            }
+                        }
+                        val timestamp = obj.optLong("timestamp", obj.optLong("createdAt", 0L))
+                        val isRecentEnough = timestamp == 0L || timestamp >= (appStartTimestampMs - 24 * 60 * 60 * 1000L)
+                        if ((title.isNotBlank() || body.isNotBlank()) && isRecentEnough) {
+                            val uniqueKey = "rtdb_${k}_${timestamp}_${title}"
+                            AdminNotificationHelper.showAdminNotificationBlocking(
+                                context = context,
+                                uniqueKey = uniqueKey,
+                                title = title.ifBlank { "AADIFY" },
+                                body = body,
+                                imageUrl = imageUrl.takeIf { it.isNotBlank() }
+                            )
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    /**
+     * Publishes an Admin Cloud Notification to Firebase Realtime Database (/notifications)
+     * so all connected AADIFY users who allowed notifications immediately receive it with the
+     * AADIFY app name, AADIFY logo, title, paragraph body, and optional banner image.
+     */
+    suspend fun sendCloudNotificationFromAdmin(
+        title: String,
+        body: String,
+        imageUrl: String = ""
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val cleanTitle = title.trim().ifBlank { "AADIFY" }
+            val cleanBody = body.trim()
+            val cleanImg = imageUrl.trim()
+            val now = System.currentTimeMillis()
+            val notifId = "notif_${now}_${UUID.randomUUID().toString().take(6)}"
+
+            val payload = JSONObject().apply {
+                put("id", notifId)
+                put("title", cleanTitle)
+                put("body", cleanBody)
+                put("message", cleanBody)
+                if (cleanImg.isNotBlank()) {
+                    put("imageUrl", cleanImg)
+                    put("image", cleanImg)
+                }
+                put("appName", "AADIFY")
+                put("timestamp", now)
+            }
+
+            val reqBody = payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+            val request = Request.Builder()
+                .url("$DATABASE_URL/notifications/$notifId.json")
+                .put(reqBody)
+                .build()
+
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    return@withContext Result.failure(Exception("Firebase HTTP ${response.code}"))
+                }
+            }
+
+            try {
+                val map = mutableMapOf<String, Any>(
+                    "id" to notifId,
+                    "title" to cleanTitle,
+                    "body" to cleanBody,
+                    "message" to cleanBody,
+                    "appName" to "AADIFY",
+                    "timestamp" to now
+                )
+                if (cleanImg.isNotBlank()) {
+                    map["imageUrl"] = cleanImg
+                    map["image"] = cleanImg
+                }
+                notificationsRef?.child(notifId)?.setValue(map)
+            } catch (_: Exception) {
+            }
+
+            val uniqueKey = "rtdb_${notifId}_${now}_${cleanTitle}"
+            AdminNotificationHelper.showAdminNotificationBlocking(
+                context = context,
+                uniqueKey = uniqueKey,
+                title = cleanTitle,
+                body = cleanBody,
+                imageUrl = cleanImg.takeIf { it.isNotBlank() }
+            )
+
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to send cloud notification", e)
             Result.failure(e)
         }
     }

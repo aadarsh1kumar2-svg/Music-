@@ -371,6 +371,33 @@ private fun LibraryRootContent(
                 }
             }
         }
+
+        // Bottom Footer when scrolled to the end of Library
+        item {
+            LibraryCreatorFooter()
+        }
+    }
+}
+
+@Composable
+private fun LibraryCreatorFooter() {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 28.dp, bottom = 16.dp)
+            .testTag("library_creator_footer"),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            text = "Created by Aadarsh Kumar",
+            style = MaterialTheme.typography.labelSmall.copy(
+                color = MutedGray.copy(alpha = 0.72f),
+                fontWeight = FontWeight.Medium,
+                fontSize = 11.5.sp,
+                letterSpacing = 0.5.sp
+            ),
+            textAlign = TextAlign.Center
+        )
     }
 }
 
@@ -591,6 +618,9 @@ private fun LibrarySongCollectionView(
                         onSongClick = { onSongClick(song, songs) },
                         onMoreClick = { onSongMoreClick(song) }
                     )
+                }
+                item {
+                    LibraryCreatorFooter()
                 }
             }
         }
@@ -818,6 +848,10 @@ private fun LibraryMyMusicView(
                         )
                     }
                 }
+
+                item {
+                    LibraryCreatorFooter()
+                }
             }
         }
     }
@@ -952,6 +986,9 @@ private fun LibraryPlaylistsListView(
                             }
                         }
                     }
+                }
+                item {
+                    LibraryCreatorFooter()
                 }
             }
         }
