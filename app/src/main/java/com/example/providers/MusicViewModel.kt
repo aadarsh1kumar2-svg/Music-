@@ -1248,8 +1248,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             // 4. Primary Engine for ALL Admin & Online Songs:
-            // Play immediately via BackstageYouTubePlayerController AND sync the Foreground
-            // MediaSessionService Notification Bar + Lock Screen + Quick Settings Media Tile + WakeLock!
+            // Play immediately via BackstageYouTubePlayerController (MediaSessionService is already synced above!)
             isUsingExoPlayerFallback = false
             _activeStreamEngine.value = "Backstage YouTube Engine"
             backstagePlayer.loadVideoById(
@@ -1258,14 +1257,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 songTitle = song.title,
                 songArtist = song.artist,
                 artworkUrl = song.highResBannerUrl
-            )
-            MusicPlaybackService.syncNowPlaying(
-                context = appContext,
-                song = song,
-                isPlaying = true,
-                directStreamUri = null,
-                playbackSpeed = _playbackSpeed.value,
-                startPositionMs = resolvedStartMs
             )
         }
     }

@@ -128,8 +128,12 @@ class MusicPlaybackService : MediaSessionService() {
 
         fun notifyUnexpectedOnlinePause() {
             mainHandler.post {
-                instance?.handleUnexpectedOnlinePauseInternal()
-                    ?: onKeepOnlineEngineAwakeCallback?.invoke()
+                val svc = instance
+                if (svc != null) {
+                    svc.handleUnexpectedOnlinePauseInternal()
+                } else {
+                    onKeepOnlineEngineAwakeCallback?.invoke()
+                }
             }
         }
 
@@ -286,14 +290,13 @@ class MusicPlaybackService : MediaSessionService() {
     private var audioPlaybackCallback: AudioManager.AudioPlaybackCallback? = null
     private var isInternalSync: Boolean = false
     private var isDirectAudioMode: Boolean = false
-    private var isCheckingUnexpectedPause: Boolean = false
     private var zeroExternalMediaConsecutiveChecks: Int = 0
 
     private val externalMediaResumeWatcherRunnable = object : Runnable {
         override fun run() {
             mainHandler.removeCallbacks(this)
             if (!isPausedByExternalMedia) return
-            if (!hasAnyActiveMediaOrCallOnDevice()) {
+            if (!isPhoneCallActive()) {
                 zeroExternalMediaConsecutiveChecks++
                 if (zeroExternalMediaConsecutiveChecks >= 2) {
                     triggerAutoResumeFromExternalMedia()
@@ -302,23 +305,22 @@ class MusicPlaybackService : MediaSessionService() {
             } else {
                 zeroExternalMediaConsecutiveChecks = 0
             }
-            mainHandler.postDelayed(this, 350L)
+            mainHandler.postDelayed(this, 400L)
         }
     }
 
     private val audioFocusChangeListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
         when (focusChange) {
             AudioManager.AUDIOFOCUS_LOSS,
-            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
-            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
                 if (isDirectAudioMode && pendingSync?.isPlaying == true && !isPausedByExternalMedia) {
                     enterExternalMediaPausedState()
                 }
             }
             AudioManager.AUDIOFOCUS_GAIN -> {
-                if (isPausedByExternalMedia) {
+                if (isPausedByExternalMedia && !isPhoneCallActive()) {
                     mainHandler.postDelayed({
-                        if (isPausedByExternalMedia && !hasAnyActiveMediaOrCallOnDevice()) {
+                        if (isPausedByExternalMedia && !isPhoneCallActive()) {
                             triggerAutoResumeFromExternalMedia()
                         }
                     }, 250L)
@@ -653,23 +655,12 @@ class MusicPlaybackService : MediaSessionService() {
                 val cb = object : AudioManager.AudioPlaybackCallback() {
                     override fun onPlaybackConfigChanged(configs: MutableList<AudioPlaybackConfiguration>?) {
                         super.onPlaybackConfigChanged(configs)
-                        if (isPausedByExternalMedia) {
-                            if (!hasAnyActiveMediaOrCallOnDevice(configs)) {
-                                mainHandler.postDelayed({
-                                    if (isPausedByExternalMedia && !hasAnyActiveMediaOrCallOnDevice()) {
-                                        triggerAutoResumeFromExternalMedia()
-                                    }
-                                }, 350L)
-                            } else {
-                                zeroExternalMediaConsecutiveChecks = 0
-                            }
-                        } else if (!isDirectAudioMode && pendingSync?.isPlaying == true && !isCheckingUnexpectedPause) {
-                            // If an external video starts playing WITHOUT requesting AudioFocus (so > 2 media streams exist),
-                            // pause our song cleanly and wait for the external video to finish!
-                            val activeMediaCount = countActiveMediaConfigs(configs)
-                            if (activeMediaCount >= 3) {
-                                enterExternalMediaPausedState()
-                            }
+                        if (isPausedByExternalMedia && !isPhoneCallActive()) {
+                            mainHandler.postDelayed({
+                                if (isPausedByExternalMedia && !isPhoneCallActive()) {
+                                    triggerAutoResumeFromExternalMedia()
+                                }
+                            }, 350L)
                         }
                     }
                 }
@@ -680,89 +671,41 @@ class MusicPlaybackService : MediaSessionService() {
         }
     }
 
-    private fun countActiveMediaConfigs(configs: List<AudioPlaybackConfiguration>? = null): Int {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return 0
-        return try {
-            val list = configs ?: audioManager?.activePlaybackConfigurations.orEmpty()
-            list.count { cfg ->
-                val usage = cfg.audioAttributes?.usage ?: android.media.AudioAttributes.USAGE_UNKNOWN
-                usage == android.media.AudioAttributes.USAGE_MEDIA ||
-                    usage == android.media.AudioAttributes.USAGE_UNKNOWN ||
-                    usage == android.media.AudioAttributes.USAGE_GAME
-            }
-        } catch (_: Exception) {
-            0
-        }
-    }
-
-    private fun hasAnyActiveMediaOrCallOnDevice(configs: List<AudioPlaybackConfiguration>? = null): Boolean {
+    private fun isPhoneCallActive(): Boolean {
         val am = audioManager ?: return false
         val mode = try {
             am.mode
         } catch (_: Exception) {
             AudioManager.MODE_NORMAL
         }
-        if (mode == AudioManager.MODE_IN_CALL ||
+        return mode == AudioManager.MODE_IN_CALL ||
             mode == AudioManager.MODE_IN_COMMUNICATION ||
             mode == AudioManager.MODE_RINGTONE
-        ) {
-            return true
-        }
-        return countActiveMediaConfigs(configs) > 0
     }
 
     /**
      * Invoked when BackstageYouTubePlayerController's <video> element pauses unexpectedly.
-     * Distinguishes between:
-     * 1) An external video/audio starting in another app (YouTube, Instagram, WhatsApp, Gallery, Call)
-     *    -> Pauses AADIFY cleanly and automatically resumes the song as soon as the external video closes!
-     * 2) A harmless background / keyboard / scroll hiccup with NO external video playing
-     *    -> Immediately wakes and resumes playback so background music never stops!
+     * - If an actual phone/VoIP call is active, pauses cleanly until the call ends.
+     * - Otherwise, NEVER pauses our own playback; immediately wakes and resumes the online engine!
      */
     private fun handleUnexpectedOnlinePauseInternal() {
         if (isPausedByExternalMedia || pendingSync?.isPlaying != true) return
-        if (isCheckingUnexpectedPause) return
-        isCheckingUnexpectedPause = true
 
-        // Temporarily pause our silent keepalive ExoPlayer so our app contributes 0 active AudioTracks
-        val player = exoPlayerInstance
-        isInternalSync = true
-        try {
-            player?.pause()
-        } catch (_: Exception) {
-        } finally {
-            isInternalSync = false
+        if (isPhoneCallActive()) {
+            enterExternalMediaPausedState()
+            return
         }
 
-        mainHandler.postDelayed({
-            isCheckingUnexpectedPause = false
-            if (pendingSync == null) return@postDelayed
-
-            if (hasAnyActiveMediaOrCallOnDevice()) {
-                // Confirmed: Another app is actively playing a video/audio (or a call is active)!
-                enterExternalMediaPausedState()
-            } else {
-                // No external video is playing! Immediately resume ExoPlayer keepalive and online engine!
+        // Immediately wake and resume the online engine so playback never stops on Song 2, Song 3, or in background
+        onKeepOnlineEngineAwakeCallback?.invoke()
+        val recoveryDelays = longArrayOf(120L, 320L, 700L, 1300L)
+        for (d in recoveryDelays) {
+            mainHandler.postDelayed({
                 if (pendingSync?.isPlaying == true && !isPausedByExternalMedia) {
-                    isInternalSync = true
-                    try {
-                        player?.play()
-                    } catch (_: Exception) {
-                    } finally {
-                        isInternalSync = false
-                    }
                     onKeepOnlineEngineAwakeCallback?.invoke()
-                    val recoveryDelays = longArrayOf(120L, 350L, 800L)
-                    for (d in recoveryDelays) {
-                        mainHandler.postDelayed({
-                            if (pendingSync?.isPlaying == true && !isPausedByExternalMedia) {
-                                onKeepOnlineEngineAwakeCallback?.invoke()
-                            }
-                        }, d)
-                    }
                 }
-            }
-        }, 140L)
+            }, d)
+        }
     }
 
     private fun enterExternalMediaPausedState() {
@@ -800,6 +743,10 @@ class MusicPlaybackService : MediaSessionService() {
         isPausedByExternalMedia = false
         zeroExternalMediaConsecutiveChecks = 0
         mainHandler.removeCallbacks(externalMediaResumeWatcherRunnable)
+
+        if (!isDirectAudioMode) {
+            abandonAudioFocusIfHeld()
+        }
 
         pendingSync = pendingSync?.copy(isPlaying = true)
         applyPlayStateInternal(shouldPlay = true, forceNotificationUpdate = true)
@@ -989,6 +936,9 @@ class MusicPlaybackService : MediaSessionService() {
             mainHandler.post {
                 val currentSynced = pendingSync?.song ?: return@post
                 if (currentSynced.id != song.id) return@post
+                // Do not call replaceMediaItem while ExoPlayer is streaming a direct audio file,
+                // as replaceMediaItem on the active index can interrupt direct audio playback
+                if (isDirectAudioMode) return@post
                 val player = exoPlayerInstance ?: return@post
                 isInternalSync = true
                 try {
