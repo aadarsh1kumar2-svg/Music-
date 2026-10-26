@@ -302,23 +302,28 @@ class BackstageYouTubePlayerController(
                         """
                         (function() {
                             window.__akUserPaused = false;
+                            var mp = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
                             var v = document.querySelector('video');
                             if (v && !window.__akTrackEndedFired && !v.ended) {
                                 v.muted = false;
                                 v.volume = 1.0;
                                 var savedTime = Math.max(window.__akLastGoodTime || 0, $fallbackSavedSec || 0);
-                                if (savedTime > 2.5 && v.currentTime < 1.0 && v.readyState >= 1) {
+                                if (savedTime > 2.5 && v.currentTime < 1.0 && v.readyState >= 1 && !v.seeking) {
                                     try { v.currentTime = savedTime; } catch(e) {}
                                 }
+                                if (mp && typeof mp.getPlayerState === 'function') {
+                                    var st = mp.getPlayerState();
+                                    if (st === 2 || st === 5 || st === -1) {
+                                        try { mp.playVideo(); } catch(e1) {}
+                                    }
+                                }
                                 if (v.paused) {
+                                    if (mp && typeof mp.playVideo === 'function') {
+                                        try { mp.playVideo(); } catch(e2) {}
+                                    }
                                     var p = v.play();
                                     if (p && typeof p.catch === 'function') {
-                                        p.catch(function() {
-                                            var mp = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
-                                            if (mp && typeof mp.playVideo === 'function') {
-                                                try { mp.playVideo(); } catch(e2) {}
-                                            }
-                                        });
+                                        p.catch(function() {});
                                     }
                                 }
                             }
@@ -757,7 +762,7 @@ class BackstageYouTubePlayerController(
                 }
 
                 function tryPlayVideo(v) {
-                    if (!v || window.__akUserPaused || window.__akTrackEndedFired || !v.paused || v.ended) return;
+                    if (!v || window.__akUserPaused || window.__akTrackEndedFired || v.ended) return;
                     if (!isCurrentUrlMatchingTarget()) return;
                     var totalDur = getTrueDuration(v);
                     if (window.__akHasSeenStartOfTrack && totalDur >= 45 && v.currentTime >= totalDur - 0.5) {
@@ -765,7 +770,7 @@ class BackstageYouTubePlayerController(
                         return;
                     }
                     var now = Date.now();
-                    if (now - (window.__akLastPlayAttempt || 0) < 80) return;
+                    if (now - (window.__akLastPlayAttempt || 0) < 60) return;
                     window.__akLastPlayAttempt = now;
 
                     dismissContinueWatchingDialog();
@@ -774,17 +779,22 @@ class BackstageYouTubePlayerController(
                     v.volume = 1.0;
 
                     try {
-                        var p = v.play();
-                        if (p && typeof p.catch === 'function') {
-                            p.catch(function() {
-                                var mp = getMoviePlayer();
-                                if (mp && typeof mp.playVideo === 'function') {
-                                    mp.playVideo();
-                                } else {
-                                    var largeBtn = document.querySelector('.ytp-large-play-button, button.ytp-large-play-button');
-                                    if (largeBtn) { largeBtn.click(); }
-                                }
-                            });
+                        var mp = getMoviePlayer();
+                        if (mp && typeof mp.playVideo === 'function') {
+                            try { mp.playVideo(); } catch (e1) {}
+                        }
+                        if (v.paused) {
+                            var p = v.play();
+                            if (p && typeof p.catch === 'function') {
+                                p.catch(function() {
+                                    if (mp && typeof mp.playVideo === 'function') {
+                                        try { mp.playVideo(); } catch (e2) {}
+                                    } else {
+                                        var largeBtn = document.querySelector('.ytp-large-play-button, button.ytp-large-play-button');
+                                        if (largeBtn) { largeBtn.click(); }
+                                    }
+                                });
+                            }
                         }
                     } catch (e) {}
                 }
@@ -818,7 +828,15 @@ class BackstageYouTubePlayerController(
                             if (window.__akHasSeenStartOfTrack && totalDur >= 45 && v.currentTime >= totalDur - 0.85) {
                                 return origPause();
                             }
-                            // Block non-user background/visibility pause calls!
+                            // Immediately keep #movie_player in PLAYING state so MSE buffer loading never stops!
+                            setTimeout(function() {
+                                if (!window.__akUserPaused && !window.__akTrackEndedFired) {
+                                    var mp = getMoviePlayer();
+                                    if (mp && typeof mp.playVideo === 'function') {
+                                        try { mp.playVideo(); } catch (e) {}
+                                    }
+                                }
+                            }, 10);
                             return;
                         };
                     }
@@ -838,6 +856,7 @@ class BackstageYouTubePlayerController(
                         if (!isCurrentUrlMatchingTarget()) return;
                         applyResumeSeekIfNeeded(v);
                         window.__akHasSeenStartOfTrack = true;
+                        window.__akLastReportedState = 1;
                         if (window.AndroidBridge) {
                             window.AndroidBridge.onStateChange(1);
                             var dur = getTrueDuration(v);
@@ -855,6 +874,7 @@ class BackstageYouTubePlayerController(
                         if (!isCurrentUrlMatchingTarget()) return;
                         applyResumeSeekIfNeeded(v);
                         window.__akHasSeenStartOfTrack = true;
+                        window.__akLastReportedState = 1;
                         if (window.AndroidBridge) {
                             window.AndroidBridge.onStateChange(1);
                         }
@@ -869,19 +889,20 @@ class BackstageYouTubePlayerController(
                             return;
                         }
                         if (window.__akUserPaused) {
+                            window.__akLastReportedState = 2;
                             if (window.AndroidBridge) {
                                 window.AndroidBridge.onStateChange(2);
                             }
                         } else if (!window.__akTrackEndedFired && !v.ended) {
                             // Immediately notify native Foreground Service handler AND schedule multi-stage JS auto-resume
-                            // so typing on keyboard or scrolling in other apps NEVER stops the music!
+                            // so typing on keyboard, scrolling in other apps, or system alerts NEVER stop the music!
                             if (window.AndroidBridge && typeof window.AndroidBridge.onUnexpectedPause === 'function') {
                                 window.AndroidBridge.onUnexpectedPause();
                             }
-                            var retryDelays = [15, 70, 180, 400, 850, 1600];
+                            var retryDelays = [10, 50, 140, 320, 650, 1200, 2000, 3000];
                             retryDelays.forEach(function(ms) {
                                 setTimeout(function() {
-                                    if (!window.__akUserPaused && !window.__akTrackEndedFired && v.paused && !v.ended) {
+                                    if (!window.__akUserPaused && !window.__akTrackEndedFired && !v.ended) {
                                         window.__akLastPlayAttempt = 0;
                                         tryPlayVideo(v);
                                     }
@@ -892,6 +913,7 @@ class BackstageYouTubePlayerController(
 
                     v.addEventListener('waiting', function() {
                         if (!window.__akUserPaused && !window.__akTrackEndedFired && isCurrentUrlMatchingTarget() && window.AndroidBridge) {
+                            window.__akLastReportedState = 3;
                             window.AndroidBridge.onStateChange(3);
                         }
                     });
@@ -939,9 +961,13 @@ class BackstageYouTubePlayerController(
                         }
                         if (window.__akHasSeenStartOfTrack && v.currentTime >= 0) {
                             window.AndroidBridge.onProgress(v.currentTime);
-                            window.AndroidBridge.onStateChange(1);
+                            if (window.__akLastReportedState !== 1) {
+                                window.__akLastReportedState = 1;
+                                window.AndroidBridge.onStateChange(1);
+                            }
                         }
-                        if (totalDur > 0) {
+                        if (totalDur > 0 && Math.abs((window.__akLastReportedDur || 0) - totalDur) > 0.5) {
+                            window.__akLastReportedDur = totalDur;
                             window.AndroidBridge.onDuration(totalDur);
                         }
                     });
@@ -1003,13 +1029,50 @@ class BackstageYouTubePlayerController(
                             unmuteBtn.click();
                         }
 
-                        if (!window.__akUserPaused && !window.__akTrackEndedFired && v.paused && !v.ended) {
-                            tryPlayVideo(v);
+                        if (!window.__akUserPaused && !window.__akTrackEndedFired && !v.ended) {
+                            var mp = getMoviePlayer();
+                            if (mp && typeof mp.getPlayerState === 'function') {
+                                var pState = mp.getPlayerState();
+                                if (pState === 2 || pState === 5) {
+                                    try { mp.playVideo(); } catch (e) {}
+                                }
+                            }
+                            if (v.paused) {
+                                tryPlayVideo(v);
+                            } else if (window.__akHasSeenStartOfTrack) {
+                                // Detect and recover from any MSE buffer stall in background
+                                var curT = v.currentTime || 0;
+                                if (Math.abs(curT - (window.__akLastTickTime || -1)) < 0.02) {
+                                    window.__akStallTicks = (window.__akStallTicks || 0) + 1;
+                                    if (window.__akStallTicks === 8) {
+                                        if (mp && typeof mp.playVideo === 'function') {
+                                            try { mp.playVideo(); } catch (e1) {}
+                                        }
+                                        try { v.play(); } catch (e2) {}
+                                    } else if (window.__akStallTicks >= 16) {
+                                        window.__akStallTicks = 0;
+                                        if (totalDur <= 0 || curT < totalDur - 2.0) {
+                                            try {
+                                                if (mp && typeof mp.seekTo === 'function') {
+                                                    mp.seekTo(curT + 0.05, true);
+                                                }
+                                                if (mp && typeof mp.playVideo === 'function') {
+                                                    mp.playVideo();
+                                                }
+                                            } catch (e3) {}
+                                        }
+                                    }
+                                } else {
+                                    window.__akStallTicks = 0;
+                                    window.__akLastTickTime = curT;
+                                }
+                            }
                         }
 
                         if (!window.__akUserPaused && !window.__akTrackEndedFired && !v.paused && window.__akHasSeenStartOfTrack && v.currentTime > 0 && window.AndroidBridge) {
                             window.AndroidBridge.onProgress(v.currentTime);
-                            if (totalDur > 0) {
+                            if (totalDur > 0 && Math.abs((window.__akLastReportedDur || 0) - totalDur) > 0.5) {
+                                window.__akLastReportedDur = totalDur;
                                 window.AndroidBridge.onDuration(totalDur);
                             }
                         }

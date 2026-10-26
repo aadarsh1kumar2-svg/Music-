@@ -116,6 +116,7 @@ class AADIFYMessagingService : FirebaseMessagingService() {
                 ?: data["title"]
                 ?: data["heading"]
                 ?: data["subject"]
+                ?: data["name"]
                 ?: "AADIFY"
 
             val body = notif?.body
@@ -126,29 +127,26 @@ class AADIFYMessagingService : FirebaseMessagingService() {
                 ?: data["text"]
                 ?: data["description"]
                 ?: data["content"]
+                ?: data["subtitle"]
                 ?: ""
 
             val imageUrl = notif?.imageUrl?.toString()
                 ?.takeIf { it.isNotBlank() }
-                ?: data["imageUrl"]
-                ?: data["image"]
-                ?: data["image_url"]
-                ?: data["bannerUrl"]
-                ?: data["banner"]
-                ?: data["picture"]
-                ?: data["thumbnail"]
+                ?: AdminNotificationHelper.extractImageUrlFromMap(data)
 
             val uniqueKey = remoteMessage.messageId
                 ?: data["id"]
                 ?: "fcm_${title}_${body}_${remoteMessage.sentTime}"
 
-            AdminNotificationHelper.showAdminNotificationBlocking(
-                context = applicationContext,
-                uniqueKey = uniqueKey,
-                title = title,
-                body = body,
-                imageUrl = imageUrl
-            )
+            kotlinx.coroutines.runBlocking(Dispatchers.IO) {
+                AdminNotificationHelper.showAdminNotificationBlocking(
+                    context = applicationContext,
+                    uniqueKey = uniqueKey,
+                    title = title,
+                    body = body,
+                    imageUrl = imageUrl
+                )
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Error handling FCM message", e)
         }

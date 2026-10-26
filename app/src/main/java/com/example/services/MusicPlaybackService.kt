@@ -74,12 +74,18 @@ class MusicPlaybackService : MediaSessionService() {
         @Volatile
         var onKeepOnlineEngineAwakeCallback: (() -> Unit)? = null
 
+        @Volatile
+        private var isKeepAliveScheduled: Boolean = false
+
         private val serviceKeepAliveRunnable = object : Runnable {
             override fun run() {
                 mainHandler.removeCallbacks(this)
                 if (pendingSync?.isPlaying == true) {
+                    isKeepAliveScheduled = true
                     onKeepOnlineEngineAwakeCallback?.invoke()
                     mainHandler.postDelayed(this, 500L)
+                } else {
+                    isKeepAliveScheduled = false
                 }
             }
         }
@@ -133,15 +139,20 @@ class MusicPlaybackService : MediaSessionService() {
         }
 
         fun syncPlayState(isPlaying: Boolean) {
+            val stateChanged = pendingSync?.isPlaying != isPlaying
             pendingSync = pendingSync?.copy(isPlaying = isPlaying)
             mainHandler.post {
                 if (isPlaying) {
-                    mainHandler.removeCallbacks(serviceKeepAliveRunnable)
-                    mainHandler.postDelayed(serviceKeepAliveRunnable, 500L)
+                    if (!isKeepAliveScheduled) {
+                        isKeepAliveScheduled = true
+                        mainHandler.removeCallbacks(serviceKeepAliveRunnable)
+                        mainHandler.postDelayed(serviceKeepAliveRunnable, 500L)
+                    }
                 } else {
+                    isKeepAliveScheduled = false
                     mainHandler.removeCallbacks(serviceKeepAliveRunnable)
                 }
-                instance?.applyPlayStateInternal(isPlaying)
+                instance?.applyPlayStateInternal(isPlaying, forceNotificationUpdate = stateChanged)
             }
         }
 
@@ -620,8 +631,9 @@ class MusicPlaybackService : MediaSessionService() {
         }
     }
 
-    private fun applyPlayStateInternal(shouldPlay: Boolean) {
+    private fun applyPlayStateInternal(shouldPlay: Boolean, forceNotificationUpdate: Boolean = true) {
         val player = exoPlayerInstance ?: return
+        val wasPlayWhenReady = player.playWhenReady
         isInternalSync = true
         try {
             if (shouldPlay) {
@@ -631,7 +643,9 @@ class MusicPlaybackService : MediaSessionService() {
                     if (player.playbackState == Player.STATE_IDLE || player.playbackState == Player.STATE_ENDED) {
                         player.prepare()
                     }
-                    player.play()
+                    if (!player.isPlaying || !player.playWhenReady) {
+                        player.play()
+                    }
                 }
                 try {
                     if (wakeLock?.isHeld == false) wakeLock?.acquire(6 * 60 * 60 * 1000L)
@@ -639,12 +653,16 @@ class MusicPlaybackService : MediaSessionService() {
                 } catch (_: Exception) {
                 }
             } else {
-                player.pause()
+                if (player.isPlaying || player.playWhenReady) {
+                    player.pause()
+                }
             }
-            mediaSession?.let { session ->
-                try {
-                    onUpdateNotification(session, shouldPlay)
-                } catch (_: Exception) {
+            if (forceNotificationUpdate || wasPlayWhenReady != shouldPlay) {
+                mediaSession?.let { session ->
+                    try {
+                        onUpdateNotification(session, shouldPlay)
+                    } catch (_: Exception) {
+                    }
                 }
             }
         } catch (_: Exception) {

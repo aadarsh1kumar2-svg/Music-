@@ -197,6 +197,8 @@ class FirebaseSongsService(private val context: Context) {
             messagesRef = database.getReference("messages").also {
                 it.addValueEventListener(notifListener)
             }
+            database.getReference("notification").addValueEventListener(notifListener)
+            database.getReference("broadcast").addValueEventListener(notifListener)
         } catch (e: Exception) {
             Log.e(TAG, "Cloud init exception, using direct sync", e)
         }
@@ -756,20 +758,30 @@ class FirebaseSongsService(private val context: Context) {
         }
     }
 
+    private fun normalizeEpochMillis(rawTs: Long): Long {
+        return if (rawTs in 1_000_000_000L..9_999_999_999L) {
+            rawTs * 1000L
+        } else {
+            rawTs
+        }
+    }
+
     private fun handleNotificationSnapshot(snapshot: DataSnapshot) {
         if (!snapshot.exists()) return
         try {
             // Check if the snapshot itself is a direct notification object
             val directTitle = snapshot.child("title").getValue(String::class.java)
                 ?: snapshot.child("heading").getValue(String::class.java)
+                ?: snapshot.child("subject").getValue(String::class.java)
+                ?: snapshot.child("name").getValue(String::class.java)
             val directBody = snapshot.child("body").getValue(String::class.java)
                 ?: snapshot.child("message").getValue(String::class.java)
                 ?: snapshot.child("paragraph").getValue(String::class.java)
                 ?: snapshot.child("text").getValue(String::class.java)
+                ?: snapshot.child("description").getValue(String::class.java)
+                ?: snapshot.child("content").getValue(String::class.java)
             if (!directTitle.isNullOrBlank() || !directBody.isNullOrBlank()) {
-                val directImg = snapshot.child("imageUrl").getValue(String::class.java)
-                    ?: snapshot.child("image").getValue(String::class.java)
-                    ?: snapshot.child("bannerUrl").getValue(String::class.java)
+                val directImg = AdminNotificationHelper.extractImageUrlFromSnapshot(snapshot)
                 val ts = snapshot.child("timestamp").value?.toString().orEmpty()
                 val key = "rtdb_direct_${directTitle.orEmpty()}_${directBody.orEmpty()}_$ts"
                 AdminNotificationHelper.showAdminNotificationAsync(
@@ -788,28 +800,30 @@ class FirebaseSongsService(private val context: Context) {
                 val title = child.child("title").getValue(String::class.java)
                     ?: child.child("heading").getValue(String::class.java)
                     ?: child.child("subject").getValue(String::class.java)
+                    ?: child.child("name").getValue(String::class.java)
                     ?: ""
                 val body = child.child("body").getValue(String::class.java)
                     ?: child.child("message").getValue(String::class.java)
                     ?: child.child("paragraph").getValue(String::class.java)
                     ?: child.child("text").getValue(String::class.java)
                     ?: child.child("description").getValue(String::class.java)
+                    ?: child.child("content").getValue(String::class.java)
+                    ?: child.child("subtitle").getValue(String::class.java)
                     ?: ""
-                val imageUrl = child.child("imageUrl").getValue(String::class.java)
-                    ?: child.child("image").getValue(String::class.java)
-                    ?: child.child("image_url").getValue(String::class.java)
-                    ?: child.child("bannerUrl").getValue(String::class.java)
-                    ?: child.child("picture").getValue(String::class.java)
+                val imageUrl = AdminNotificationHelper.extractImageUrlFromSnapshot(child)
 
-                val tsObj = child.child("timestamp").value ?: child.child("createdAt").value
-                val timestamp = when (tsObj) {
+                val tsObj = child.child("timestamp").value
+                    ?: child.child("createdAt").value
+                    ?: child.child("time").value
+                val rawTimestamp = when (tsObj) {
                     is Number -> tsObj.toLong()
                     is String -> tsObj.toLongOrNull() ?: 0L
                     else -> 0L
                 }
+                val timestamp = normalizeEpochMillis(rawTimestamp)
 
-                // Show if not yet shown on this device and either recent (within last 24h) or has no old timestamp
-                val isRecentEnough = timestamp == 0L || timestamp >= (appStartTimestampMs - 24 * 60 * 60 * 1000L)
+                // Show if not yet shown on this device (or if upgrading with an image!) and within last 7 days
+                val isRecentEnough = timestamp == 0L || timestamp >= (appStartTimestampMs - 7 * 24 * 60 * 60 * 1000L)
                 if ((title.isNotBlank() || body.isNotBlank()) && isRecentEnough) {
                     val uniqueKey = "rtdb_${key}_${timestamp}_${title}"
                     AdminNotificationHelper.showAdminNotificationAsync(
@@ -827,7 +841,7 @@ class FirebaseSongsService(private val context: Context) {
     }
 
     suspend fun fetchNotificationsViaRest() = withContext(Dispatchers.IO) {
-        val endpoints = listOf("notifications", "messages")
+        val endpoints = listOf("notifications", "messages", "notification", "broadcast")
         for (node in endpoints) {
             try {
                 val request = Request.Builder()
@@ -840,22 +854,26 @@ class FirebaseSongsService(private val context: Context) {
                     if (bodyStr.isEmpty() || bodyStr == "null" || !bodyStr.startsWith("{")) return@use
                     val root = JSONObject(bodyStr)
 
-                    val directTitle = root.optString("title").ifBlank { root.optString("heading") }
+                    val directTitle = root.optString("title").ifBlank {
+                        root.optString("heading").ifBlank { root.optString("subject") }
+                    }
                     val directBody = root.optString("body").ifBlank {
-                        root.optString("message").ifBlank { root.optString("paragraph") }
+                        root.optString("message").ifBlank {
+                            root.optString("paragraph").ifBlank {
+                                root.optString("text").ifBlank { root.optString("description") }
+                            }
+                        }
                     }
                     if (directTitle.isNotBlank() || directBody.isNotBlank()) {
-                        val directImg = root.optString("imageUrl").ifBlank {
-                            root.optString("image").ifBlank { root.optString("bannerUrl") }
-                        }
-                        val ts = root.optLong("timestamp", 0L)
+                        val directImg = AdminNotificationHelper.extractImageUrlFromJson(root)
+                        val ts = normalizeEpochMillis(root.optLong("timestamp", 0L))
                         val key = "rest_direct_${node}_${directTitle}_${directBody}_$ts"
                         AdminNotificationHelper.showAdminNotificationBlocking(
                             context = context,
                             uniqueKey = key,
                             title = directTitle.ifBlank { "AADIFY" },
                             body = directBody,
-                            imageUrl = directImg.takeIf { it.isNotBlank() }
+                            imageUrl = directImg
                         )
                         return@use
                     }
@@ -865,24 +883,25 @@ class FirebaseSongsService(private val context: Context) {
                         val k = keys.next()
                         val obj = root.optJSONObject(k) ?: continue
                         val title = obj.optString("title").ifBlank {
-                            obj.optString("heading").ifBlank { obj.optString("subject") }
+                            obj.optString("heading").ifBlank {
+                                obj.optString("subject").ifBlank { obj.optString("name") }
+                            }
                         }
                         val body = obj.optString("body").ifBlank {
                             obj.optString("message").ifBlank {
                                 obj.optString("paragraph").ifBlank {
-                                    obj.optString("text").ifBlank { obj.optString("description") }
+                                    obj.optString("text").ifBlank {
+                                        obj.optString("description").ifBlank {
+                                            obj.optString("content").ifBlank { obj.optString("subtitle") }
+                                        }
+                                    }
                                 }
                             }
                         }
-                        val imageUrl = obj.optString("imageUrl").ifBlank {
-                            obj.optString("image").ifBlank {
-                                obj.optString("image_url").ifBlank {
-                                    obj.optString("bannerUrl").ifBlank { obj.optString("picture") }
-                                }
-                            }
-                        }
-                        val timestamp = obj.optLong("timestamp", obj.optLong("createdAt", 0L))
-                        val isRecentEnough = timestamp == 0L || timestamp >= (appStartTimestampMs - 24 * 60 * 60 * 1000L)
+                        val imageUrl = AdminNotificationHelper.extractImageUrlFromJson(obj)
+                        val rawTimestamp = obj.optLong("timestamp", obj.optLong("createdAt", obj.optLong("time", 0L)))
+                        val timestamp = normalizeEpochMillis(rawTimestamp)
+                        val isRecentEnough = timestamp == 0L || timestamp >= (appStartTimestampMs - 7 * 24 * 60 * 60 * 1000L)
                         if ((title.isNotBlank() || body.isNotBlank()) && isRecentEnough) {
                             val uniqueKey = "rtdb_${k}_${timestamp}_${title}"
                             AdminNotificationHelper.showAdminNotificationBlocking(
@@ -890,7 +909,7 @@ class FirebaseSongsService(private val context: Context) {
                                 uniqueKey = uniqueKey,
                                 title = title.ifBlank { "AADIFY" },
                                 body = body,
-                                imageUrl = imageUrl.takeIf { it.isNotBlank() }
+                                imageUrl = imageUrl
                             )
                         }
                     }
