@@ -6,12 +6,18 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.media.AudioFocusRequest
+import android.media.AudioManager
+import android.media.AudioPlaybackConfiguration
 import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
+import android.util.LruCache
 import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
@@ -33,10 +39,18 @@ import com.example.MainActivity
 import com.example.models.Song
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.TimeUnit
 
 class MusicPlaybackService : MediaSessionService() {
 
@@ -52,6 +66,14 @@ class MusicPlaybackService : MediaSessionService() {
         private const val NOTIFICATION_CHANNEL_ID = "aadify_playback_channel_v2"
         private const val NOTIFICATION_ID = 1001
         private val mainHandler = Handler(Looper.getMainLooper())
+        private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        private val artworkHttpClient = OkHttpClient.Builder()
+            .connectTimeout(8, TimeUnit.SECONDS)
+            .readTimeout(8, TimeUnit.SECONDS)
+            .followRedirects(true)
+            .followSslRedirects(true)
+            .build()
+        private val artworkBytesCache = object : LruCache<String, ByteArray>(24) {}
 
         @Volatile
         private var instance: MusicPlaybackService? = null
@@ -75,12 +97,22 @@ class MusicPlaybackService : MediaSessionService() {
         var onKeepOnlineEngineAwakeCallback: (() -> Unit)? = null
 
         @Volatile
+        var onExternalMediaPauseCallback: (() -> Unit)? = null
+
+        @Volatile
+        var onExternalMediaResumeCallback: (() -> Unit)? = null
+
+        @Volatile
         private var isKeepAliveScheduled: Boolean = false
+
+        @Volatile
+        var isPausedByExternalMedia: Boolean = false
+            private set
 
         private val serviceKeepAliveRunnable = object : Runnable {
             override fun run() {
                 mainHandler.removeCallbacks(this)
-                if (pendingSync?.isPlaying == true) {
+                if (pendingSync?.isPlaying == true && !isPausedByExternalMedia) {
                     isKeepAliveScheduled = true
                     onKeepOnlineEngineAwakeCallback?.invoke()
                     mainHandler.postDelayed(this, 500L)
@@ -94,10 +126,24 @@ class MusicPlaybackService : MediaSessionService() {
 
         fun isCurrentlyPlaying(): Boolean = pendingSync?.isPlaying == true
 
+        fun notifyUnexpectedOnlinePause() {
+            mainHandler.post {
+                instance?.handleUnexpectedOnlinePauseInternal()
+                    ?: onKeepOnlineEngineAwakeCallback?.invoke()
+            }
+        }
+
+        fun clearExternalMediaPauseState() {
+            isPausedByExternalMedia = false
+            mainHandler.post {
+                instance?.cancelExternalMediaResumeWatch()
+            }
+        }
+
         /**
          * Updates the Foreground MediaSessionService directly in-process so there is zero IPC
-         * URI stripping and all Notification Bar & Lock Screen buttons (Previous, Play/Pause, Next, Stop)
-         * work instantaneously on every Android version.
+         * URI stripping and all Notification Bar, Lock Screen, and Quick Settings Media Tile
+         * buttons (Previous, Play/Pause, Next, Stop) work instantaneously on every Android version.
          */
         fun syncNowPlaying(
             context: Context,
@@ -107,6 +153,9 @@ class MusicPlaybackService : MediaSessionService() {
             playbackSpeed: Float = 1.0f,
             startPositionMs: Long = 0L
         ) {
+            if (isPlaying) {
+                isPausedByExternalMedia = false
+            }
             val req = SyncRequest(song, isPlaying, directStreamUri, playbackSpeed, startPositionMs.coerceAtLeast(0L))
             pendingSync = req
             mainHandler.post {
@@ -143,6 +192,8 @@ class MusicPlaybackService : MediaSessionService() {
             pendingSync = pendingSync?.copy(isPlaying = isPlaying)
             mainHandler.post {
                 if (isPlaying) {
+                    isPausedByExternalMedia = false
+                    instance?.cancelExternalMediaResumeWatch()
                     if (!isKeepAliveScheduled) {
                         isKeepAliveScheduled = true
                         mainHandler.removeCallbacks(serviceKeepAliveRunnable)
@@ -183,8 +234,8 @@ class MusicPlaybackService : MediaSessionService() {
 
         /**
          * Generates a 60-second standard 16-bit signed PCM silent WAV file used by MusicPlaybackService
-         * to keep the Foreground MediaSession, WakeLock, WifiLock, Lock Screen, and Notification Bar
-         * media controls active while BackstageYouTubePlayerController streams online audio.
+         * to keep the Foreground MediaSession, WakeLock, WifiLock, Quick Settings Media Tile, Lock Screen,
+         * and Notification Bar media controls active while BackstageYouTubePlayerController streams online audio.
          */
         fun getOrCreateSilentWavUri(context: Context): String {
             val file = File(context.cacheDir, "aadify_keepalive_16bit_60s.wav")
@@ -230,15 +281,60 @@ class MusicPlaybackService : MediaSessionService() {
     private var exoPlayerInstance: ExoPlayer? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
+    private var audioManager: AudioManager? = null
+    private var audioFocusRequest: AudioFocusRequest? = null
+    private var audioPlaybackCallback: AudioManager.AudioPlaybackCallback? = null
     private var isInternalSync: Boolean = false
     private var isDirectAudioMode: Boolean = false
+    private var isCheckingUnexpectedPause: Boolean = false
+    private var zeroExternalMediaConsecutiveChecks: Int = 0
+
+    private val externalMediaResumeWatcherRunnable = object : Runnable {
+        override fun run() {
+            mainHandler.removeCallbacks(this)
+            if (!isPausedByExternalMedia) return
+            if (!hasAnyActiveMediaOrCallOnDevice()) {
+                zeroExternalMediaConsecutiveChecks++
+                if (zeroExternalMediaConsecutiveChecks >= 2) {
+                    triggerAutoResumeFromExternalMedia()
+                    return
+                }
+            } else {
+                zeroExternalMediaConsecutiveChecks = 0
+            }
+            mainHandler.postDelayed(this, 350L)
+        }
+    }
+
+    private val audioFocusChangeListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
+        when (focusChange) {
+            AudioManager.AUDIOFOCUS_LOSS,
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                if (isDirectAudioMode && pendingSync?.isPlaying == true && !isPausedByExternalMedia) {
+                    enterExternalMediaPausedState()
+                }
+            }
+            AudioManager.AUDIOFOCUS_GAIN -> {
+                if (isPausedByExternalMedia) {
+                    mainHandler.postDelayed({
+                        if (isPausedByExternalMedia && !hasAnyActiveMediaOrCallOnDevice()) {
+                            triggerAutoResumeFromExternalMedia()
+                        }
+                    }, 250L)
+                }
+            }
+        }
+    }
 
     @OptIn(UnstableApi::class)
     override fun onCreate() {
         super.onCreate()
         instance = this
+        audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
 
         ensurePublicLockscreenNotificationChannel()
+        registerSystemAudioPlaybackMonitor()
 
         try {
             val notifProvider = DefaultMediaNotificationProvider.Builder(this)
@@ -295,7 +391,7 @@ class MusicPlaybackService : MediaSessionService() {
         val dataSourceFactory = DefaultDataSource.Factory(this, resolvingHttpFactory)
         val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory)
 
-        // Pass handleAudioFocus = false so ExoPlayer never steals audio focus from BackstageAudioWebView!
+        // Pass handleAudioFocus = false on ExoPlayer so ExoPlayer never steals audio focus from BackstageAudioWebView!
         val exoPlayer = ExoPlayer.Builder(this)
             .setMediaSourceFactory(mediaSourceFactory)
             .setAudioAttributes(audioAttributes, false)
@@ -360,7 +456,7 @@ class MusicPlaybackService : MediaSessionService() {
         })
 
         // Wrap ExoPlayer in a ForwardingPlayer that ALWAYS enables Next, Previous, Play/Pause, and Stop
-        // in the Android System Notification Bar and Lock Screen (password screen) controls!
+        // in the Android System Quick Settings Media Tile, Notification Bar, and Lock Screen controls!
         val forwardingPlayer = object : ForwardingPlayer(exoPlayer) {
             private fun buildAllCommands(base: Player.Commands): Player.Commands {
                 return base.buildUpon()
@@ -455,6 +551,8 @@ class MusicPlaybackService : MediaSessionService() {
             override fun play() {
                 super.play()
                 if (!isInternalSync) {
+                    isPausedByExternalMedia = false
+                    cancelExternalMediaResumeWatch()
                     onTogglePlayPauseCallback?.invoke(true)
                 }
             }
@@ -462,6 +560,8 @@ class MusicPlaybackService : MediaSessionService() {
             override fun pause() {
                 super.pause()
                 if (!isInternalSync) {
+                    isPausedByExternalMedia = false
+                    cancelExternalMediaResumeWatch()
                     onTogglePlayPauseCallback?.invoke(false)
                 }
             }
@@ -469,6 +569,10 @@ class MusicPlaybackService : MediaSessionService() {
             override fun setPlayWhenReady(playWhenReady: Boolean) {
                 super.setPlayWhenReady(playWhenReady)
                 if (!isInternalSync) {
+                    if (playWhenReady) {
+                        isPausedByExternalMedia = false
+                        cancelExternalMediaResumeWatch()
+                    }
                     onTogglePlayPauseCallback?.invoke(playWhenReady)
                 }
             }
@@ -476,6 +580,8 @@ class MusicPlaybackService : MediaSessionService() {
             override fun stop() {
                 super.pause()
                 if (!isInternalSync) {
+                    isPausedByExternalMedia = false
+                    cancelExternalMediaResumeWatch()
                     onTogglePlayPauseCallback?.invoke(false)
                 }
             }
@@ -536,6 +642,223 @@ class MusicPlaybackService : MediaSessionService() {
         }
     }
 
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        super.onStartCommand(intent, flags, startId)
+        return START_STICKY
+    }
+
+    private fun registerSystemAudioPlaybackMonitor() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            try {
+                val cb = object : AudioManager.AudioPlaybackCallback() {
+                    override fun onPlaybackConfigChanged(configs: MutableList<AudioPlaybackConfiguration>?) {
+                        super.onPlaybackConfigChanged(configs)
+                        if (isPausedByExternalMedia) {
+                            if (!hasAnyActiveMediaOrCallOnDevice(configs)) {
+                                mainHandler.postDelayed({
+                                    if (isPausedByExternalMedia && !hasAnyActiveMediaOrCallOnDevice()) {
+                                        triggerAutoResumeFromExternalMedia()
+                                    }
+                                }, 350L)
+                            } else {
+                                zeroExternalMediaConsecutiveChecks = 0
+                            }
+                        } else if (!isDirectAudioMode && pendingSync?.isPlaying == true && !isCheckingUnexpectedPause) {
+                            // If an external video starts playing WITHOUT requesting AudioFocus (so > 2 media streams exist),
+                            // pause our song cleanly and wait for the external video to finish!
+                            val activeMediaCount = countActiveMediaConfigs(configs)
+                            if (activeMediaCount >= 3) {
+                                enterExternalMediaPausedState()
+                            }
+                        }
+                    }
+                }
+                audioPlaybackCallback = cb
+                audioManager?.registerAudioPlaybackCallback(cb, mainHandler)
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun countActiveMediaConfigs(configs: List<AudioPlaybackConfiguration>? = null): Int {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return 0
+        return try {
+            val list = configs ?: audioManager?.activePlaybackConfigurations.orEmpty()
+            list.count { cfg ->
+                val usage = cfg.audioAttributes?.usage ?: android.media.AudioAttributes.USAGE_UNKNOWN
+                usage == android.media.AudioAttributes.USAGE_MEDIA ||
+                    usage == android.media.AudioAttributes.USAGE_UNKNOWN ||
+                    usage == android.media.AudioAttributes.USAGE_GAME
+            }
+        } catch (_: Exception) {
+            0
+        }
+    }
+
+    private fun hasAnyActiveMediaOrCallOnDevice(configs: List<AudioPlaybackConfiguration>? = null): Boolean {
+        val am = audioManager ?: return false
+        val mode = try {
+            am.mode
+        } catch (_: Exception) {
+            AudioManager.MODE_NORMAL
+        }
+        if (mode == AudioManager.MODE_IN_CALL ||
+            mode == AudioManager.MODE_IN_COMMUNICATION ||
+            mode == AudioManager.MODE_RINGTONE
+        ) {
+            return true
+        }
+        return countActiveMediaConfigs(configs) > 0
+    }
+
+    /**
+     * Invoked when BackstageYouTubePlayerController's <video> element pauses unexpectedly.
+     * Distinguishes between:
+     * 1) An external video/audio starting in another app (YouTube, Instagram, WhatsApp, Gallery, Call)
+     *    -> Pauses AADIFY cleanly and automatically resumes the song as soon as the external video closes!
+     * 2) A harmless background / keyboard / scroll hiccup with NO external video playing
+     *    -> Immediately wakes and resumes playback so background music never stops!
+     */
+    private fun handleUnexpectedOnlinePauseInternal() {
+        if (isPausedByExternalMedia || pendingSync?.isPlaying != true) return
+        if (isCheckingUnexpectedPause) return
+        isCheckingUnexpectedPause = true
+
+        // Temporarily pause our silent keepalive ExoPlayer so our app contributes 0 active AudioTracks
+        val player = exoPlayerInstance
+        isInternalSync = true
+        try {
+            player?.pause()
+        } catch (_: Exception) {
+        } finally {
+            isInternalSync = false
+        }
+
+        mainHandler.postDelayed({
+            isCheckingUnexpectedPause = false
+            if (pendingSync == null) return@postDelayed
+
+            if (hasAnyActiveMediaOrCallOnDevice()) {
+                // Confirmed: Another app is actively playing a video/audio (or a call is active)!
+                enterExternalMediaPausedState()
+            } else {
+                // No external video is playing! Immediately resume ExoPlayer keepalive and online engine!
+                if (pendingSync?.isPlaying == true && !isPausedByExternalMedia) {
+                    isInternalSync = true
+                    try {
+                        player?.play()
+                    } catch (_: Exception) {
+                    } finally {
+                        isInternalSync = false
+                    }
+                    onKeepOnlineEngineAwakeCallback?.invoke()
+                    val recoveryDelays = longArrayOf(120L, 350L, 800L)
+                    for (d in recoveryDelays) {
+                        mainHandler.postDelayed({
+                            if (pendingSync?.isPlaying == true && !isPausedByExternalMedia) {
+                                onKeepOnlineEngineAwakeCallback?.invoke()
+                            }
+                        }, d)
+                    }
+                }
+            }
+        }, 140L)
+    }
+
+    private fun enterExternalMediaPausedState() {
+        if (isPausedByExternalMedia) return
+        isPausedByExternalMedia = true
+        zeroExternalMediaConsecutiveChecks = 0
+        pendingSync = pendingSync?.copy(isPlaying = false)
+
+        mainHandler.removeCallbacks(serviceKeepAliveRunnable)
+        isKeepAliveScheduled = false
+
+        val player = exoPlayerInstance
+        isInternalSync = true
+        try {
+            player?.pause()
+            mediaSession?.let { session ->
+                onUpdateNotification(session, false)
+            }
+        } catch (_: Exception) {
+        } finally {
+            isInternalSync = false
+        }
+
+        // Notify ViewModel & BackstagePlayer to pause cleanly at current timestamp
+        onExternalMediaPauseCallback?.invoke()
+
+        // Request delayed audio focus so Android notifies us if focus returns, and start watcher
+        requestAudioFocusForExternalWait()
+        mainHandler.removeCallbacks(externalMediaResumeWatcherRunnable)
+        mainHandler.postDelayed(externalMediaResumeWatcherRunnable, 400L)
+    }
+
+    private fun triggerAutoResumeFromExternalMedia() {
+        if (!isPausedByExternalMedia) return
+        isPausedByExternalMedia = false
+        zeroExternalMediaConsecutiveChecks = 0
+        mainHandler.removeCallbacks(externalMediaResumeWatcherRunnable)
+
+        pendingSync = pendingSync?.copy(isPlaying = true)
+        applyPlayStateInternal(shouldPlay = true, forceNotificationUpdate = true)
+
+        if (!isKeepAliveScheduled) {
+            isKeepAliveScheduled = true
+            mainHandler.removeCallbacks(serviceKeepAliveRunnable)
+            mainHandler.postDelayed(serviceKeepAliveRunnable, 500L)
+        }
+
+        onExternalMediaResumeCallback?.invoke()
+    }
+
+    private fun cancelExternalMediaResumeWatch() {
+        zeroExternalMediaConsecutiveChecks = 0
+        mainHandler.removeCallbacks(externalMediaResumeWatcherRunnable)
+    }
+
+    private fun requestAudioFocusForExternalWait() {
+        val am = audioManager ?: return
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val req = audioFocusRequest ?: AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                    .setAudioAttributes(
+                        android.media.AudioAttributes.Builder()
+                            .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                            .setContentType(android.media.AudioAttributes.CONTENT_TYPE_MUSIC)
+                            .build()
+                    )
+                    .setAcceptsDelayedFocusGain(true)
+                    .setWillPauseWhenDucked(true)
+                    .setOnAudioFocusChangeListener(audioFocusChangeListener, mainHandler)
+                    .build().also { audioFocusRequest = it }
+                am.requestAudioFocus(req)
+            } else {
+                @Suppress("DEPRECATION")
+                am.requestAudioFocus(
+                    audioFocusChangeListener,
+                    AudioManager.STREAM_MUSIC,
+                    AudioManager.AUDIOFOCUS_GAIN
+                )
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun abandonAudioFocusIfHeld() {
+        val am = audioManager ?: return
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                audioFocusRequest?.let { am.abandonAudioFocusRequest(it) }
+            } else {
+                @Suppress("DEPRECATION")
+                am.abandonAudioFocus(audioFocusChangeListener)
+            }
+        } catch (_: Exception) {
+        }
+    }
+
     private fun ensurePublicLockscreenNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             try {
@@ -545,7 +868,7 @@ class MusicPlaybackService : MediaSessionService() {
                     "AADIFY Music Playback",
                     NotificationManager.IMPORTANCE_LOW
                 ).apply {
-                    description = "Shows Lock Screen and Notification Bar playback controls"
+                    description = "Shows Quick Settings, Lock Screen, and Notification Bar playback controls"
                     lockscreenVisibility = Notification.VISIBILITY_PUBLIC
                     setShowBadge(false)
                 }
@@ -553,6 +876,29 @@ class MusicPlaybackService : MediaSessionService() {
             } catch (_: Exception) {
             }
         }
+    }
+
+    private fun buildMediaMetadataForSong(song: Song, artworkBytes: ByteArray?): MediaMetadata {
+        val artworkUri = if (song.highResBannerUrl.isNotBlank()) {
+            Uri.parse(song.highResBannerUrl)
+        } else {
+            null
+        }
+        val metadataBuilder = MediaMetadata.Builder()
+            .setTitle(song.title)
+            .setArtist(song.artist)
+            .setAlbumTitle("AADIFY Music")
+            .setDisplayTitle(song.title)
+            .setSubtitle(song.artist)
+            .setIsBrowsable(false)
+            .setIsPlayable(true)
+        if (artworkUri != null) {
+            metadataBuilder.setArtworkUri(artworkUri)
+        }
+        if (artworkBytes != null && artworkBytes.isNotEmpty()) {
+            metadataBuilder.setArtworkData(artworkBytes, MediaMetadata.PICTURE_TYPE_FRONT_COVER)
+        }
+        return metadataBuilder.build()
     }
 
     private fun applySyncRequest(req: SyncRequest) {
@@ -564,24 +910,16 @@ class MusicPlaybackService : MediaSessionService() {
             val activeUri = req.directStreamUri?.takeIf { it.isNotBlank() } ?: silentUri
             isDirectAudioMode = !req.directStreamUri.isNullOrBlank()
 
-            val artworkUri = if (song.highResBannerUrl.isNotBlank()) {
-                Uri.parse(song.highResBannerUrl)
-            } else {
-                null
+            if (isDirectAudioMode && req.isPlaying) {
+                requestAudioFocusForExternalWait()
+            } else if (!isDirectAudioMode && !isPausedByExternalMedia) {
+                // Let BackstageAudioWebView own the primary audio focus when streaming online so ExoPlayer never steals it
+                abandonAudioFocusIfHeld()
             }
 
-            val metadataBuilder = MediaMetadata.Builder()
-                .setTitle(song.title)
-                .setArtist(song.artist)
-                .setAlbumTitle("AADIFY Music")
-                .setDisplayTitle(song.title)
-                .setSubtitle(song.artist)
-                .setIsBrowsable(false)
-                .setIsPlayable(true)
-            if (artworkUri != null) {
-                metadataBuilder.setArtworkUri(artworkUri)
-            }
-            val metadata = metadataBuilder.build()
+            val bannerUrl = song.highResBannerUrl
+            val cachedArt = if (bannerUrl.isNotBlank()) artworkBytesCache.get(bannerUrl) else null
+            val metadata = buildMediaMetadataForSong(song, cachedArt)
 
             // Build a 3-item queue [prevSentinel, activeItem, nextSentinel] starting at index 1
             // so ExoPlayer natively reports hasPreviousMediaItem() = true and hasNextMediaItem() = true!
@@ -603,7 +941,9 @@ class MusicPlaybackService : MediaSessionService() {
                 .setMediaMetadata(metadata)
                 .build()
 
-            player.volume = if (isDirectAudioMode) 1.0f else 0.0f
+            // Always keep volume = 1.0f (silentUri is already 16-bit PCM digital 0x0000 silence!)
+            // so Android's Quick Settings Media Tile ("Music Palette") never treats the session as muted/inactive!
+            player.volume = 1.0f
             player.repeatMode = if (isDirectAudioMode) Player.REPEAT_MODE_OFF else Player.REPEAT_MODE_ONE
             player.playbackParameters = PlaybackParameters(req.playbackSpeed)
             val startPos = if (isDirectAudioMode) req.startPositionMs.coerceAtLeast(0L) else 0L
@@ -625,9 +965,83 @@ class MusicPlaybackService : MediaSessionService() {
                 } catch (_: Exception) {
                 }
             }
+
+            // If artwork bytes are not cached yet, download asynchronously and update MediaMetadata
+            // so the Quick Settings Media Tile and Lock Screen display the album cover crisp & fast!
+            if (cachedArt == null && bannerUrl.startsWith("http", ignoreCase = true)) {
+                fetchAndAttachArtworkAsync(song, bannerUrl, activeUri, silentUri)
+            }
         } catch (_: Exception) {
         } finally {
             isInternalSync = false
+        }
+    }
+
+    private fun fetchAndAttachArtworkAsync(
+        song: Song,
+        bannerUrl: String,
+        activeUri: String,
+        silentUri: String
+    ) {
+        ioScope.launch {
+            val bytes = downloadCompressedArtworkBytes(bannerUrl) ?: return@launch
+            artworkBytesCache.put(bannerUrl, bytes)
+            mainHandler.post {
+                val currentSynced = pendingSync?.song ?: return@post
+                if (currentSynced.id != song.id) return@post
+                val player = exoPlayerInstance ?: return@post
+                isInternalSync = true
+                try {
+                    val enrichedMetadata = buildMediaMetadataForSong(song, bytes)
+                    val updatedItem = MediaItem.Builder()
+                        .setMediaId(song.id)
+                        .setUri(activeUri.ifBlank { silentUri })
+                        .setMediaMetadata(enrichedMetadata)
+                        .build()
+                    if (player.mediaItemCount >= 3) {
+                        player.replaceMediaItem(1, updatedItem)
+                    }
+                    mediaSession?.let { session ->
+                        onUpdateNotification(session, pendingSync?.isPlaying == true)
+                    }
+                } catch (_: Exception) {
+                } finally {
+                    isInternalSync = false
+                }
+            }
+        }
+    }
+
+    private fun downloadCompressedArtworkBytes(url: String): ByteArray? {
+        return try {
+            val req = Request.Builder()
+                .url(url)
+                .header("User-Agent", AudioStreamExtractor.EXOPLAYER_USER_AGENT)
+                .get()
+                .build()
+            artworkHttpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return null
+                val rawBytes = resp.body?.bytes() ?: return null
+                if (rawBytes.isEmpty()) return null
+                val bmp = BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size) ?: return null
+                val maxDim = 512
+                val scaled = if (bmp.width > maxDim || bmp.height > maxDim) {
+                    val ratio = minOf(maxDim.toFloat() / bmp.width, maxDim.toFloat() / bmp.height)
+                    Bitmap.createScaledBitmap(
+                        bmp,
+                        (bmp.width * ratio).toInt().coerceAtLeast(1),
+                        (bmp.height * ratio).toInt().coerceAtLeast(1),
+                        true
+                    )
+                } else {
+                    bmp
+                }
+                val out = ByteArrayOutputStream()
+                scaled.compress(Bitmap.CompressFormat.JPEG, 86, out)
+                out.toByteArray()
+            }
+        } catch (_: Exception) {
+            null
         }
     }
 
@@ -636,7 +1050,11 @@ class MusicPlaybackService : MediaSessionService() {
         val wasPlayWhenReady = player.playWhenReady
         isInternalSync = true
         try {
+            player.volume = 1.0f
             if (shouldPlay) {
+                if (isDirectAudioMode) {
+                    requestAudioFocusForExternalWait()
+                }
                 if (player.mediaItemCount == 0 && pendingSync != null) {
                     applySyncRequest(pendingSync!!)
                 } else {
@@ -699,7 +1117,7 @@ class MusicPlaybackService : MediaSessionService() {
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         val player = mediaSession?.player
-        if (player == null || !player.playWhenReady || player.mediaItemCount == 0) {
+        if (player == null || (!player.playWhenReady && !isPausedByExternalMedia) || player.mediaItemCount == 0) {
             stopSelf()
         }
     }
@@ -708,6 +1126,14 @@ class MusicPlaybackService : MediaSessionService() {
         if (instance === this) {
             instance = null
         }
+        mainHandler.removeCallbacks(externalMediaResumeWatcherRunnable)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            try {
+                audioPlaybackCallback?.let { audioManager?.unregisterAudioPlaybackCallback(it) }
+            } catch (_: Exception) {
+            }
+        }
+        abandonAudioFocusIfHeld()
         try {
             if (wakeLock?.isHeld == true) wakeLock?.release()
             if (wifiLock?.isHeld == true) wifiLock?.release()

@@ -90,7 +90,8 @@ class FirebaseSongsService(private val context: Context) {
     private var notificationsRef: DatabaseReference? = null
     private var messagesRef: DatabaseReference? = null
     private var valueListener: ValueEventListener? = null
-    private val appStartTimestampMs: Long = System.currentTimeMillis()
+    private val installBaselineTimestampMs: Long =
+        AdminNotificationHelper.getOrInitInstallBaselineMs(context)
 
     init {
         loadSavedRankHistory()
@@ -769,6 +770,9 @@ class FirebaseSongsService(private val context: Context) {
     private fun handleNotificationSnapshot(snapshot: DataSnapshot) {
         if (!snapshot.exists()) return
         try {
+            val nodeName = "rtdb_${snapshot.key ?: "notifications"}"
+            val isFirstSeed = !AdminNotificationHelper.isNodeBaselineSeeded(context, nodeName)
+
             // Check if the snapshot itself is a direct notification object
             val directTitle = snapshot.child("title").getValue(String::class.java)
                 ?: snapshot.child("heading").getValue(String::class.java)
@@ -782,15 +786,40 @@ class FirebaseSongsService(private val context: Context) {
                 ?: snapshot.child("content").getValue(String::class.java)
             if (!directTitle.isNullOrBlank() || !directBody.isNullOrBlank()) {
                 val directImg = AdminNotificationHelper.extractImageUrlFromSnapshot(snapshot)
-                val ts = snapshot.child("timestamp").value?.toString().orEmpty()
+                val rawTsObj = snapshot.child("timestamp").value
+                    ?: snapshot.child("createdAt").value
+                    ?: snapshot.child("time").value
+                val rawTs = when (rawTsObj) {
+                    is Number -> rawTsObj.toLong()
+                    is String -> rawTsObj.toLongOrNull() ?: 0L
+                    else -> 0L
+                }
+                val ts = normalizeEpochMillis(rawTs)
                 val key = "rtdb_direct_${directTitle.orEmpty()}_${directBody.orEmpty()}_$ts"
-                AdminNotificationHelper.showAdminNotificationAsync(
-                    context = context,
-                    uniqueKey = key,
-                    title = directTitle ?: "AADIFY",
-                    body = directBody ?: "",
-                    imageUrl = directImg
-                )
+                val isOldNotification = if (ts > 0L) {
+                    ts < (installBaselineTimestampMs - 15_000L)
+                } else {
+                    isFirstSeed
+                }
+                if (isOldNotification) {
+                    AdminNotificationHelper.markNotificationSilentlySeen(
+                        context = context,
+                        uniqueKey = key,
+                        title = directTitle ?: "AADIFY",
+                        body = directBody ?: ""
+                    )
+                } else {
+                    AdminNotificationHelper.showAdminNotificationAsync(
+                        context = context,
+                        uniqueKey = key,
+                        title = directTitle ?: "AADIFY",
+                        body = directBody ?: "",
+                        imageUrl = directImg
+                    )
+                }
+                if (isFirstSeed) {
+                    AdminNotificationHelper.markNodeBaselineSeeded(context, nodeName)
+                }
                 return
             }
 
@@ -810,8 +839,9 @@ class FirebaseSongsService(private val context: Context) {
                     ?: child.child("content").getValue(String::class.java)
                     ?: child.child("subtitle").getValue(String::class.java)
                     ?: ""
-                val imageUrl = AdminNotificationHelper.extractImageUrlFromSnapshot(child)
+                if (title.isBlank() && body.isBlank()) continue
 
+                val imageUrl = AdminNotificationHelper.extractImageUrlFromSnapshot(child)
                 val tsObj = child.child("timestamp").value
                     ?: child.child("createdAt").value
                     ?: child.child("time").value
@@ -821,11 +851,25 @@ class FirebaseSongsService(private val context: Context) {
                     else -> 0L
                 }
                 val timestamp = normalizeEpochMillis(rawTimestamp)
+                val uniqueKey = "rtdb_${key}_${timestamp}_${title}"
 
-                // Show if not yet shown on this device (or if upgrading with an image!) and within last 7 days
-                val isRecentEnough = timestamp == 0L || timestamp >= (appStartTimestampMs - 7 * 24 * 60 * 60 * 1000L)
-                if ((title.isNotBlank() || body.isNotBlank()) && isRecentEnough) {
-                    val uniqueKey = "rtdb_${key}_${timestamp}_${title}"
+                // Strict "No Old Notifications" rule:
+                // 1. Any notification with a timestamp before installBaselineTimestampMs is old -> mark seen silently.
+                // 2. Any notification without a timestamp present during the initial first seed is old -> mark seen silently.
+                val isOldNotification = if (timestamp > 0L) {
+                    timestamp < (installBaselineTimestampMs - 15_000L)
+                } else {
+                    isFirstSeed
+                }
+
+                if (isOldNotification) {
+                    AdminNotificationHelper.markNotificationSilentlySeen(
+                        context = context,
+                        uniqueKey = uniqueKey,
+                        title = title.ifBlank { "AADIFY" },
+                        body = body
+                    )
+                } else {
                     AdminNotificationHelper.showAdminNotificationAsync(
                         context = context,
                         uniqueKey = uniqueKey,
@@ -834,6 +878,9 @@ class FirebaseSongsService(private val context: Context) {
                         imageUrl = imageUrl
                     )
                 }
+            }
+            if (isFirstSeed) {
+                AdminNotificationHelper.markNodeBaselineSeeded(context, nodeName)
             }
         } catch (e: Exception) {
             Log.w(TAG, "Error parsing notification snapshot", e)
@@ -844,6 +891,9 @@ class FirebaseSongsService(private val context: Context) {
         val endpoints = listOf("notifications", "messages", "notification", "broadcast")
         for (node in endpoints) {
             try {
+                val nodeName = "rtdb_$node"
+                val isFirstSeed = !AdminNotificationHelper.isNodeBaselineSeeded(context, nodeName)
+
                 val request = Request.Builder()
                     .url("$DATABASE_URL/$node.json")
                     .get()
@@ -851,7 +901,12 @@ class FirebaseSongsService(private val context: Context) {
                 httpClient.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) return@use
                     val bodyStr = response.body?.string()?.trim().orEmpty()
-                    if (bodyStr.isEmpty() || bodyStr == "null" || !bodyStr.startsWith("{")) return@use
+                    if (bodyStr.isEmpty() || bodyStr == "null" || !bodyStr.startsWith("{")) {
+                        if (isFirstSeed) {
+                            AdminNotificationHelper.markNodeBaselineSeeded(context, nodeName)
+                        }
+                        return@use
+                    }
                     val root = JSONObject(bodyStr)
 
                     val directTitle = root.optString("title").ifBlank {
@@ -866,15 +921,34 @@ class FirebaseSongsService(private val context: Context) {
                     }
                     if (directTitle.isNotBlank() || directBody.isNotBlank()) {
                         val directImg = AdminNotificationHelper.extractImageUrlFromJson(root)
-                        val ts = normalizeEpochMillis(root.optLong("timestamp", 0L))
-                        val key = "rest_direct_${node}_${directTitle}_${directBody}_$ts"
-                        AdminNotificationHelper.showAdminNotificationBlocking(
-                            context = context,
-                            uniqueKey = key,
-                            title = directTitle.ifBlank { "AADIFY" },
-                            body = directBody,
-                            imageUrl = directImg
+                        val ts = normalizeEpochMillis(
+                            root.optLong("timestamp", root.optLong("createdAt", root.optLong("time", 0L)))
                         )
+                        val key = "rest_direct_${node}_${directTitle}_${directBody}_$ts"
+                        val isOldNotification = if (ts > 0L) {
+                            ts < (installBaselineTimestampMs - 15_000L)
+                        } else {
+                            isFirstSeed
+                        }
+                        if (isOldNotification) {
+                            AdminNotificationHelper.markNotificationSilentlySeen(
+                                context = context,
+                                uniqueKey = key,
+                                title = directTitle.ifBlank { "AADIFY" },
+                                body = directBody
+                            )
+                        } else {
+                            AdminNotificationHelper.showAdminNotificationBlocking(
+                                context = context,
+                                uniqueKey = key,
+                                title = directTitle.ifBlank { "AADIFY" },
+                                body = directBody,
+                                imageUrl = directImg
+                            )
+                        }
+                        if (isFirstSeed) {
+                            AdminNotificationHelper.markNodeBaselineSeeded(context, nodeName)
+                        }
                         return@use
                     }
 
@@ -898,12 +972,27 @@ class FirebaseSongsService(private val context: Context) {
                                 }
                             }
                         }
+                        if (title.isBlank() && body.isBlank()) continue
+
                         val imageUrl = AdminNotificationHelper.extractImageUrlFromJson(obj)
                         val rawTimestamp = obj.optLong("timestamp", obj.optLong("createdAt", obj.optLong("time", 0L)))
                         val timestamp = normalizeEpochMillis(rawTimestamp)
-                        val isRecentEnough = timestamp == 0L || timestamp >= (appStartTimestampMs - 7 * 24 * 60 * 60 * 1000L)
-                        if ((title.isNotBlank() || body.isNotBlank()) && isRecentEnough) {
-                            val uniqueKey = "rtdb_${k}_${timestamp}_${title}"
+                        val uniqueKey = "rtdb_${k}_${timestamp}_${title}"
+
+                        val isOldNotification = if (timestamp > 0L) {
+                            timestamp < (installBaselineTimestampMs - 15_000L)
+                        } else {
+                            isFirstSeed
+                        }
+
+                        if (isOldNotification) {
+                            AdminNotificationHelper.markNotificationSilentlySeen(
+                                context = context,
+                                uniqueKey = uniqueKey,
+                                title = title.ifBlank { "AADIFY" },
+                                body = body
+                            )
+                        } else {
                             AdminNotificationHelper.showAdminNotificationBlocking(
                                 context = context,
                                 uniqueKey = uniqueKey,
@@ -912,6 +1001,9 @@ class FirebaseSongsService(private val context: Context) {
                                 imageUrl = imageUrl
                             )
                         }
+                    }
+                    if (isFirstSeed) {
+                        AdminNotificationHelper.markNodeBaselineSeeded(context, nodeName)
                     }
                 }
             } catch (_: Exception) {

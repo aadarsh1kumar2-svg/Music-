@@ -314,6 +314,42 @@ object AdminNotificationHelper {
         return s
     }
 
+    fun getOrInitInstallBaselineMs(context: Context): Long {
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val existing = prefs.getLong("install_baseline_ms", 0L)
+        if (existing > 0L) {
+            return existing
+        }
+        val now = System.currentTimeMillis()
+        prefs.edit().putLong("install_baseline_ms", now).apply()
+        return now
+    }
+
+    fun isNodeBaselineSeeded(context: Context, nodeName: String): Boolean {
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getBoolean("baseline_seeded_$nodeName", false)
+    }
+
+    fun markNodeBaselineSeeded(context: Context, nodeName: String) {
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().putBoolean("baseline_seeded_$nodeName", true).apply()
+    }
+
+    fun markNotificationSilentlySeen(
+        context: Context,
+        uniqueKey: String,
+        title: String,
+        body: String
+    ) {
+        val cleanTitle = title.trim().ifBlank { "AADIFY" }
+        val cleanBody = body.trim()
+        val contentDedupeKey = "${cleanTitle.lowercase()}|${cleanBody.lowercase()}"
+        if (uniqueKey.isNotBlank()) {
+            markNotificationShown(context, uniqueKey, withImage = true)
+        }
+        markNotificationShown(context, contentDedupeKey, withImage = true)
+    }
+
     private fun isNotificationAlreadyShown(
         context: Context,
         dedupeKey: String,
@@ -343,13 +379,13 @@ object AdminNotificationHelper {
         val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val current = (prefs.getStringSet("seen_keys", emptySet()) ?: emptySet()).toMutableSet()
         current.add(dedupeKey)
-        val trimmed = if (current.size > 300) current.toList().takeLast(250).toSet() else current
+        val trimmed = if (current.size > 500) current.toList().takeLast(400).toSet() else current
 
         val editor = prefs.edit().putStringSet("seen_keys", trimmed)
         if (withImage) {
             val currentImg = (prefs.getStringSet("seen_with_image_keys", emptySet()) ?: emptySet()).toMutableSet()
             currentImg.add(dedupeKey)
-            val trimmedImg = if (currentImg.size > 300) currentImg.toList().takeLast(250).toSet() else currentImg
+            val trimmedImg = if (currentImg.size > 500) currentImg.toList().takeLast(400).toSet() else currentImg
             editor.putStringSet("seen_with_image_keys", trimmedImg)
         }
         editor.apply()

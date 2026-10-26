@@ -314,7 +314,13 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                         hasRetriedCurrentTrack = true
                         val altVideoId = audioExtractor.findPlayableVideoIdForSong(active)
                         if (!altVideoId.isNullOrBlank() && altVideoId != active.cleanVideoId) {
-                            backstagePlayer.loadVideoById(altVideoId)
+                            backstagePlayer.loadVideoById(
+                                rawVideoId = altVideoId,
+                                startSeconds = 0.0,
+                                songTitle = active.title,
+                                songArtist = active.artist,
+                                artworkUrl = active.highResBannerUrl
+                            )
                             return@launch
                         }
                     }
@@ -331,6 +337,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 "next" -> skipToNext()
                 "prev" -> skipToPrevious()
             }
+        },
+        onUnexpectedPauseDetected = {
+            MusicPlaybackService.notifyUnexpectedOnlinePause()
         }
     )
 
@@ -560,6 +569,32 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         MusicPlaybackService.onKeepOnlineEngineAwakeCallback = {
             if (_currentSong.value != null && _isPlaying.value && !isUsingExoPlayerFallback && !hasHandledEndForCurrentSong) {
                 backstagePlayer.keepAwake()
+            }
+        }
+        MusicPlaybackService.onExternalMediaPauseCallback = {
+            viewModelScope.launch {
+                prefs.edit().putLong("last_position_ms", _currentPositionMs.value).apply()
+                if (!isUsingExoPlayerFallback) {
+                    backstagePlayer.pauseForExternalAudio()
+                }
+                _isBuffering.value = false
+                _isPlaying.value = false
+            }
+        }
+        MusicPlaybackService.onExternalMediaResumeCallback = {
+            viewModelScope.launch {
+                val active = _currentSong.value ?: return@launch
+                if (hasHandledEndForCurrentSong) return@launch
+                if (isUsingExoPlayerFallback) {
+                    _isBuffering.value = false
+                    _isPlaying.value = true
+                    MusicPlaybackService.syncPlayState(true)
+                } else if (!backstagePlayer.isUserPaused) {
+                    backstagePlayer.resumeAfterExternalAudio()
+                    _isBuffering.value = false
+                    _isPlaying.value = true
+                    MusicPlaybackService.syncPlayState(true)
+                }
             }
         }
 
@@ -953,10 +988,16 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
             // 4. Primary Engine for ALL Admin & Online Songs:
             // Play immediately via BackstageYouTubePlayerController AND sync the Foreground
-            // MediaSessionService Notification Bar + Lock Screen + WakeLock!
+            // MediaSessionService Notification Bar + Lock Screen + Quick Settings Media Tile + WakeLock!
             isUsingExoPlayerFallback = false
             _activeStreamEngine.value = "Backstage YouTube Engine"
-            backstagePlayer.loadVideoById(playableVideoId, startSeconds = resolvedStartMs / 1000.0)
+            backstagePlayer.loadVideoById(
+                rawVideoId = playableVideoId,
+                startSeconds = resolvedStartMs / 1000.0,
+                songTitle = song.title,
+                songArtist = song.artist,
+                artworkUrl = song.highResBannerUrl
+            )
             MusicPlaybackService.syncNowPlaying(
                 context = appContext,
                 song = song,
@@ -983,6 +1024,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     fun togglePlayPause() {
         val activeSong = _currentSong.value ?: return
+        MusicPlaybackService.clearExternalMediaPauseState()
         if (!isCurrentSongLoadedInEngine) {
             playSong(activeSong, _queue.value, startPositionMs = getValidResumePositionMs())
             return
