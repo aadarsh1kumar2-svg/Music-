@@ -249,6 +249,13 @@ fun AKMusicAppRoot(
         )
     }
 
+    // If Admin deletes the user from the Admin Panel while the app is open, immediately return to Name Login screen
+    LaunchedEffect(userName) {
+        if (userName.isBlank() && launchStage != LaunchStage.ENTER_NAME) {
+            launchStage = LaunchStage.ENTER_NAME
+        }
+    }
+
     LaunchedEffect(launchStage) {
         if (launchStage == LaunchStage.LOADING) {
             delay(1800L)

@@ -86,12 +86,26 @@ class FirebaseSongsService(private val context: Context) {
     private val _connectionError = MutableStateFlow<String?>(null)
     val connectionError: StateFlow<String?> = _connectionError.asStateFlow()
 
+    private var firebaseDatabase: FirebaseDatabase? = null
     private var songsRef: DatabaseReference? = null
     private var notificationsRef: DatabaseReference? = null
     private var messagesRef: DatabaseReference? = null
     private var valueListener: ValueEventListener? = null
     private val installBaselineTimestampMs: Long =
         AdminNotificationHelper.getOrInitInstallBaselineMs(context)
+
+    // User Identity & Admin User Panel Sync State
+    var onUserDeletedByAdminCallback: (() -> Unit)? = null
+    @Volatile
+    private var currentWatchedUserId: String? = null
+    private var currentUserNodeRef: DatabaseReference? = null
+    private var currentUserValueListener: ValueEventListener? = null
+    @Volatile
+    private var hasConfirmedCloudUserUpload: Boolean = false
+    @Volatile
+    private var isCurrentUserDeletedByAdmin: Boolean = false
+    @Volatile
+    private var lastUserUploadTimestampMs: Long = 0L
 
     init {
         loadSavedRankHistory()
@@ -161,6 +175,7 @@ class FirebaseSongsService(private val context: Context) {
             AADIFYMessagingService.initializeAndSubscribe(context)
 
             val database = FirebaseDatabase.getInstance(app, DATABASE_URL)
+            firebaseDatabase = database
             try {
                 database.setPersistenceEnabled(true)
             } catch (_: Exception) {
@@ -208,9 +223,10 @@ class FirebaseSongsService(private val context: Context) {
             fetchSongsViaRest()
             fetchNotificationsViaRest()
             while (true) {
-                delay(8_000L)
+                delay(6_000L)
                 fetchSongsViaRest(silent = true)
                 fetchNotificationsViaRest()
+                checkCurrentUserStatusInCloud()
             }
         }
     }
@@ -1084,5 +1100,211 @@ class FirebaseSongsService(private val context: Context) {
             Log.e(TAG, "Failed to send cloud notification", e)
             Result.failure(e)
         }
+    }
+
+    /**
+     * Resets the deletion lock when a user explicitly submits their Name on the login screen.
+     */
+    fun resetAdminDeletionFlagForFreshLogin() {
+        isCurrentUserDeletedByAdmin = false
+        hasConfirmedCloudUserUpload = false
+    }
+
+    /**
+     * Syncs the logged-in user's identity (Name) and full activity/library data to Firebase
+     * Realtime Database (/users/{userId} and /akMusic/users/{userId}) so the Admin Panel's
+     * User Panel displays every user and their complete data in real time.
+     */
+    fun syncUserProfileToCloud(
+        userId: String,
+        userPayload: JSONObject,
+        isExplicitLogin: Boolean = false
+    ) {
+        val cleanId = userId.trim()
+        if (cleanId.isEmpty()) return
+        if (isExplicitLogin) {
+            isCurrentUserDeletedByAdmin = false
+        }
+        if (isCurrentUserDeletedByAdmin) return
+
+        scope.launch {
+            try {
+                // If already uploaded in this session and not an explicit login/rename, verify Admin hasn't deleted first
+                if (!isExplicitLogin && hasConfirmedCloudUserUpload && currentWatchedUserId == cleanId) {
+                    val stillExists = verifyUserStillExistsBeforeUpdate(cleanId)
+                    if (!stillExists) {
+                        triggerAdminDeletionCleanup(cleanId)
+                        return@launch
+                    }
+                }
+
+                lastUserUploadTimestampMs = System.currentTimeMillis()
+                val jsonBytes = userPayload.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+
+                val primaryReq = Request.Builder()
+                    .url("$DATABASE_URL/users/$cleanId.json")
+                    .put(jsonBytes)
+                    .build()
+
+                var uploadedOk = false
+                httpClient.newCall(primaryReq).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        uploadedOk = true
+                    }
+                }
+
+                // Also mirror to /akMusic/users/{userId} for Admin Panels reading nested akMusic/users
+                try {
+                    val mirrorBody = userPayload.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+                    val mirrorReq = Request.Builder()
+                        .url("$DATABASE_URL/akMusic/users/$cleanId.json")
+                        .put(mirrorBody)
+                        .build()
+                    httpClient.newCall(mirrorReq).execute().close()
+                } catch (_: Exception) {
+                }
+
+                if (uploadedOk && !isCurrentUserDeletedByAdmin) {
+                    lastUserUploadTimestampMs = System.currentTimeMillis()
+                    hasConfirmedCloudUserUpload = true
+                    attachRealtimeUserWatchListener(cleanId)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to sync user profile to cloud: ${e.message}")
+            }
+        }
+    }
+
+    private fun verifyUserStillExistsBeforeUpdate(userId: String): Boolean {
+        return try {
+            val req = Request.Builder()
+                .url("$DATABASE_URL/users/$userId.json")
+                .get()
+                .build()
+            httpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return true
+                val body = resp.body?.string()?.trim().orEmpty()
+                if (body.isEmpty() || body == "null") {
+                    return false
+                }
+                if (body.startsWith("{")) {
+                    val obj = JSONObject(body)
+                    if (isMarkedDeletedInJson(obj)) return false
+                }
+                true
+            }
+        } catch (_: Exception) {
+            true
+        }
+    }
+
+    private fun isMarkedDeletedInJson(obj: JSONObject): Boolean {
+        if (obj.optBoolean("deleted", false) || obj.optBoolean("isDeleted", false)) return true
+        val status = obj.optString("status", "").trim().lowercase()
+        return status == "deleted" || status == "removed" || status == "banned" || status == "blocked"
+    }
+
+    private fun attachRealtimeUserWatchListener(userId: String) {
+        if (currentWatchedUserId == userId && currentUserValueListener != null) return
+        try {
+            currentUserValueListener?.let { oldListener ->
+                currentUserNodeRef?.removeEventListener(oldListener)
+            }
+        } catch (_: Exception) {
+        }
+
+        currentWatchedUserId = userId
+        val db = firebaseDatabase ?: return
+        val ref = db.getReference("users").child(userId)
+        currentUserNodeRef = ref
+
+        val listener = object : ValueEventListener {
+            override fun onDataChange(snapshot: DataSnapshot) {
+                if (!hasConfirmedCloudUserUpload || isCurrentUserDeletedByAdmin) return
+                val elapsedSinceWrite = System.currentTimeMillis() - lastUserUploadTimestampMs
+                if (elapsedSinceWrite < 4_000L) return
+
+                if (!snapshot.exists() || snapshot.value == null) {
+                    triggerAdminDeletionCleanup(userId)
+                    return
+                }
+                val deletedFlag = snapshot.child("deleted").getValue(Boolean::class.java) == true ||
+                    snapshot.child("isDeleted").getValue(Boolean::class.java) == true
+                val statusStr = snapshot.child("status").getValue(String::class.java)?.trim()?.lowercase().orEmpty()
+                if (deletedFlag || statusStr == "deleted" || statusStr == "removed" || statusStr == "banned") {
+                    triggerAdminDeletionCleanup(userId)
+                }
+            }
+
+            override fun onCancelled(error: DatabaseError) {}
+        }
+        currentUserValueListener = listener
+        try {
+            ref.addValueEventListener(listener)
+        } catch (_: Exception) {
+        }
+    }
+
+    private suspend fun checkCurrentUserStatusInCloud() {
+        val userId = currentWatchedUserId ?: return
+        if (!hasConfirmedCloudUserUpload || isCurrentUserDeletedByAdmin) return
+        val elapsedSinceWrite = System.currentTimeMillis() - lastUserUploadTimestampMs
+        if (elapsedSinceWrite < 4_500L) return
+
+        try {
+            val primaryReq = Request.Builder()
+                .url("$DATABASE_URL/users/$userId.json")
+                .get()
+                .build()
+            httpClient.newCall(primaryReq).execute().use { resp ->
+                if (!resp.isSuccessful) return
+                val body = resp.body?.string()?.trim().orEmpty()
+                if (body.isEmpty() || body == "null") {
+                    triggerAdminDeletionCleanup(userId)
+                    return
+                }
+                if (body.startsWith("{")) {
+                    val obj = JSONObject(body)
+                    if (isMarkedDeletedInJson(obj)) {
+                        triggerAdminDeletionCleanup(userId)
+                        return
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    @Synchronized
+    private fun triggerAdminDeletionCleanup(userId: String) {
+        if (isCurrentUserDeletedByAdmin) return
+        isCurrentUserDeletedByAdmin = true
+        hasConfirmedCloudUserUpload = false
+
+        try {
+            currentUserValueListener?.let { listener ->
+                currentUserNodeRef?.removeEventListener(listener)
+            }
+            currentUserValueListener = null
+            currentUserNodeRef = null
+            currentWatchedUserId = null
+        } catch (_: Exception) {
+        }
+
+        // Clean up both /users/{userId} and /akMusic/users/{userId} so no mirror node remains in Firebase
+        scope.launch {
+            for (path in listOf("users/$userId", "akMusic/users/$userId")) {
+                try {
+                    val delReq = Request.Builder()
+                        .url("$DATABASE_URL/$path.json")
+                        .delete()
+                        .build()
+                    httpClient.newCall(delReq).execute().close()
+                } catch (_: Exception) {
+                }
+            }
+        }
+
+        onUserDeletedByAdminCallback?.invoke()
     }
 }

@@ -47,6 +47,10 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.UUID
 
 enum class MainTab {
     HOME,
@@ -105,10 +109,54 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     fun saveUserName(name: String) {
         val cleaned = name.trim()
         if (cleaned.isEmpty()) return
-        prefs.edit().putString("user_name", cleaned).apply()
+        val previousName = _userName.value
+        val now = System.currentTimeMillis()
+        if (prefs.getLong("user_created_at_ms", 0L) <= 0L) {
+            prefs.edit().putLong("user_created_at_ms", now).apply()
+        }
+        // Ensure a stable cloud_user_id exists (or create a fresh one if logging in for the first time / after Admin deletion)
+        val existingUserId = prefs.getString("cloud_user_id", "")?.trim().orEmpty()
+        val resolvedUserId = if (existingUserId.isNotBlank() && previousName.isNotBlank()) {
+            existingUserId
+        } else {
+            generateCloudUserId(cleaned)
+        }
+        prefs.edit()
+            .putString("user_name", cleaned)
+            .putString("cloud_user_id", resolvedUserId)
+            .putLong("user_last_login_ms", now)
+            .apply()
         _userName.value = cleaned
         _isEditNameDialogOpen.value = false
+        firebaseService.resetAdminDeletionFlagForFreshLogin()
+        syncCurrentUserDataToAdminCloud(isExplicitLogin = true)
         emitSnackbar("Welcome to AADIFY, $cleaned! 🎵")
+    }
+
+    private fun generateCloudUserId(userName: String): String {
+        val slug = userName.lowercase(Locale.US)
+            .replace(Regex("[^a-z0-9]+"), "_")
+            .trim('_')
+            .take(18)
+            .ifBlank { "user" }
+        val shortHash = UUID.randomUUID().toString().replace("-", "").take(6).lowercase(Locale.US)
+        return "user_${slug}_$shortHash"
+    }
+
+    private fun getOrCreateCloudUserId(currentName: String): String {
+        val saved = prefs.getString("cloud_user_id", "")?.trim().orEmpty()
+        if (saved.isNotBlank()) return saved
+        val generated = generateCloudUserId(currentName)
+        val now = System.currentTimeMillis()
+        val editor = prefs.edit().putString("cloud_user_id", generated)
+        if (prefs.getLong("user_created_at_ms", 0L) <= 0L) {
+            editor.putLong("user_created_at_ms", now)
+        }
+        if (prefs.getLong("user_last_login_ms", 0L) <= 0L) {
+            editor.putLong("user_last_login_ms", now)
+        }
+        editor.apply()
+        return generated
     }
 
     fun setEditNameDialogOpen(open: Boolean) {
@@ -607,6 +655,218 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             loadDeviceLocalSongs()
         }
         fetchCountryTrendingSongs(_selectedCountry.value)
+        setupCloudUserSyncAndAdminControl()
+    }
+
+    private var cloudUserSyncJob: Job? = null
+
+    private fun setupCloudUserSyncAndAdminControl() {
+        firebaseService.onUserDeletedByAdminCallback = {
+            viewModelScope.launch {
+                handleCurrentUserDeletedByAdmin()
+            }
+        }
+
+        // Initial cloud sync if user is already logged in with their name
+        if (_userName.value.isNotBlank()) {
+            syncCurrentUserDataToAdminCloud(isExplicitLogin = true)
+        }
+
+        // Automatically sync user's live data (favorites, playlists, downloads, session history, current song) to Admin Panel
+        viewModelScope.launch {
+            combine(
+                _userName,
+                favoriteEntities,
+                playlists,
+                downloadedSongs,
+                sessionHistoryEntities
+            ) { name, favs, lists, downloads, history ->
+                "${name}|${favs.size}|${lists.size}|${downloads.size}|${history.size}|${history.sumOf { it.playCount }}"
+            }.collect {
+                if (_userName.value.isNotBlank()) {
+                    scheduleDebouncedUserCloudSync()
+                }
+            }
+        }
+    }
+
+    private fun scheduleDebouncedUserCloudSync() {
+        cloudUserSyncJob?.cancel()
+        cloudUserSyncJob = viewModelScope.launch {
+            delay(800L)
+            syncCurrentUserDataToAdminCloud(isExplicitLogin = false)
+        }
+    }
+
+    private fun handleCurrentUserDeletedByAdmin() {
+        cloudUserSyncJob?.cancel()
+        prefs.edit()
+            .remove("user_name")
+            .remove("cloud_user_id")
+            .remove("user_created_at_ms")
+            .remove("user_last_login_ms")
+            .apply()
+
+        try {
+            backstagePlayer.stopAndClear()
+            MusicPlaybackService.syncPlayState(false)
+        } catch (_: Exception) {
+        }
+        _isPlaying.value = false
+        _isBuffering.value = false
+        _isFullScreenPlayerOpen.value = false
+        _isEditNameDialogOpen.value = false
+        _userName.value = ""
+        emitSnackbar("Your account was removed by Admin. Please enter your name to login again.")
+    }
+
+    private fun syncCurrentUserDataToAdminCloud(isExplicitLogin: Boolean = false) {
+        val currentName = _userName.value.trim()
+        if (currentName.isEmpty()) return
+
+        val userId = getOrCreateCloudUserId(currentName)
+        val nowMs = System.currentTimeMillis()
+        val createdAtMs = prefs.getLong("user_created_at_ms", nowMs).let { if (it > 0L) it else nowMs }
+        val lastLoginMs = prefs.getLong("user_last_login_ms", nowMs).let { if (it > 0L) it else nowMs }
+        val dateFormat = SimpleDateFormat("dd MMM yyyy, hh:mm a", Locale.US)
+        val formattedCreated = dateFormat.format(Date(createdAtMs))
+        val formattedLogin = dateFormat.format(Date(lastLoginMs))
+        val formattedNow = dateFormat.format(Date(nowMs))
+
+        val favList = favoriteEntities.value
+        val playlistList = playlists.value
+        val playlistSongsList = allPlaylistSongs.value
+        val downloadList = downloadedSongs.value
+        val historyList = sessionHistoryEntities.value
+        val activeSong = _currentSong.value
+        val playingNow = _isPlaying.value
+        val country = _selectedCountry.value
+
+        val slug = currentName.lowercase(Locale.US)
+            .replace(Regex("[^a-z0-9]+"), ".")
+            .trim('.')
+            .ifBlank { "user" }
+
+        val favJsonArray = JSONArray()
+        favList.take(50).forEach { fav ->
+            favJsonArray.put(
+                JSONObject().apply {
+                    put("id", fav.id)
+                    put("title", fav.title)
+                    put("artist", fav.artist)
+                    put("videoId", fav.videoId)
+                }
+            )
+        }
+
+        val playlistsJsonArray = JSONArray()
+        playlistList.take(30).forEach { pl ->
+            val songsInPl = playlistSongsList.filter { it.playlistId == pl.playlistId }
+            val songTitles = songsInPl.joinToString(", ") { it.title }
+            playlistsJsonArray.put(
+                JSONObject().apply {
+                    put("playlistId", pl.playlistId)
+                    put("name", pl.name)
+                    put("songCount", songsInPl.size)
+                    put("songs", songTitles)
+                }
+            )
+        }
+
+        val downloadsJsonArray = JSONArray()
+        downloadList.take(50).forEach { dl ->
+            downloadsJsonArray.put(
+                JSONObject().apply {
+                    put("id", dl.id)
+                    put("title", dl.title)
+                    put("artist", dl.artist)
+                }
+            )
+        }
+
+        val historyJsonArray = JSONArray()
+        historyList.take(30).forEach { h ->
+            historyJsonArray.put(
+                JSONObject().apply {
+                    put("id", h.id)
+                    put("title", h.title)
+                    put("artist", h.artist)
+                    put("playCount", h.playCount)
+                    put("playedAt", h.playedAt)
+                }
+            )
+        }
+
+        val totalPlays = historyList.sumOf { it.playCount }.coerceAtLeast(historyList.size)
+        val deviceLabel = "${Build.MANUFACTURER.replaceFirstChar { it.uppercase() }} ${Build.MODEL}".trim()
+        val nowPlayingSummary = activeSong?.let { "${it.title} - ${it.artist}" }
+            ?: historyList.firstOrNull()?.let { "${it.title} - ${it.artist}" }
+            ?: "No song played yet"
+
+        val payload = JSONObject().apply {
+            // Identity keys (covers all Admin Panel User table conventions)
+            put("id", userId)
+            put("uid", userId)
+            put("userId", userId)
+            put("name", currentName)
+            put("userName", currentName)
+            put("username", currentName)
+            put("displayName", currentName)
+            put("fullName", currentName)
+            put("email", "$slug@aadify.app")
+
+            // Status & Device Metadata
+            put("status", "Active")
+            put("isOnline", true)
+            put("active", true)
+            put("role", "User")
+            put("loginType", "Name Login")
+            put("appName", "AADIFY")
+            put("platform", "Android")
+            put("device", deviceLabel)
+            put("deviceModel", Build.MODEL ?: "Android")
+            put("androidVersion", "Android ${Build.VERSION.RELEASE}")
+            put("country", "${country.flagEmoji} ${country.name}")
+
+            // Timestamps
+            put("createdAt", createdAtMs)
+            put("joinedAt", createdAtMs)
+            put("joinDate", formattedCreated)
+            put("loginTime", formattedLogin)
+            put("lastLogin", lastLoginMs)
+            put("lastActive", nowMs)
+            put("lastSeen", formattedNow)
+            put("updatedAt", nowMs)
+            put("timestamp", nowMs)
+
+            // User Playback & Library Data ("uska Sara data")
+            put("isPlaying", playingNow)
+            put("currentSong", nowPlayingSummary)
+            put("nowPlaying", activeSong?.title ?: "Idle")
+            put("currentSongTitle", activeSong?.title ?: "")
+            put("currentSongArtist", activeSong?.artist ?: "")
+            put("currentSongBanner", activeSong?.highResBannerUrl ?: "")
+            put("lastPlayedSong", historyList.firstOrNull()?.let { "${it.title} (${it.artist})" } ?: "None")
+            put("totalPlays", totalPlays)
+            put("favoritesCount", favList.size)
+            put("playlistsCount", playlistList.size)
+            put("downloadsCount", downloadList.size)
+            put("historyCount", historyList.size)
+            put("favoriteSongs", favList.joinToString(", ") { it.title }.ifBlank { "None" })
+            put("playlistNames", playlistList.joinToString(", ") { it.name }.ifBlank { "None" })
+            put("downloadedSongs", downloadList.joinToString(", ") { it.title }.ifBlank { "None" })
+            put("recentSongsSummary", historyList.take(10).joinToString(", ") { "${it.title} (${it.playCount}x)" }.ifBlank { "None" })
+            put("favorites", favJsonArray)
+            put("playlists", playlistsJsonArray)
+            put("downloads", downloadsJsonArray)
+            put("recentSongs", historyJsonArray)
+        }
+
+        firebaseService.syncUserProfileToCloud(
+            userId = userId,
+            userPayload = payload,
+            isExplicitLogin = isExplicitLogin
+        )
     }
 
     /**
@@ -938,6 +1198,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     localContentUri = song.resolvedLocalUri
                 )
             )
+            scheduleDebouncedUserCloudSync()
         }
 
         playbackJob?.cancel()
@@ -1326,6 +1587,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         super.onCleared()
+        firebaseService.onUserDeletedByAdminCallback = null
         MusicPlaybackService.onSkipNextCallback = null
         MusicPlaybackService.onSkipPreviousCallback = null
         MusicPlaybackService.onTogglePlayPauseCallback = null
