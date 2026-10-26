@@ -11,7 +11,13 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.graphics.Typeface
 import android.os.Build
+import android.text.SpannableString
+import android.text.Spanned
+import android.text.style.RelativeSizeSpan
+import android.text.style.StyleSpan
+import android.text.style.TypefaceSpan
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
@@ -30,11 +36,11 @@ import kotlin.math.abs
 /**
  * Displays rich system notifications sent from the Admin Panel (via Firebase Cloud Messaging
  * or Firebase Realtime Database /notifications).
- * Supports:
- * 1. App Name ("AADIFY") & Official App Logo (R.drawable.aadify_logo)
- * 2. Title (bold heading)
- * 3. Body (multi-line paragraph text via BigTextStyle)
- * 4. Optional Image URL (downloaded and rendered via BigPictureStyle)
+ * Layout:
+ * - Header: Music Icon (R.drawable.ic_aadify_notification) + App Name ("AADIFY")
+ * - Title: Bold, distinct headline typography
+ * - Body: Clean, readable multi-line paragraph text
+ * - Image (Optional): Full-width BigPicture banner below the body (with NO right-side square logo)
  */
 object AdminNotificationHelper {
     private const val TAG = "AdminNotifHelper"
@@ -57,7 +63,7 @@ object AdminNotificationHelper {
                     CHANNEL_NAME,
                     NotificationManager.IMPORTANCE_HIGH
                 ).apply {
-                    description = "Notifications and announcements from AADIFY Admin"
+                    description = "Notifications and announcements from AADIFY"
                     enableLights(true)
                     lightColor = Color.parseColor("#1DB954")
                     enableVibration(true)
@@ -94,9 +100,26 @@ object AdminNotificationHelper {
         val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val current = (prefs.getStringSet("seen_keys", emptySet()) ?: emptySet()).toMutableSet()
         current.add(uniqueKey)
-        // Keep set bounded
         val trimmed = if (current.size > 300) current.toList().takeLast(250).toSet() else current
         prefs.edit().putStringSet("seen_keys", trimmed).apply()
+    }
+
+    private fun formatPremiumTitle(rawTitle: String): CharSequence {
+        val text = rawTitle.trim()
+        if (text.isEmpty()) return text
+        return SpannableString(text).apply {
+            setSpan(StyleSpan(Typeface.BOLD), 0, length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            setSpan(TypefaceSpan("sans-serif-medium"), 0, length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            setSpan(RelativeSizeSpan(1.05f), 0, length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+    }
+
+    private fun formatPremiumBody(rawBody: String): CharSequence {
+        val text = rawBody.trim()
+        if (text.isEmpty()) return text
+        return SpannableString(text).apply {
+            setSpan(TypefaceSpan("sans-serif"), 0, length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
     }
 
     fun showAdminNotificationAsync(
@@ -143,11 +166,8 @@ object AdminNotificationHelper {
 
             markNotificationShown(context, dedupeKey)
 
-            val appLogoBitmap = try {
-                BitmapFactory.decodeResource(context.resources, R.drawable.aadify_logo)
-            } catch (_: Exception) {
-                null
-            }
+            val styledTitle = formatPremiumTitle(cleanTitle)
+            val styledBody = formatPremiumBody(cleanBody)
 
             val remoteBannerBitmap = imageUrl?.trim()?.takeIf {
                 it.startsWith("http://", ignoreCase = true) || it.startsWith("https://", ignoreCase = true)
@@ -165,36 +185,31 @@ object AdminNotificationHelper {
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
             )
 
+            // Do NOT setLargeIcon(appLogoBitmap) so no square app logo appears on the right side of the text!
             val builder = NotificationCompat.Builder(context, CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_aadify_notification)
                 .setColor(Color.parseColor("#1DB954"))
-                .setSubText(context.getString(R.string.app_name))
-                .setContentTitle(cleanTitle)
-                .setContentText(cleanBody)
+                .setContentTitle(styledTitle)
+                .setContentText(styledBody)
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
-                .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+                .setCategory(NotificationCompat.CATEGORY_RECOMMENDATION)
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                .setShowWhen(true)
+                .setWhen(System.currentTimeMillis())
                 .setAutoCancel(true)
                 .setContentIntent(pendingIntent)
-
-            if (appLogoBitmap != null) {
-                builder.setLargeIcon(appLogoBitmap)
-            }
 
             if (remoteBannerBitmap != null) {
                 val bigPicStyle = NotificationCompat.BigPictureStyle()
                     .bigPicture(remoteBannerBitmap)
-                    .setBigContentTitle(cleanTitle)
-                    .setSummaryText(cleanBody)
-                if (appLogoBitmap != null) {
-                    bigPicStyle.bigLargeIcon(appLogoBitmap)
-                }
+                    .bigLargeIcon(null as Bitmap?)
+                    .setBigContentTitle(styledTitle)
+                    .setSummaryText(styledBody)
                 builder.setStyle(bigPicStyle)
             } else {
                 val bigTextStyle = NotificationCompat.BigTextStyle()
-                    .bigText(cleanBody)
-                    .setBigContentTitle(cleanTitle)
-                    .setSummaryText(context.getString(R.string.app_name))
+                    .bigText(styledBody)
+                    .setBigContentTitle(styledTitle)
                 builder.setStyle(bigTextStyle)
             }
 
