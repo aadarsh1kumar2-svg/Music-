@@ -293,10 +293,10 @@ fun HomeScreen(
                     }
                 }
             } else {
-                items(
+                itemsIndexed(
                     items = matchingPlayedSongs,
-                    key = { "home_session_search_${it.id}" }
-                ) { song ->
+                    key = { idx, it -> "home_session_search_${idx}_${it.id}" }
+                ) { _, song ->
                     SongListRow(
                         song = song,
                         isCurrentSong = currentSong?.id == song.id,
@@ -336,10 +336,10 @@ fun HomeScreen(
                     }
                 }
                 val previewSessionSongs = allSessionSongs.take(6)
-                items(
+                itemsIndexed(
                     items = previewSessionSongs,
-                    key = { "session_${it.id}" }
-                ) { song ->
+                    key = { idx, it -> "session_${idx}_${it.id}" }
+                ) { _, song ->
                     SongListRow(
                         song = song,
                         isCurrentSong = currentSong?.id == song.id,
@@ -403,7 +403,7 @@ fun HomeScreen(
             } else {
                 itemsIndexed(
                     items = songs,
-                    key = { _, song -> song.id }
+                    key = { index, song -> "home_catalog_${index}_${song.id}" }
                 ) { index, song ->
                     SongListRow(
                         song = song,

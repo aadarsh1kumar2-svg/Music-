@@ -177,7 +177,7 @@ fun TopChartsScreen(
             ) {
                 itemsIndexed(
                     items = chartSongs,
-                    key = { _, song -> "chart_${selectedChartTab.name}_${song.id}" }
+                    key = { index, song -> "chart_${selectedChartTab.name}_${index}_${song.id}" }
                 ) { index, song ->
                     SongListRow(
                         song = song,

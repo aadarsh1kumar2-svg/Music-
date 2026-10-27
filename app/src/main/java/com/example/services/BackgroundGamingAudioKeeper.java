@@ -244,45 +244,39 @@ public final class BackgroundGamingAudioKeeper {
             return;
         }
         try {
-            NetworkRequest request = new NetworkRequest.Builder()
-                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                .build();
-
-            ConnectivityManager.NetworkCallback cb = new ConnectivityManager.NetworkCallback() {
-                @Override
-                public void onAvailable(@NonNull Network network) {
-                    super.onAvailable(network);
-                    if (isKeeperActive) {
-                        mainHandler.post(mainThreadKeepAliveRunnable);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                ConnectivityManager.NetworkCallback cb = new ConnectivityManager.NetworkCallback() {
+                    @Override
+                    public void onAvailable(@NonNull Network network) {
+                        super.onAvailable(network);
+                        if (isKeeperActive) {
+                            mainHandler.post(mainThreadKeepAliveRunnable);
+                        }
                     }
-                }
 
-                @Override
-                public void onCapabilitiesChanged(
-                    @NonNull Network network,
-                    @NonNull NetworkCapabilities networkCapabilities
-                ) {
-                    super.onCapabilitiesChanged(network, networkCapabilities);
-                    if (isKeeperActive) {
-                        ensureLocksAcquired();
+                    @Override
+                    public void onCapabilitiesChanged(
+                        @NonNull Network network,
+                        @NonNull NetworkCapabilities networkCapabilities
+                    ) {
+                        super.onCapabilitiesChanged(network, networkCapabilities);
+                        if (isKeeperActive) {
+                            ensureLocksAcquired();
+                        }
                     }
-                }
 
-                @Override
-                public void onLost(@NonNull Network network) {
-                    super.onLost(network);
-                    if (isKeeperActive) {
-                        mainHandler.postDelayed(mainThreadKeepAliveRunnable, 250L);
+                    @Override
+                    public void onLost(@NonNull Network network) {
+                        super.onLost(network);
+                        if (isKeeperActive) {
+                            mainHandler.postDelayed(mainThreadKeepAliveRunnable, 250L);
+                        }
                     }
-                }
-            };
-            networkCallback = cb;
-            connectivityManager.registerNetworkCallback(request, cb);
-            try {
-                connectivityManager.requestNetwork(request, new ConnectivityManager.NetworkCallback());
-            } catch (Throwable ignored) {
+                };
+                networkCallback = cb;
+                connectivityManager.registerDefaultNetworkCallback(cb);
+                isNetworkRegistered = true;
             }
-            isNetworkRegistered = true;
         } catch (Throwable t) {
             Log.w(TAG, "NetworkCallback registration warning: " + t.getMessage());
         }
@@ -306,23 +300,22 @@ public final class BackgroundGamingAudioKeeper {
     }
 
     /**
-     * Ensures the Foreground MediaSessionService is started immediately so Android OS treats
-     * the app process as a persistent foreground media service even before the user leaves the app.
+     * Safely starts MusicPlaybackService using startService first (so Android never triggers
+     * ForegroundServiceDidNotStartInTimeException during UI navigation) and falls back to
+     * startForegroundService only when needed in the background.
      */
     public static void ensureForegroundMediaServiceStarted(@NonNull Context context) {
         try {
             Context appCtx = context.getApplicationContext();
             Intent serviceIntent = new Intent(appCtx, MusicPlaybackService.class);
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                appCtx.startForegroundService(serviceIntent);
-            } else {
-                appCtx.startService(serviceIntent);
-            }
+            appCtx.startService(serviceIntent);
         } catch (Throwable t) {
             try {
                 Context appCtx = context.getApplicationContext();
                 Intent serviceIntent = new Intent(appCtx, MusicPlaybackService.class);
-                appCtx.startService(serviceIntent);
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    appCtx.startForegroundService(serviceIntent);
+                }
             } catch (Throwable ignored) {
             }
         }

@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -610,7 +611,7 @@ private fun LibrarySongCollectionView(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(bottom = 140.dp)
             ) {
-                items(items = songs, key = { "${title}_${it.id}" }) { song ->
+                itemsIndexed(items = songs, key = { idx, song -> "${title}_${idx}_${song.id}" }) { _, song ->
                     SongListRow(
                         song = song,
                         isCurrentSong = currentSong?.id == song.id,
@@ -812,7 +813,7 @@ private fun LibraryMyMusicView(
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
                         )
                     }
-                    items(items = deviceLocalSongs, key = { "dev_${it.id}" }) { song ->
+                    itemsIndexed(items = deviceLocalSongs, key = { idx, it -> "dev_${idx}_${it.id}" }) { _, song ->
                         SongListRow(
                             song = song,
                             isCurrentSong = currentSong?.id == song.id,
@@ -835,7 +836,7 @@ private fun LibraryMyMusicView(
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
                         )
                     }
-                    items(items = downloadedSongs, key = { "dl_${it.id}" }) { entity ->
+                    itemsIndexed(items = downloadedSongs, key = { idx, it -> "dl_${idx}_${it.id}" }) { _, entity ->
                         val song = entity.toSong()
                         val sizeMb = String.format("%.1f MB", entity.fileSizeBytes / (1024f * 1024f))
                         SongListRow(

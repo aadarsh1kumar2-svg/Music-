@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
@@ -292,10 +293,10 @@ fun ExploreScreen(
                     }
                 }
             } else {
-                items(
+                itemsIndexed(
                     items = songs,
-                    key = { "explore_search_${it.id}" }
-                ) { song ->
+                    key = { idx, it -> "explore_search_${idx}_${it.id}" }
+                ) { _, song ->
                     SongListRow(
                         song = song,
                         isCurrentSong = currentSong?.id == song.id,
@@ -313,10 +314,10 @@ fun ExploreScreen(
                         contentPadding = PaddingValues(horizontal = 16.dp),
                         horizontalArrangement = Arrangement.spacedBy(14.dp)
                     ) {
-                        items(
+                        itemsIndexed(
                             items = songs.take(12),
-                            key = { "carousel_${it.id}" }
-                        ) { song ->
+                            key = { idx, it -> "carousel_${idx}_${it.id}" }
+                        ) { _, song ->
                             Column(
                                 modifier = Modifier
                                     .width(275.dp)
@@ -464,10 +465,10 @@ fun ExploreScreen(
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                     )
                 }
-                items(
+                itemsIndexed(
                     items = songs,
-                    key = { "explore_row_${it.id}" }
-                ) { song ->
+                    key = { idx, it -> "explore_row_${idx}_${it.id}" }
+                ) { _, song ->
                     SongListRow(
                         song = song,
                         isCurrentSong = currentSong?.id == song.id,

@@ -27,14 +27,6 @@ import com.example.models.Song
  * is actively typing, scrolling, or multitasking inside other apps, or when the screen is off.
  */
 class BackstageAudioWebView(context: Context) : WebView(context) {
-    override fun dispatchWindowVisibilityChanged(visibility: Int) {
-        super.dispatchWindowVisibilityChanged(View.VISIBLE)
-    }
-
-    override fun getWindowVisibility(): Int = View.VISIBLE
-
-    override fun getVisibility(): Int = View.VISIBLE
-
     override fun onWindowVisibilityChanged(visibility: Int) {
         super.onWindowVisibilityChanged(View.VISIBLE)
     }
