@@ -27,6 +27,14 @@ import com.example.models.Song
  * is actively typing, scrolling, or multitasking inside other apps, or when the screen is off.
  */
 class BackstageAudioWebView(context: Context) : WebView(context) {
+    override fun dispatchWindowVisibilityChanged(visibility: Int) {
+        super.dispatchWindowVisibilityChanged(View.VISIBLE)
+    }
+
+    override fun getWindowVisibility(): Int = View.VISIBLE
+
+    override fun getVisibility(): Int = View.VISIBLE
+
     override fun onWindowVisibilityChanged(visibility: Int) {
         super.onWindowVisibilityChanged(View.VISIBLE)
     }
@@ -42,6 +50,12 @@ class BackstageAudioWebView(context: Context) : WebView(context) {
     override fun isShown(): Boolean = true
 
     override fun hasWindowFocus(): Boolean = true
+
+    override fun onPause() {
+        // Never allow backgrounding or game launches to pause the Chromium audio engine
+        super.onResume()
+        resumeTimers()
+    }
 }
 
 class BackstageYouTubePlayerController(
@@ -295,6 +309,10 @@ class BackstageYouTubePlayerController(
         }
 
         webView = created
+        try {
+            BackgroundGamingAudioKeeper.getInstance(context).attachWebView(created)
+        } catch (_: Exception) {
+        }
         return created
     }
 
@@ -396,6 +414,12 @@ class BackstageYouTubePlayerController(
             val view = getOrCreateWebView()
             view.onResume()
             view.resumeTimers()
+            try {
+                val keeper = BackgroundGamingAudioKeeper.getInstance(context)
+                keeper.attachWebView(view)
+                keeper.startGamingKeepAlive()
+            } catch (_: Exception) {
+            }
 
             val hasResumeStart = if (safeStartSec >= 1.0) "true" else "false"
             // Disarm and reset any old <video> on the previous page before loading the new URL
@@ -486,6 +510,10 @@ class BackstageYouTubePlayerController(
         mainHandler.post {
             webView?.onResume()
             webView?.resumeTimers()
+            try {
+                BackgroundGamingAudioKeeper.getInstance(context).startGamingKeepAlive()
+            } catch (_: Exception) {
+            }
             webView?.evaluateJavascript(
                 """
                 (function() {
@@ -918,7 +946,7 @@ class BackstageYouTubePlayerController(
                         return;
                     }
                     var now = Date.now();
-                    if (now - (window.__akLastPlayAttempt || 0) < 120) return;
+                    if (now - (window.__akLastPlayAttempt || 0) < 25) return;
                     window.__akLastPlayAttempt = now;
 
                     dismissContinueWatchingDialog();
@@ -1025,17 +1053,17 @@ class BackstageYouTubePlayerController(
                                 window.AndroidBridge.onStateChange(2);
                             }
                         } else if (!window.__akTrackEndedFired && !v.ended) {
-                            // Allow 180ms for internal YouTube MSE stream-switches, then auto-resume if still paused!
-                            setTimeout(function() {
-                                if (!window.__akUserPaused && !window.__akExternalPaused && !window.__akTrackEndedFired && v.paused && !v.ended) {
-                                    tryPlayVideo(v);
-                                }
-                            }, 180);
-                            setTimeout(function() {
-                                if (!window.__akUserPaused && !window.__akExternalPaused && !window.__akTrackEndedFired && v.paused && !v.ended) {
-                                    tryPlayVideo(v);
-                                }
-                            }, 500);
+                            // Immediately recover if a game (Free Fire / PUBG) or background switch steals audio focus!
+                            var resumeDelays = [25, 90, 180, 350, 650, 1100];
+                            for (var rIdx = 0; rIdx < resumeDelays.length; rIdx++) {
+                                (function(delayMs) {
+                                    setTimeout(function() {
+                                        if (!window.__akUserPaused && !window.__akExternalPaused && !window.__akTrackEndedFired && v.paused && !v.ended) {
+                                            tryPlayVideo(v);
+                                        }
+                                    }, delayMs);
+                                })(resumeDelays[rIdx]);
+                            }
                             if (window.AndroidBridge && typeof window.AndroidBridge.onUnexpectedPause === 'function') {
                                 window.AndroidBridge.onUnexpectedPause();
                             }

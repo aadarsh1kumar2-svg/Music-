@@ -173,20 +173,7 @@ class MusicPlaybackService : MediaSessionService() {
                 if (svc != null) {
                     svc.applySyncRequest(req)
                 } else {
-                    try {
-                        val intent = Intent(context.applicationContext, MusicPlaybackService::class.java)
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                            context.applicationContext.startForegroundService(intent)
-                        } else {
-                            context.applicationContext.startService(intent)
-                        }
-                    } catch (_: Exception) {
-                        try {
-                            val intent = Intent(context.applicationContext, MusicPlaybackService::class.java)
-                            context.applicationContext.startService(intent)
-                        } catch (_: Exception) {
-                        }
-                    }
+                    BackgroundGamingAudioKeeper.ensureForegroundMediaServiceStarted(context)
                 }
             }
         }
@@ -313,8 +300,11 @@ class MusicPlaybackService : MediaSessionService() {
         when (focusChange) {
             AudioManager.AUDIOFOCUS_LOSS,
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
-                if (isDirectAudioMode && pendingSync?.isPlaying == true && !isPausedByExternalMedia) {
+                // Only pause if an actual cellular phone call is active; NEVER pause when a game (Free Fire, PUBG) requests focus!
+                if (isPhoneCallActive() && pendingSync?.isPlaying == true && !isPausedByExternalMedia) {
                     enterExternalMediaPausedState()
+                } else if (pendingSync?.isPlaying == true && !isPausedByExternalMedia) {
+                    onKeepOnlineEngineAwakeCallback?.invoke()
                 }
             }
             AudioManager.AUDIOFOCUS_GAIN -> {
@@ -334,6 +324,16 @@ class MusicPlaybackService : MediaSessionService() {
         super.onCreate()
         instance = this
         audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+        try {
+            val keeper = BackgroundGamingAudioKeeper.getInstance(this)
+            keeper.setKeepAliveAction {
+                if (pendingSync?.isPlaying == true && !isPausedByExternalMedia) {
+                    onKeepOnlineEngineAwakeCallback?.invoke()
+                }
+            }
+            keeper.startGamingKeepAlive()
+        } catch (_: Exception) {
+        }
 
         ensurePublicLockscreenNotificationChannel()
         registerSystemAudioPlaybackMonitor()
@@ -672,15 +672,7 @@ class MusicPlaybackService : MediaSessionService() {
     }
 
     private fun isPhoneCallActive(): Boolean {
-        val am = audioManager ?: return false
-        val mode = try {
-            am.mode
-        } catch (_: Exception) {
-            AudioManager.MODE_NORMAL
-        }
-        return mode == AudioManager.MODE_IN_CALL ||
-            mode == AudioManager.MODE_IN_COMMUNICATION ||
-            mode == AudioManager.MODE_RINGTONE
+        return BackgroundGamingAudioKeeper.isActualCellularCallActive(audioManager)
     }
 
     /**
@@ -901,6 +893,7 @@ class MusicPlaybackService : MediaSessionService() {
                 try {
                     if (wakeLock?.isHeld == false) wakeLock?.acquire(6 * 60 * 60 * 1000L)
                     if (wifiLock?.isHeld == false) wifiLock?.acquire()
+                    BackgroundGamingAudioKeeper.getInstance(this).startGamingKeepAlive()
                 } catch (_: Exception) {
                 }
             } else {
@@ -1018,6 +1011,7 @@ class MusicPlaybackService : MediaSessionService() {
                 try {
                     if (wakeLock?.isHeld == false) wakeLock?.acquire(6 * 60 * 60 * 1000L)
                     if (wifiLock?.isHeld == false) wifiLock?.acquire()
+                    BackgroundGamingAudioKeeper.getInstance(this).startGamingKeepAlive()
                 } catch (_: Exception) {
                 }
             } else {

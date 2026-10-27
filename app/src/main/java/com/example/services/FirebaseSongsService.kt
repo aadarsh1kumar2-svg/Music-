@@ -224,6 +224,10 @@ class FirebaseSongsService(private val context: Context) {
             fetchNotificationsViaRest()
             while (true) {
                 delay(6_000L)
+                try {
+                    firebaseDatabase?.goOnline()
+                } catch (_: Exception) {
+                }
                 fetchSongsViaRest(silent = true)
                 fetchNotificationsViaRest()
                 checkCurrentUserStatusInCloud()

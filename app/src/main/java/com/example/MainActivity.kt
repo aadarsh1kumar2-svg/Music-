@@ -113,7 +113,9 @@ import com.example.screens.HomeScreen
 import com.example.screens.LibraryScreen
 import com.example.screens.NameOnboardingScreen
 import com.example.screens.SplashScreen
+import com.example.screens.StartupSmartlinkAdScreen
 import com.example.screens.TopChartsScreen
+import com.example.services.BackgroundGamingAudioKeeper
 import com.example.ui.theme.DeepCharcoal
 import com.example.ui.theme.DividerDark
 import com.example.ui.theme.MutedGray
@@ -137,12 +139,18 @@ private enum class LaunchStage {
     ENTER_NAME,
     LOADING,
     DEVELOPER_INTRO,
+    STARTUP_AD,
     MAIN_APP
 }
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        try {
+            BackgroundGamingAudioKeeper.getInstance(this)
+            BackgroundGamingAudioKeeper.ensureForegroundMediaServiceStarted(this)
+        } catch (_: Exception) {
+        }
         enableEdgeToEdge()
         setContent {
             MyApplicationTheme {
@@ -337,6 +345,13 @@ fun AKMusicAppRoot(
             launchStage == LaunchStage.DEVELOPER_INTRO -> {
                 DeveloperIntroScreen(
                     onContinue = {
+                        launchStage = LaunchStage.STARTUP_AD
+                    }
+                )
+            }
+            launchStage == LaunchStage.STARTUP_AD -> {
+                StartupSmartlinkAdScreen(
+                    onCloseAdAndEnterApp = {
                         launchStage = LaunchStage.MAIN_APP
                     }
                 )
