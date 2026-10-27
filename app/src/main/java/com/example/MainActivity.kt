@@ -1,6 +1,7 @@
 package com.example
 
 import android.Manifest
+import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -114,6 +115,7 @@ import com.example.screens.LibraryScreen
 import com.example.screens.NameOnboardingScreen
 import com.example.screens.SplashScreen
 import com.example.screens.TopChartsScreen
+import com.example.services.AdMobAppOpenManager
 import com.example.ui.theme.DeepCharcoal
 import com.example.ui.theme.DividerDark
 import com.example.ui.theme.MutedGray
@@ -143,6 +145,7 @@ private enum class LaunchStage {
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        AdMobAppOpenManager.initializeAndPreload(this)
         enableEdgeToEdge()
         setContent {
             MyApplicationTheme {
@@ -335,9 +338,15 @@ fun AKMusicAppRoot(
                 SplashScreen()
             }
             launchStage == LaunchStage.DEVELOPER_INTRO -> {
+                var isOpeningAd by remember { mutableStateOf(false) }
                 DeveloperIntroScreen(
                     onContinue = {
-                        launchStage = LaunchStage.MAIN_APP
+                        if (!isOpeningAd) {
+                            isOpeningAd = true
+                            AdMobAppOpenManager.showAdOnAppOpen(context as? Activity) {
+                                launchStage = LaunchStage.MAIN_APP
+                            }
+                        }
                     }
                 )
             }
