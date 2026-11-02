@@ -27,6 +27,7 @@ import com.example.services.AudioStreamExtractor
 import com.example.services.BackstageYouTubePlayerController
 import com.example.services.FirebaseSongsService
 import com.example.services.MusicPlaybackService
+import com.example.services.ResolvedAudioStream
 import com.example.utils.CountryOption
 import com.example.utils.SUPPORTED_COUNTRIES
 import com.google.common.util.concurrent.ListenableFuture
@@ -1248,15 +1249,36 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             // 4. Primary Engine for ALL Admin & Online Songs:
-            // Play immediately via BackstageYouTubePlayerController (MediaSessionService is already synced above!)
-            isUsingExoPlayerFallback = false
-            _activeStreamEngine.value = "Backstage YouTube Engine"
-            backstagePlayer.loadVideoById(
+            isUsingExoPlayerFallback = true
+            _activeStreamEngine.value = "ExoPlayer Direct Stream"
+            val streamResult = audioExtractor.extractBestAudioStream(
                 rawVideoId = playableVideoId,
-                startSeconds = resolvedStartMs / 1000.0,
                 songTitle = song.title,
-                songArtist = song.artist,
-                artworkUrl = song.highResBannerUrl
+                songArtist = song.artist
+            )
+            streamResult.fold(
+                onSuccess = { resolved: ResolvedAudioStream ->
+                    MusicPlaybackService.syncNowPlaying(
+                        context = appContext,
+                        song = song,
+                        isPlaying = true,
+                        directStreamUri = resolved.streamUrl,
+                        playbackSpeed = _playbackSpeed.value,
+                        startPositionMs = resolvedStartMs
+                    )
+                },
+                onFailure = {
+                    // Fallback to WebView only if ExoPlayer extraction fails
+                    isUsingExoPlayerFallback = false
+                    _activeStreamEngine.value = "WebView Fallback"
+                    backstagePlayer.loadVideoById(
+                        rawVideoId = playableVideoId,
+                        startSeconds = resolvedStartMs / 1000.0,
+                        songTitle = song.title,
+                        songArtist = song.artist,
+                        artworkUrl = song.highResBannerUrl
+                    )
+                }
             )
         }
     }

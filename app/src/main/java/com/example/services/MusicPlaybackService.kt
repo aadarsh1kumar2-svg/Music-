@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.AudioFocusRequest
@@ -17,8 +18,10 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
+import android.util.Log
 import android.util.LruCache
 import androidx.annotation.OptIn
+import androidx.core.app.NotificationCompat
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.ForwardingPlayer
@@ -36,6 +39,7 @@ import androidx.media3.session.DefaultMediaNotificationProvider
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import com.example.MainActivity
+import com.example.R
 import com.example.models.Song
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
@@ -397,7 +401,7 @@ class MusicPlaybackService : MediaSessionService() {
         val exoPlayer = ExoPlayer.Builder(this)
             .setMediaSourceFactory(mediaSourceFactory)
             .setAudioAttributes(audioAttributes, false)
-            .setHandleAudioBecomingNoisy(false)
+            .setHandleAudioBecomingNoisy(true)
             .setWakeMode(C.WAKE_MODE_NETWORK)
             .build()
 
@@ -646,6 +650,37 @@ class MusicPlaybackService : MediaSessionService() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
+        try {
+            ensurePublicLockscreenNotificationChannel()
+            val activityIntent = Intent(this, MainActivity::class.java).apply {
+                this.flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+            }
+            val contentPendingIntent = PendingIntent.getActivity(
+                this,
+                0,
+                activityIntent,
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+            val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_aadify_notification)
+                .setContentTitle(pendingSync?.song?.title ?: "AADIFY")
+                .setContentText(pendingSync?.song?.artist ?: "Playing")
+                .setContentIntent(contentPendingIntent)
+                .setOngoing(true)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .build()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+        } catch (e: Exception) {
+            Log.e("MusicPlaybackService", "Failed to startForeground in onStartCommand", e)
+        }
         return START_STICKY
     }
 
@@ -845,9 +880,11 @@ class MusicPlaybackService : MediaSessionService() {
         isInternalSync = true
         try {
             val song = req.song
+            val directUri = req.directStreamUri?.takeIf { it.isNotBlank() }
+            isDirectAudioMode = directUri != null
             val silentUri = getOrCreateSilentWavUri(this)
-            val activeUri = req.directStreamUri?.takeIf { it.isNotBlank() } ?: silentUri
-            isDirectAudioMode = !req.directStreamUri.isNullOrBlank()
+            // Use silent WAV fallback ONLY when directStreamUri is null
+            val activeUri = directUri ?: silentUri
 
             if (isDirectAudioMode && req.isPlaying) {
                 requestAudioFocusForExternalWait()
@@ -929,16 +966,17 @@ class MusicPlaybackService : MediaSessionService() {
             mainHandler.post {
                 val currentSynced = pendingSync?.song ?: return@post
                 if (currentSynced.id != song.id) return@post
-                // Do not call replaceMediaItem while ExoPlayer is streaming a direct audio file,
-                // as replaceMediaItem on the active index can interrupt direct audio playback
-                if (isDirectAudioMode) return@post
                 val player = exoPlayerInstance ?: return@post
                 isInternalSync = true
                 try {
                     val enrichedMetadata = buildMediaMetadataForSong(song, bytes)
-                    val updatedItem = MediaItem.Builder()
+                    val currentItem = player.getMediaItemAt(1)
+                    val resolvedUri = currentItem.localConfiguration?.uri?.toString()
+                        ?.takeIf { it.isNotBlank() }
+                        ?: activeUri.ifBlank { silentUri }
+                    val updatedItem = currentItem.buildUpon()
                         .setMediaId(song.id)
-                        .setUri(activeUri.ifBlank { silentUri })
+                        .setUri(resolvedUri)
                         .setMediaMetadata(enrichedMetadata)
                         .build()
                     if (player.mediaItemCount >= 3) {

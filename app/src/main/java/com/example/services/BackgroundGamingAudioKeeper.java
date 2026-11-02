@@ -6,7 +6,6 @@ import android.media.AudioManager;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
-import android.net.NetworkRequest;
 import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Handler;
@@ -308,7 +307,11 @@ public final class BackgroundGamingAudioKeeper {
         try {
             Context appCtx = context.getApplicationContext();
             Intent serviceIntent = new Intent(appCtx, MusicPlaybackService.class);
-            appCtx.startService(serviceIntent);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                appCtx.startForegroundService(serviceIntent);
+            } else {
+                appCtx.startService(serviceIntent);
+            }
         } catch (Throwable t) {
             try {
                 Context appCtx = context.getApplicationContext();
