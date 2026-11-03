@@ -27,6 +27,7 @@ import androidx.media3.common.C
 import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
@@ -38,6 +39,7 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.DefaultMediaNotificationProvider
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
+import androidx.media3.session.MediaStyleNotificationHelper
 import com.example.MainActivity
 import com.example.R
 import com.example.models.Song
@@ -69,6 +71,11 @@ class MusicPlaybackService : MediaSessionService() {
     companion object {
         private const val NOTIFICATION_CHANNEL_ID = "aadify_playback_channel_v2"
         private const val NOTIFICATION_ID = 1001
+        const val ACTION_NOTIFICATION_PREV = "com.example.services.ACTION_NOTIFICATION_PREV"
+        const val ACTION_NOTIFICATION_PLAY_PAUSE = "com.example.services.ACTION_NOTIFICATION_PLAY_PAUSE"
+        const val ACTION_NOTIFICATION_NEXT = "com.example.services.ACTION_NOTIFICATION_NEXT"
+        const val ACTION_NOTIFICATION_STOP = "com.example.services.ACTION_NOTIFICATION_STOP"
+
         private val mainHandler = Handler(Looper.getMainLooper())
         private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         private val artworkHttpClient = OkHttpClient.Builder()
@@ -81,6 +88,9 @@ class MusicPlaybackService : MediaSessionService() {
 
         @Volatile
         private var instance: MusicPlaybackService? = null
+
+        @Volatile
+        private var isForegroundServiceStarted: Boolean = false
 
         @Volatile
         private var pendingSync: SyncRequest? = null
@@ -96,6 +106,9 @@ class MusicPlaybackService : MediaSessionService() {
 
         @Volatile
         var onExoPlayerTrackEndedCallback: (() -> Unit)? = null
+
+        @Volatile
+        var onExoPlayerStreamErrorCallback: (() -> Unit)? = null
 
         @Volatile
         var onKeepOnlineEngineAwakeCallback: (() -> Unit)? = null
@@ -173,6 +186,9 @@ class MusicPlaybackService : MediaSessionService() {
                 } else {
                     mainHandler.removeCallbacks(serviceKeepAliveRunnable)
                 }
+                if (!isForegroundServiceStarted) {
+                    BackgroundGamingAudioKeeper.ensureForegroundMediaServiceStarted(context)
+                }
                 val svc = instance
                 if (svc != null) {
                     svc.applySyncRequest(req)
@@ -225,6 +241,10 @@ class MusicPlaybackService : MediaSessionService() {
 
         fun isExoPlaying(): Boolean {
             return instance?.exoPlayerInstance?.isPlaying == true
+        }
+
+        fun isExoBuffering(): Boolean {
+            return instance?.exoPlayerInstance?.playbackState == Player.STATE_BUFFERING
         }
 
         /**
@@ -459,6 +479,13 @@ class MusicPlaybackService : MediaSessionService() {
                     }
                 }
             }
+
+            override fun onPlayerError(error: PlaybackException) {
+                if (isDirectAudioMode) {
+                    isDirectAudioMode = false
+                    onExoPlayerStreamErrorCallback?.invoke()
+                }
+            }
         })
 
         // Wrap ExoPlayer in a ForwardingPlayer that ALWAYS enables Next, Previous, Play/Pause, and Stop
@@ -650,6 +677,43 @@ class MusicPlaybackService : MediaSessionService() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
+        val action = intent?.action
+        when (action) {
+            ACTION_NOTIFICATION_PREV -> {
+                onSkipPreviousCallback?.invoke()
+                return START_STICKY
+            }
+            ACTION_NOTIFICATION_PLAY_PAUSE -> {
+                val nextPlay = !(pendingSync?.isPlaying ?: false)
+                isPausedByExternalMedia = false
+                cancelExternalMediaResumeWatch()
+                onTogglePlayPauseCallback?.invoke(nextPlay)
+                return START_STICKY
+            }
+            ACTION_NOTIFICATION_NEXT -> {
+                onSkipNextCallback?.invoke()
+                return START_STICKY
+            }
+            ACTION_NOTIFICATION_STOP -> {
+                isPausedByExternalMedia = false
+                cancelExternalMediaResumeWatch()
+                onTogglePlayPauseCallback?.invoke(false)
+                return START_STICKY
+            }
+        }
+        val activeSong = pendingSync?.song
+        val activePlaying = pendingSync?.isPlaying ?: true
+        val cachedBytes = activeSong?.highResBannerUrl?.takeIf { it.isNotBlank() }?.let { artworkBytesCache.get(it) }
+        postOrUpdateForegroundMediaNotification(activeSong, activePlaying, cachedBytes)
+        return START_STICKY
+    }
+
+    @OptIn(UnstableApi::class)
+    private fun postOrUpdateForegroundMediaNotification(
+        song: Song?,
+        isPlaying: Boolean,
+        artworkBytes: ByteArray? = null
+    ) {
         try {
             ensurePublicLockscreenNotificationChannel()
             val activityIntent = Intent(this, MainActivity::class.java).apply {
@@ -661,14 +725,86 @@ class MusicPlaybackService : MediaSessionService() {
                 activityIntent,
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
             )
-            val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+
+            val prevIntent = PendingIntent.getService(
+                this,
+                101,
+                Intent(this, MusicPlaybackService::class.java).setAction(ACTION_NOTIFICATION_PREV),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+            val playPauseIntent = PendingIntent.getService(
+                this,
+                102,
+                Intent(this, MusicPlaybackService::class.java).setAction(ACTION_NOTIFICATION_PLAY_PAUSE),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+            val nextIntent = PendingIntent.getService(
+                this,
+                103,
+                Intent(this, MusicPlaybackService::class.java).setAction(ACTION_NOTIFICATION_NEXT),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+
+            val artworkBitmap = try {
+                val bytes = artworkBytes ?: song?.highResBannerUrl?.takeIf { it.isNotBlank() }?.let { artworkBytesCache.get(it) }
+                if (bytes != null && bytes.isNotEmpty()) {
+                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                } else {
+                    BitmapFactory.decodeResource(resources, R.drawable.aadify_logo)
+                }
+            } catch (_: Exception) {
+                null
+            }
+
+            val builder = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_aadify_notification)
-                .setContentTitle(pendingSync?.song?.title ?: "AADIFY")
-                .setContentText(pendingSync?.song?.artist ?: "Playing")
+                .setContentTitle(song?.title?.ifBlank { "AADIFY" } ?: "AADIFY")
+                .setContentText(song?.artist?.ifBlank { "Playing" } ?: "Playing")
+                .setSubText("AADIFY Music")
                 .setContentIntent(contentPendingIntent)
-                .setOngoing(true)
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
+                .setOngoing(isPlaying)
+                .setOnlyAlertOnce(true)
+                .setShowWhen(false)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
-                .build()
+                .addAction(
+                    NotificationCompat.Action(
+                        android.R.drawable.ic_media_previous,
+                        "Previous",
+                        prevIntent
+                    )
+                )
+                .addAction(
+                    NotificationCompat.Action(
+                        if (isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play,
+                        if (isPlaying) "Pause" else "Play",
+                        playPauseIntent
+                    )
+                )
+                .addAction(
+                    NotificationCompat.Action(
+                        android.R.drawable.ic_media_next,
+                        "Next",
+                        nextIntent
+                    )
+                )
+
+            if (artworkBitmap != null) {
+                builder.setLargeIcon(artworkBitmap)
+            }
+
+            mediaSession?.let { session ->
+                try {
+                    builder.setStyle(
+                        MediaStyleNotificationHelper.MediaStyle(session)
+                            .setShowActionsInCompactView(0, 1, 2)
+                    )
+                } catch (_: Exception) {
+                }
+            }
+
+            val notification = builder.build()
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 startForeground(
                     NOTIFICATION_ID,
@@ -678,10 +814,12 @@ class MusicPlaybackService : MediaSessionService() {
             } else {
                 startForeground(NOTIFICATION_ID, notification)
             }
+            isForegroundServiceStarted = true
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            nm?.notify(NOTIFICATION_ID, notification)
         } catch (e: Exception) {
-            Log.e("MusicPlaybackService", "Failed to startForeground in onStartCommand", e)
+            Log.e("MusicPlaybackService", "Failed to startForeground in postOrUpdateForegroundMediaNotification", e)
         }
-        return START_STICKY
     }
 
     private fun registerSystemAudioPlaybackMonitor() {
@@ -942,6 +1080,7 @@ class MusicPlaybackService : MediaSessionService() {
                 } catch (_: Exception) {
                 }
             }
+            postOrUpdateForegroundMediaNotification(song, req.isPlaying, cachedArt)
 
             // If artwork bytes are not cached yet, download asynchronously and update MediaMetadata
             // so the Quick Settings Media Tile and Lock Screen display the album cover crisp & fast!
@@ -982,9 +1121,11 @@ class MusicPlaybackService : MediaSessionService() {
                     if (player.mediaItemCount >= 3) {
                         player.replaceMediaItem(1, updatedItem)
                     }
+                    val playingNow = pendingSync?.isPlaying == true
                     mediaSession?.let { session ->
-                        onUpdateNotification(session, pendingSync?.isPlaying == true)
+                        onUpdateNotification(session, playingNow)
                     }
+                    postOrUpdateForegroundMediaNotification(song, playingNow, bytes)
                 } catch (_: Exception) {
                 } finally {
                     isInternalSync = false
@@ -1064,6 +1205,9 @@ class MusicPlaybackService : MediaSessionService() {
                     } catch (_: Exception) {
                     }
                 }
+                val activeSong = pendingSync?.song
+                val cachedBytes = activeSong?.highResBannerUrl?.takeIf { it.isNotBlank() }?.let { artworkBytesCache.get(it) }
+                postOrUpdateForegroundMediaNotification(activeSong, shouldPlay, cachedBytes)
             }
         } catch (_: Exception) {
         } finally {
@@ -1108,6 +1252,7 @@ class MusicPlaybackService : MediaSessionService() {
         if (instance === this) {
             instance = null
         }
+        isForegroundServiceStarted = false
         mainHandler.removeCallbacks(externalMediaResumeWatcherRunnable)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             try {

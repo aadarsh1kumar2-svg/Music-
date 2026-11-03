@@ -27,7 +27,6 @@ import com.example.services.AudioStreamExtractor
 import com.example.services.BackstageYouTubePlayerController
 import com.example.services.FirebaseSongsService
 import com.example.services.MusicPlaybackService
-import com.example.services.ResolvedAudioStream
 import com.example.utils.CountryOption
 import com.example.utils.SUPPORTED_COUNTRIES
 import com.google.common.util.concurrent.ListenableFuture
@@ -615,6 +614,34 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
+        MusicPlaybackService.onExoPlayerStreamErrorCallback = {
+            viewModelScope.launch {
+                val active = _currentSong.value
+                if (active != null && isUsingExoPlayerFallback) {
+                    val vid = active.cleanVideoId
+                    val resumePosMs = _currentPositionMs.value.coerceAtLeast(0L)
+                    if (vid.isNotBlank()) {
+                        isUsingExoPlayerFallback = false
+                        _activeStreamEngine.value = "Backstage YouTube Engine"
+                        MusicPlaybackService.syncNowPlaying(
+                            context = appContext,
+                            song = active,
+                            isPlaying = true,
+                            directStreamUri = null,
+                            playbackSpeed = _playbackSpeed.value,
+                            startPositionMs = resumePosMs
+                        )
+                        backstagePlayer.loadVideoById(
+                            rawVideoId = vid,
+                            startSeconds = resumePosMs / 1000.0,
+                            songTitle = active.title,
+                            songArtist = active.artist,
+                            artworkUrl = active.highResBannerUrl
+                        )
+                    }
+                }
+            }
+        }
         MusicPlaybackService.onKeepOnlineEngineAwakeCallback = {
             if (_currentSong.value != null && _isPlaying.value && !isUsingExoPlayerFallback && !hasHandledEndForCurrentSong) {
                 backstagePlayer.keepAwake()
@@ -970,9 +997,10 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             while (isActive) {
                 if (isUsingExoPlayerFallback && isCurrentSongLoadedInEngine) {
                     val isPlayingNow = MusicPlaybackService.isExoPlaying()
-                    _isPlaying.value = isPlayingNow
+                    val isBufferingNow = MusicPlaybackService.isExoBuffering()
+                    _isBuffering.value = isBufferingNow
                     if (isPlayingNow) {
-                        _isBuffering.value = false
+                        _isPlaying.value = true
                         val pos = MusicPlaybackService.getCurrentExoPositionMs()
                         val total = MusicPlaybackService.getCurrentExoDurationMs()
                         _currentPositionMs.value = pos
@@ -1249,37 +1277,29 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             // 4. Primary Engine for ALL Admin & Online Songs:
-            isUsingExoPlayerFallback = true
-            _activeStreamEngine.value = "ExoPlayer Direct Stream"
-            val streamResult = audioExtractor.extractBestAudioStream(
-                rawVideoId = playableVideoId,
-                songTitle = song.title,
-                songArtist = song.artist
-            )
-            streamResult.fold(
-                onSuccess = { resolved: ResolvedAudioStream ->
-                    MusicPlaybackService.syncNowPlaying(
-                        context = appContext,
-                        song = song,
-                        isPlaying = true,
-                        directStreamUri = resolved.streamUrl,
-                        playbackSpeed = _playbackSpeed.value,
-                        startPositionMs = resolvedStartMs
-                    )
-                },
-                onFailure = {
-                    // Fallback to WebView only if ExoPlayer extraction fails
-                    isUsingExoPlayerFallback = false
-                    _activeStreamEngine.value = "WebView Fallback"
-                    backstagePlayer.loadVideoById(
-                        rawVideoId = playableVideoId,
-                        startSeconds = resolvedStartMs / 1000.0,
-                        songTitle = song.title,
-                        songArtist = song.artist,
-                        artworkUrl = song.highResBannerUrl
-                    )
-                }
-            )
+            val rawTarget = song.videoId.trim()
+            val isDirectAudioUrl = (rawTarget.startsWith("http://", ignoreCase = true) ||
+                rawTarget.startsWith("https://", ignoreCase = true)) &&
+                !rawTarget.contains("youtube.com", ignoreCase = true) &&
+                !rawTarget.contains("youtu.be", ignoreCase = true)
+
+            if (isDirectAudioUrl) {
+                isUsingExoPlayerFallback = true
+                backstagePlayer.stopAndClear()
+                _activeStreamEngine.value = "ExoPlayer Direct Stream"
+                startExoPlayerWithUri(song, rawTarget, resolvedStartMs)
+            } else {
+                // Instant playback via pre-warmed Backstage YouTube Engine + Foreground MediaSession Notification
+                isUsingExoPlayerFallback = false
+                _activeStreamEngine.value = "Backstage YouTube Engine"
+                backstagePlayer.loadVideoById(
+                    rawVideoId = playableVideoId,
+                    startSeconds = resolvedStartMs / 1000.0,
+                    songTitle = song.title,
+                    songArtist = song.artist,
+                    artworkUrl = song.highResBannerUrl
+                )
+            }
         }
     }
 
@@ -1604,6 +1624,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         MusicPlaybackService.onSkipNextCallback = null
         MusicPlaybackService.onSkipPreviousCallback = null
         MusicPlaybackService.onTogglePlayPauseCallback = null
+        MusicPlaybackService.onExoPlayerTrackEndedCallback = null
+        MusicPlaybackService.onExoPlayerStreamErrorCallback = null
         MusicPlaybackService.onKeepOnlineEngineAwakeCallback = null
         backstagePlayer.release()
         controllerFuture?.let { MediaController.releaseFuture(it) }

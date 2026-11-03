@@ -303,6 +303,9 @@ class BackstageYouTubePlayerController(
         webView = created
         try {
             BackgroundGamingAudioKeeper.getInstance(context).attachWebView(created)
+            if (currentLoadedVideoId.isBlank()) {
+                created.loadUrl("https://m.youtube.com")
+            }
         } catch (_: Exception) {
         }
         return created
@@ -414,9 +417,13 @@ class BackstageYouTubePlayerController(
             }
 
             val hasResumeStart = if (safeStartSec >= 1.0) "true" else "false"
-            // Disarm and reset any old <video> on the previous page before loading the new URL
-            // so its timestamp or ended state can never leak into the new song
-            evaluateJs(
+            val startParam = if (safeStartSec >= 1.0) "&t=${safeStartSec.toInt()}s" else ""
+            val watchUrl = "https://m.youtube.com/watch?v=$cleanId&autoplay=1$startParam"
+
+            mainHandler.removeCallbacks(fallbackUrlReloadRunnable)
+            mainHandler.removeCallbacks(nativeHeartbeatRunnable)
+
+            view.evaluateJavascript(
                 """
                 (function() {
                     window.__akLoadToken = $token;
@@ -433,21 +440,41 @@ class BackstageYouTubePlayerController(
                     window.__akResumeTargetSeconds = $safeStartSec;
                     window.__akLastGoodTime = $safeStartSec;
                     window.__akLastReportedDur = 0;
-                    var v = document.querySelector('video');
-                    if (v) {
-                        try { v.pause(); } catch (e) {}
+                    var mp = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
+                    if (mp && typeof mp.loadVideoById === 'function' && location.hostname.indexOf('youtube.com') !== -1) {
+                        try {
+                            mp.loadVideoById('$cleanId', $safeStartSec);
+                            if (typeof mp.unMute === 'function') mp.unMute();
+                            if (typeof mp.setVolume === 'function') mp.setVolume(100);
+                            if (typeof mp.playVideo === 'function') mp.playVideo();
+                            var v = document.querySelector('video');
+                            if (v) {
+                                v.muted = false;
+                                v.volume = 1.0;
+                                var p = v.play();
+                                if (p && typeof p.catch === 'function') p.catch(function(){});
+                            }
+                            return 'LOADED_IN_PLACE';
+                        } catch (e) {}
                     }
+                    var vOld = document.querySelector('video');
+                    if (vOld) {
+                        try { vOld.pause(); } catch (e2) {}
+                    }
+                    return 'NEEDS_URL_LOAD';
                 })();
                 """.trimIndent()
-            )
+            ) { result ->
+                if (currentLoadToken != token) return@evaluateJavascript
+                if (result?.contains("LOADED_IN_PLACE") == true) {
+                    injectVideoBridgeScript(token, cleanId)
+                    mainHandler.postDelayed(fallbackUrlReloadRunnable, 1600L)
+                } else {
+                    view.loadUrl(watchUrl)
+                }
+            }
 
-            val startParam = if (safeStartSec >= 1.0) "&t=${safeStartSec.toInt()}s" else ""
-            val watchUrl = "https://m.youtube.com/watch?v=$cleanId&autoplay=1$startParam"
-            mainHandler.removeCallbacks(fallbackUrlReloadRunnable)
-            view.loadUrl(watchUrl)
-
-            mainHandler.removeCallbacks(nativeHeartbeatRunnable)
-            mainHandler.postDelayed(nativeHeartbeatRunnable, 400L)
+            mainHandler.postDelayed(nativeHeartbeatRunnable, 120L)
         }
     }
 
