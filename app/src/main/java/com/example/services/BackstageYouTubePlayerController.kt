@@ -126,18 +126,9 @@ class BackstageYouTubePlayerController(
             .replace("\r", " ")
     }
 
-    private val fallbackUrlReloadRunnable = Runnable {
-        val targetId = currentLoadedVideoId
-        if (targetId.isBlank() || hasFiredEndedForCurrentTrack || hasSeenValidStartForCurrentToken || isUserPaused) {
-            return@Runnable
-        }
-        val safeStartSec = pendingResumeTargetSeconds.coerceAtLeast(lastKnownPositionSeconds).coerceAtLeast(0.0)
-        val startParam = if (safeStartSec >= 1.0) "&t=${safeStartSec.toInt()}s" else ""
-        val watchUrl = "https://m.youtube.com/watch?v=$targetId&autoplay=1$startParam"
-        try {
-            webView?.loadUrl(watchUrl)
-        } catch (_: Exception) {
-        }
+    private fun buildArtworkFallbackUrl(videoId: String): String {
+        val clean = Song.extractYoutubeVideoId(videoId)
+        return if (clean.isNotBlank()) "https://img.youtube.com/vi/$clean/hqdefault.jpg" else ""
     }
 
     /**
@@ -163,6 +154,7 @@ class BackstageYouTubePlayerController(
                 val safeTitle = escapeJsSingleQuoted(currentSongTitle)
                 val safeArtist = escapeJsSingleQuoted(currentSongArtist)
                 val safeArtwork = escapeJsSingleQuoted(currentSongArtworkUrl)
+                val safeFallbackArt = escapeJsSingleQuoted(buildArtworkFallbackUrl(targetId))
                 webView?.evaluateJavascript(
                     """
                     (function() {
@@ -172,6 +164,7 @@ class BackstageYouTubePlayerController(
                         window.__akSongTitle = '$safeTitle';
                         window.__akSongArtist = '$safeArtist';
                         window.__akSongArtwork = '$safeArtwork';
+                        window.__akSongFallbackArtwork = '$safeFallbackArt';
                         if (window.__akLoadToken !== $token || window.__akTargetVideoId !== '$targetId') {
                             window.__akLoadToken = $token;
                             window.__akTargetVideoId = '$targetId';
@@ -303,9 +296,6 @@ class BackstageYouTubePlayerController(
         webView = created
         try {
             BackgroundGamingAudioKeeper.getInstance(context).attachWebView(created)
-            if (currentLoadedVideoId.isBlank()) {
-                created.loadUrl("https://m.youtube.com")
-            }
         } catch (_: Exception) {
         }
         return created
@@ -343,7 +333,6 @@ class BackstageYouTubePlayerController(
         lastKnownPositionSeconds = 0.0
         pendingResumeTargetSeconds = 0.0
         mainHandler.removeCallbacks(nativeHeartbeatRunnable)
-        mainHandler.removeCallbacks(fallbackUrlReloadRunnable)
     }
 
     /**
@@ -404,6 +393,7 @@ class BackstageYouTubePlayerController(
         val safeTitle = escapeJsSingleQuoted(currentSongTitle)
         val safeArtist = escapeJsSingleQuoted(currentSongArtist)
         val safeArtwork = escapeJsSingleQuoted(currentSongArtworkUrl)
+        val safeFallbackArt = escapeJsSingleQuoted(buildArtworkFallbackUrl(cleanId))
 
         mainHandler.post {
             val view = getOrCreateWebView()
@@ -420,7 +410,6 @@ class BackstageYouTubePlayerController(
             val startParam = if (safeStartSec >= 1.0) "&t=${safeStartSec.toInt()}s" else ""
             val watchUrl = "https://m.youtube.com/watch?v=$cleanId&autoplay=1$startParam"
 
-            mainHandler.removeCallbacks(fallbackUrlReloadRunnable)
             mainHandler.removeCallbacks(nativeHeartbeatRunnable)
 
             view.evaluateJavascript(
@@ -433,6 +422,7 @@ class BackstageYouTubePlayerController(
                     window.__akSongTitle = '$safeTitle';
                     window.__akSongArtist = '$safeArtist';
                     window.__akSongArtwork = '$safeArtwork';
+                    window.__akSongFallbackArtwork = '$safeFallbackArt';
                     window.__akTrackEndedFired = false;
                     window.__akErrorFired = false;
                     window.__akHasSeenStartOfTrack = $hasResumeStart;
@@ -440,41 +430,21 @@ class BackstageYouTubePlayerController(
                     window.__akResumeTargetSeconds = $safeStartSec;
                     window.__akLastGoodTime = $safeStartSec;
                     window.__akLastReportedDur = 0;
-                    var mp = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
-                    if (mp && typeof mp.loadVideoById === 'function' && location.hostname.indexOf('youtube.com') !== -1) {
-                        try {
-                            mp.loadVideoById('$cleanId', $safeStartSec);
-                            if (typeof mp.unMute === 'function') mp.unMute();
-                            if (typeof mp.setVolume === 'function') mp.setVolume(100);
-                            if (typeof mp.playVideo === 'function') mp.playVideo();
-                            var v = document.querySelector('video');
-                            if (v) {
-                                v.muted = false;
-                                v.volume = 1.0;
-                                var p = v.play();
-                                if (p && typeof p.catch === 'function') p.catch(function(){});
-                            }
-                            return 'LOADED_IN_PLACE';
-                        } catch (e) {}
+                    window.__akLastMetaKey = '';
+                    if (typeof window.__akSyncMediaSession === 'function') {
+                        window.__akSyncMediaSession();
                     }
                     var vOld = document.querySelector('video');
                     if (vOld) {
                         try { vOld.pause(); } catch (e2) {}
                     }
-                    return 'NEEDS_URL_LOAD';
                 })();
-                """.trimIndent()
-            ) { result ->
-                if (currentLoadToken != token) return@evaluateJavascript
-                if (result?.contains("LOADED_IN_PLACE") == true) {
-                    injectVideoBridgeScript(token, cleanId)
-                    mainHandler.postDelayed(fallbackUrlReloadRunnable, 1600L)
-                } else {
-                    view.loadUrl(watchUrl)
-                }
-            }
+                """.trimIndent(),
+                null
+            )
 
-            mainHandler.postDelayed(nativeHeartbeatRunnable, 120L)
+            view.loadUrl(watchUrl)
+            mainHandler.postDelayed(nativeHeartbeatRunnable, 200L)
         }
     }
 
@@ -492,7 +462,6 @@ class BackstageYouTubePlayerController(
         lastKnownPositionSeconds = 0.0
         pendingResumeTargetSeconds = 0.0
         mainHandler.removeCallbacks(nativeHeartbeatRunnable)
-        mainHandler.removeCallbacks(fallbackUrlReloadRunnable)
         mainHandler.post {
             try {
                 evaluateJs(
@@ -747,6 +716,7 @@ class BackstageYouTubePlayerController(
         val safeTitle = escapeJsSingleQuoted(currentSongTitle)
         val safeArtist = escapeJsSingleQuoted(currentSongArtist)
         val safeArtwork = escapeJsSingleQuoted(currentSongArtworkUrl)
+        val safeFallbackArt = escapeJsSingleQuoted(buildArtworkFallbackUrl(targetId))
         val script = """
             (function() {
                 window.__akUserPaused = $pausedFlag;
@@ -755,6 +725,7 @@ class BackstageYouTubePlayerController(
                 window.__akSongTitle = '$safeTitle';
                 window.__akSongArtist = '$safeArtist';
                 window.__akSongArtwork = '$safeArtwork';
+                window.__akSongFallbackArtwork = '$safeFallbackArt';
                 if (window.__akLoadToken !== $token || window.__akTargetVideoId !== '$targetId') {
                     window.__akLoadToken = $token;
                     window.__akTargetVideoId = '$targetId';
@@ -766,6 +737,7 @@ class BackstageYouTubePlayerController(
                     window.__akResumeTargetSeconds = $resumeSec;
                     window.__akLastGoodTime = $resumeSec;
                     window.__akLastReportedDur = 0;
+                    window.__akLastMetaKey = '';
                 }
 
                 // Spoof Page Visibility API & Focus so background / typing / scrolling in other apps never pauses audio
@@ -782,50 +754,147 @@ class BackstageYouTubePlayerController(
                     window._lact = Date.now();
                 } catch (e) {}
 
-                window.__akSyncMediaSession = function() {
+                // Lock navigator.mediaSession so YouTube's base.js can NEVER overwrite our song metadata, banner, or action handlers!
+                try {
+                    if (navigator.mediaSession && !navigator.mediaSession.__akLocked) {
+                        var ms = navigator.mediaSession;
+                        ms.__akLocked = true;
+                        var proto = Object.getPrototypeOf(ms);
+                        var origSetHandler = (proto && proto.setActionHandler)
+                            ? proto.setActionHandler.bind(ms)
+                            : (ms.setActionHandler ? ms.setActionHandler.bind(ms) : null);
+                        ms.__akOrigSetActionHandler = origSetHandler;
+                        if (origSetHandler) {
+                            ms.setActionHandler = function(action, handler) {
+                                if (handler && handler.__akOwned) {
+                                    return origSetHandler(action, handler);
+                                }
+                            };
+                        }
+                        var metaDesc = (proto ? Object.getOwnPropertyDescriptor(proto, 'metadata') : null)
+                            || Object.getOwnPropertyDescriptor(ms, 'metadata');
+                        if (metaDesc && metaDesc.set && metaDesc.get) {
+                            ms.__akOrigSetMetadata = metaDesc.set.bind(ms);
+                            ms.__akOrigGetMetadata = metaDesc.get.bind(ms);
+                            Object.defineProperty(ms, 'metadata', {
+                                configurable: true,
+                                get: function() {
+                                    return ms.__akOrigGetMetadata();
+                                },
+                                set: function(val) {
+                                    if (val && val.__akOwnedMeta) {
+                                        ms.__akOrigSetMetadata(val);
+                                    }
+                                }
+                            });
+                        }
+                    }
+                } catch (e) {}
+
+                window.__akSyncMediaSession = function(vOpt) {
                     try {
                         if (!navigator.mediaSession) return;
+                        var ms = navigator.mediaSession;
                         var title = window.__akSongTitle || 'AADIFY Music';
                         var artist = window.__akSongArtist || 'AADIFY';
                         var art = window.__akSongArtwork || '';
+                        var fallbackArt = window.__akSongFallbackArtwork || art;
                         if (typeof MediaMetadata !== 'undefined') {
-                            var metaKey = title + '|' + artist + '|' + art;
-                            if (window.__akLastMetaKey !== metaKey || !navigator.mediaSession.metadata) {
+                            var metaKey = title + '|' + artist + '|' + art + '|' + fallbackArt;
+                            var curMeta = ms.metadata;
+                            if (window.__akLastMetaKey !== metaKey || !curMeta || curMeta.title !== title || curMeta.artist !== artist) {
                                 window.__akLastMetaKey = metaKey;
-                                navigator.mediaSession.metadata = new MediaMetadata({
+                                var artList = [];
+                                if (art) {
+                                    artList.push({ src: art, sizes: '512x512', type: 'image/jpeg' });
+                                    artList.push({ src: art, sizes: '256x256', type: 'image/jpeg' });
+                                }
+                                if (fallbackArt && fallbackArt !== art) {
+                                    artList.push({ src: fallbackArt, sizes: '480x360', type: 'image/jpeg' });
+                                }
+                                var newMeta = new MediaMetadata({
                                     title: title,
                                     artist: artist,
                                     album: 'AADIFY Music',
-                                    artwork: art ? [
-                                        { src: art, sizes: '96x96', type: 'image/jpeg' },
-                                        { src: art, sizes: '128x128', type: 'image/jpeg' },
-                                        { src: art, sizes: '192x192', type: 'image/jpeg' },
-                                        { src: art, sizes: '256x256', type: 'image/jpeg' },
-                                        { src: art, sizes: '384x384', type: 'image/jpeg' },
-                                        { src: art, sizes: '512x512', type: 'image/jpeg' }
-                                    ] : []
+                                    artwork: artList
                                 });
+                                newMeta.__akOwnedMeta = true;
+                                if (ms.__akOrigSetMetadata) {
+                                    ms.__akOrigSetMetadata(newMeta);
+                                } else {
+                                    ms.metadata = newMeta;
+                                }
                             }
                         }
-                        navigator.mediaSession.playbackState = (window.__akUserPaused || window.__akExternalPaused) ? 'paused' : 'playing';
-                        if (typeof navigator.mediaSession.setActionHandler === 'function') {
-                            navigator.mediaSession.setActionHandler('play', function() {
-                                if (window.AndroidBridge) window.AndroidBridge.onMediaAction('play');
-                            });
-                            navigator.mediaSession.setActionHandler('pause', function() {
-                                if (window.AndroidBridge) window.AndroidBridge.onMediaAction('pause');
-                            });
-                            navigator.mediaSession.setActionHandler('previoustrack', function() {
-                                if (window.AndroidBridge) window.AndroidBridge.onMediaAction('prev');
-                            });
-                            navigator.mediaSession.setActionHandler('nexttrack', function() {
-                                if (window.AndroidBridge) window.AndroidBridge.onMediaAction('next');
-                            });
-                            navigator.mediaSession.setActionHandler('seekto', function(details) {
-                                if (details && typeof details.seekTime === 'number' && window.AndroidBridge && window.AndroidBridge.onMediaSeekTo) {
-                                    window.AndroidBridge.onMediaSeekTo(details.seekTime);
+                        ms.playbackState = (window.__akUserPaused || window.__akExternalPaused) ? 'paused' : 'playing';
+
+                        var setHandlerFn = ms.__akOrigSetActionHandler || (ms.setActionHandler ? ms.setActionHandler.bind(ms) : null);
+                        if (setHandlerFn && !window.__akActionsRegistered) {
+                            window.__akActionsRegistered = true;
+                            var playFn = function() {
+                                window.__akUserPaused = false;
+                                window.__akExternalPaused = false;
+                                var v = document.querySelector('video');
+                                if (v && v.paused) {
+                                    try { v.play(); } catch (e) {}
                                 }
-                            });
+                                if (window.AndroidBridge) window.AndroidBridge.onMediaAction('play');
+                            };
+                            playFn.__akOwned = true;
+
+                            var pauseFn = function() {
+                                window.__akUserPaused = true;
+                                var v = document.querySelector('video');
+                                if (v && !v.paused) {
+                                    try { v.pause(); } catch (e) {}
+                                }
+                                if (window.AndroidBridge) window.AndroidBridge.onMediaAction('pause');
+                            };
+                            pauseFn.__akOwned = true;
+
+                            var prevFn = function() {
+                                if (window.AndroidBridge) window.AndroidBridge.onMediaAction('prev');
+                            };
+                            prevFn.__akOwned = true;
+
+                            var nextFn = function() {
+                                if (window.AndroidBridge) window.AndroidBridge.onMediaAction('next');
+                            };
+                            nextFn.__akOwned = true;
+
+                            var seekToFn = function(details) {
+                                if (details && typeof details.seekTime === 'number' && isFinite(details.seekTime)) {
+                                    var v = document.querySelector('video');
+                                    if (v) {
+                                        try { v.currentTime = details.seekTime; } catch (e) {}
+                                    }
+                                    if (window.AndroidBridge && window.AndroidBridge.onMediaSeekTo) {
+                                        window.AndroidBridge.onMediaSeekTo(details.seekTime);
+                                    }
+                                }
+                            };
+                            seekToFn.__akOwned = true;
+
+                            setHandlerFn('play', playFn);
+                            setHandlerFn('pause', pauseFn);
+                            setHandlerFn('previoustrack', prevFn);
+                            setHandlerFn('nexttrack', nextFn);
+                            setHandlerFn('seekto', seekToFn);
+                        }
+
+                        var v = vOpt || document.querySelector('video');
+                        if (v && typeof ms.setPositionState === 'function') {
+                            var domDur = (v.duration && isFinite(v.duration) && v.duration > 0) ? v.duration : (window.__akMaxDurationForTrack || 0);
+                            var curPos = (typeof v.currentTime === 'number' && isFinite(v.currentTime) && v.currentTime >= 0) ? v.currentTime : (window.__akLastGoodTime || 0);
+                            if (domDur > 0) {
+                                var clampedPos = Math.min(Math.max(0, curPos), domDur);
+                                var rate = (v.playbackRate && isFinite(v.playbackRate) && v.playbackRate > 0) ? v.playbackRate : (window.__akPlaybackRate || 1.0);
+                                ms.setPositionState({
+                                    duration: domDur,
+                                    playbackRate: rate,
+                                    position: clampedPos
+                                });
+                            }
                         }
                     } catch (e) {}
                 };
@@ -854,6 +923,8 @@ class BackstageYouTubePlayerController(
                 function isCurrentVideoMatchingTarget() {
                     var target = window.__akTargetVideoId || '';
                     if (!target) return false;
+                    var href = window.location.href || '';
+                    if (href.indexOf(target) !== -1) return true;
                     try {
                         var mp = getMoviePlayer();
                         if (mp && typeof mp.getVideoData === 'function') {
@@ -863,8 +934,7 @@ class BackstageYouTubePlayerController(
                             }
                         }
                     } catch (e) {}
-                    var href = window.location.href || '';
-                    return href.indexOf(target) !== -1;
+                    return false;
                 }
 
                 function isAdPlaying() {
@@ -891,11 +961,30 @@ class BackstageYouTubePlayerController(
                             if (d && isFinite(d) && d > 0) mpDur = d;
                         }
                     } catch (e) {}
-                    var best = Math.max(domDur, mpDur, window.__akMaxDurationForTrack || 0);
-                    if (best >= 25 && window.__akHasSeenStartOfTrack) {
+                    var best = (domDur >= 15) ? domDur : Math.max(domDur, mpDur, window.__akMaxDurationForTrack || 0);
+                    if (best >= 15 && window.__akHasSeenStartOfTrack) {
                         window.__akMaxDurationForTrack = best;
                     }
                     return best;
+                }
+
+                function hasReachedEndOfTrack(v) {
+                    if (!isCurrentVideoMatchingTarget() || isAdPlaying() || !window.__akHasSeenStartOfTrack) return false;
+                    if (v && v.ended) return true;
+                    try {
+                        var mp = getMoviePlayer();
+                        if (mp && typeof mp.getPlayerState === 'function' && mp.getPlayerState() === 0) {
+                            return true;
+                        }
+                    } catch (e) {}
+                    var totalDur = getTrueDuration(v);
+                    if (totalDur >= 15) {
+                        var cur = (v && typeof v.currentTime === 'number') ? v.currentTime : 0;
+                        var lastGood = window.__akLastGoodTime || 0;
+                        if (cur >= totalDur - 1.2) return true;
+                        if ((v && v.paused) && (cur >= totalDur - 2.5 || lastGood >= totalDur - 2.5)) return true;
+                    }
+                    return false;
                 }
 
                 function applyResumeSeekIfNeeded(v) {
@@ -959,8 +1048,7 @@ class BackstageYouTubePlayerController(
                 function tryPlayVideo(v) {
                     if (!v || window.__akUserPaused || window.__akExternalPaused || window.__akTrackEndedFired || !v.paused || v.ended) return;
                     if (!isCurrentVideoMatchingTarget()) return;
-                    var totalDur = getTrueDuration(v);
-                    if (window.__akHasSeenStartOfTrack && totalDur >= 25 && v.currentTime >= totalDur - 0.5) {
+                    if (hasReachedEndOfTrack(v)) {
                         notifyTrackEnded(v);
                         return;
                     }
@@ -1023,18 +1111,18 @@ class BackstageYouTubePlayerController(
                         }
                         if (!isCurrentVideoMatchingTarget()) return;
                         applyResumeSeekIfNeeded(v);
-                        if (!isAdPlaying() && v.currentTime >= 0.05 && (v.currentTime < 12.0 || (window.__akResumeTargetSeconds || 0) >= 1.0)) {
+                        var totalDur = getTrueDuration(v);
+                        if (!isAdPlaying() && v.currentTime >= 0.05 && (totalDur <= 0 || v.currentTime < totalDur - 2.0)) {
                             window.__akHasSeenStartOfTrack = true;
                         }
                         window.__akLastReportedState = 1;
                         if (typeof window.__akSyncMediaSession === 'function') {
-                            window.__akSyncMediaSession();
+                            window.__akSyncMediaSession(v);
                         }
                         if (window.AndroidBridge) {
                             window.AndroidBridge.onStateChange(1);
-                            var dur = getTrueDuration(v);
-                            if (dur > 0) {
-                                window.AndroidBridge.onDuration(dur);
+                            if (totalDur > 0) {
+                                window.AndroidBridge.onDuration(totalDur);
                             }
                         }
                     });
@@ -1048,7 +1136,7 @@ class BackstageYouTubePlayerController(
                         applyResumeSeekIfNeeded(v);
                         window.__akLastReportedState = 1;
                         if (typeof window.__akSyncMediaSession === 'function') {
-                            window.__akSyncMediaSession();
+                            window.__akSyncMediaSession(v);
                         }
                         if (window.AndroidBridge) {
                             window.AndroidBridge.onStateChange(1);
@@ -1057,16 +1145,14 @@ class BackstageYouTubePlayerController(
 
                     v.addEventListener('pause', function() {
                         if (!isCurrentVideoMatchingTarget()) return;
-                        var isAd = isAdPlaying();
-                        var totalDur = getTrueDuration(v);
-                        if (!isAd && window.__akHasSeenStartOfTrack && totalDur >= 25 && v.currentTime >= totalDur - 0.85) {
+                        if (hasReachedEndOfTrack(v)) {
                             notifyTrackEnded(v);
                             return;
                         }
                         if (window.__akUserPaused || window.__akExternalPaused) {
                             window.__akLastReportedState = 2;
                             if (typeof window.__akSyncMediaSession === 'function') {
-                                window.__akSyncMediaSession();
+                                window.__akSyncMediaSession(v);
                             }
                             if (window.AndroidBridge) {
                                 window.AndroidBridge.onStateChange(2);
@@ -1077,6 +1163,10 @@ class BackstageYouTubePlayerController(
                             for (var rIdx = 0; rIdx < resumeDelays.length; rIdx++) {
                                 (function(delayMs) {
                                     setTimeout(function() {
+                                        if (hasReachedEndOfTrack(v)) {
+                                            notifyTrackEnded(v);
+                                            return;
+                                        }
                                         if (!window.__akUserPaused && !window.__akExternalPaused && !window.__akTrackEndedFired && v.paused && !v.ended) {
                                             tryPlayVideo(v);
                                         }
@@ -1104,6 +1194,9 @@ class BackstageYouTubePlayerController(
                         if (dur > 0 && window.AndroidBridge) {
                             window.AndroidBridge.onDuration(dur);
                         }
+                        if (typeof window.__akSyncMediaSession === 'function') {
+                            window.__akSyncMediaSession(v);
+                        }
                     });
 
                     v.addEventListener('durationchange', function() {
@@ -1111,6 +1204,9 @@ class BackstageYouTubePlayerController(
                         var dur = getTrueDuration(v);
                         if (dur > 0 && window.AndroidBridge) {
                             window.AndroidBridge.onDuration(dur);
+                        }
+                        if (typeof window.__akSyncMediaSession === 'function') {
+                            window.__akSyncMediaSession(v);
                         }
                     });
 
@@ -1125,10 +1221,10 @@ class BackstageYouTubePlayerController(
 
                         applyResumeSeekIfNeeded(v);
 
+                        var totalDur = getTrueDuration(v);
                         if (!v.paused && !v.ended && v.currentTime >= 0.05) {
                             if (!window.__akHasSeenStartOfTrack) {
-                                // Only mark start of track once we see a fresh timestamp near the start (not a leftover timestamp from the previous track!)
-                                if (v.currentTime < 12.0 || (window.__akResumeTargetSeconds || 0) >= 1.0) {
+                                if (totalDur <= 0 || v.currentTime < totalDur - 2.0) {
                                     window.__akHasSeenStartOfTrack = true;
                                 }
                             }
@@ -1137,13 +1233,15 @@ class BackstageYouTubePlayerController(
                             }
                         }
 
-                        var totalDur = getTrueDuration(v);
-                        if (window.__akHasSeenStartOfTrack && totalDur >= 25 && v.currentTime >= totalDur - 0.5) {
+                        if (hasReachedEndOfTrack(v)) {
                             notifyTrackEnded(v);
                             return;
                         }
                         if (window.__akHasSeenStartOfTrack && v.currentTime >= 0) {
                             window.AndroidBridge.onProgress(v.currentTime);
+                            if (typeof window.__akSyncMediaSession === 'function') {
+                                window.__akSyncMediaSession(v);
+                            }
                             if (window.__akLastReportedState !== 1 && !v.paused) {
                                 window.__akLastReportedState = 1;
                                 window.AndroidBridge.onStateChange(1);
@@ -1166,11 +1264,11 @@ class BackstageYouTubePlayerController(
                     try {
                         window._lact = Date.now();
                         dismissContinueWatchingDialog();
+                        var v = document.querySelector('video');
                         if (typeof window.__akSyncMediaSession === 'function') {
-                            window.__akSyncMediaSession();
+                            window.__akSyncMediaSession(v);
                         }
 
-                        var v = document.querySelector('video');
                         if (!v) return;
                         hookVideoElement(v);
                         if (v.loop) { v.loop = false; }
@@ -1193,9 +1291,10 @@ class BackstageYouTubePlayerController(
 
                         applyResumeSeekIfNeeded(v);
 
+                        var totalDur = getTrueDuration(v);
                         if (!v.paused && !v.ended && v.currentTime >= 0.05) {
                             if (!window.__akHasSeenStartOfTrack) {
-                                if (v.currentTime < 12.0 || (window.__akResumeTargetSeconds || 0) >= 1.0) {
+                                if (totalDur <= 0 || v.currentTime < totalDur - 2.0) {
                                     window.__akHasSeenStartOfTrack = true;
                                 }
                             }
@@ -1204,19 +1303,9 @@ class BackstageYouTubePlayerController(
                             }
                         }
 
-                        var totalDur = getTrueDuration(v);
-                        if (!window.__akTrackEndedFired && window.__akHasSeenStartOfTrack) {
-                            var mpState = -1;
-                            try {
-                                var mp = getMoviePlayer();
-                                if (mp && typeof mp.getPlayerState === 'function') {
-                                    mpState = mp.getPlayerState();
-                                }
-                            } catch (e) {}
-                            if (v.ended || mpState === 0 || (totalDur >= 25 && v.currentTime >= totalDur - 0.5)) {
-                                notifyTrackEnded(v);
-                                return;
-                            }
+                        if (!window.__akTrackEndedFired && hasReachedEndOfTrack(v)) {
+                            notifyTrackEnded(v);
+                            return;
                         }
 
                         if (v.muted) {
@@ -1263,7 +1352,6 @@ class BackstageYouTubePlayerController(
 
     fun release() {
         mainHandler.removeCallbacks(nativeHeartbeatRunnable)
-        mainHandler.removeCallbacks(fallbackUrlReloadRunnable)
         mainHandler.post {
             try {
                 webView?.apply {
@@ -1311,7 +1399,6 @@ class BackstageYouTubePlayerController(
             val posMs = (currentTimeSeconds * 1000.0).toLong()
             if (posMs >= 100L) {
                 hasSeenValidStartForCurrentToken = true
-                mainHandler.removeCallbacks(fallbackUrlReloadRunnable)
             }
             mainHandler.post {
                 if (tokenSnapshot == currentLoadToken && !hasFiredEndedForCurrentTrack && currentLoadedVideoId.isNotBlank()) {
@@ -1341,7 +1428,7 @@ class BackstageYouTubePlayerController(
                 }
                 if (state == STATE_ENDED) {
                     val elapsedSinceLoad = SystemClock.elapsedRealtime() - lastLoadTimestampMs
-                    if (!hasSeenValidStartForCurrentToken || elapsedSinceLoad < 4_000L) {
+                    if (!hasSeenValidStartForCurrentToken || elapsedSinceLoad < 1_500L) {
                         return@post
                     }
                     if (hasFiredEndedForCurrentTrack) return@post
@@ -1349,14 +1436,12 @@ class BackstageYouTubePlayerController(
                     lastKnownPositionSeconds = 0.0
                     pendingResumeTargetSeconds = 0.0
                     mainHandler.removeCallbacks(nativeHeartbeatRunnable)
-                    mainHandler.removeCallbacks(fallbackUrlReloadRunnable)
                     onStateChangeUpdate(STATE_ENDED)
                     return@post
                 }
                 if (hasFiredEndedForCurrentTrack) return@post
                 if (state == STATE_PLAYING) {
                     hasSeenValidStartForCurrentToken = true
-                    mainHandler.removeCallbacks(fallbackUrlReloadRunnable)
                     if (isUserPaused) {
                         pauseVideo()
                         return@post

@@ -42,7 +42,7 @@ data class Song(
         get() = if (bannerUrl.isNotBlank()) {
             bannerUrl
         } else if (cleanVideoId.isNotBlank()) {
-            "https://img.youtube.com/vi/$cleanVideoId/maxresdefault.jpg"
+            "https://img.youtube.com/vi/$cleanVideoId/hqdefault.jpg"
         } else {
             ""
         }

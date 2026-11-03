@@ -308,10 +308,18 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         onProgressUpdate = { posMs ->
             if (!isUsingExoPlayerFallback && !hasHandledEndForCurrentSong) {
                 _currentPositionMs.value = posMs
+                val totalDur = _durationMs.value
+                MusicPlaybackService.syncOnlineProgressAndDuration(posMs, totalDur)
                 val bucket = posMs / 2000L
                 if (bucket != lastPersistedPosBucket) {
                     lastPersistedPosBucket = bucket
                     prefs.edit().putLong("last_position_ms", posMs).apply()
+                }
+                if (totalDur >= 15_000L && posMs >= totalDur - 1_000L) {
+                    hasHandledEndForCurrentSong = true
+                    _isBuffering.value = false
+                    _isPlaying.value = false
+                    handleTrackEnded()
                 }
             }
         },
@@ -321,6 +329,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     _durationMs.value = durMs
                     prefs.edit().putLong("last_duration_ms", durMs).apply()
                 }
+                MusicPlaybackService.syncOnlineProgressAndDuration(_currentPositionMs.value, durMs)
             }
         },
         onStateChangeUpdate = { state ->
@@ -590,18 +599,26 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     } else {
                         prefs.edit().putLong("last_position_ms", _currentPositionMs.value).apply()
                     }
+                    MusicPlaybackService.syncPlayState(shouldPlay)
                 } else {
                     if (shouldPlay) {
                         backstagePlayer.playVideo()
                         _isPlaying.value = true
                         _isBuffering.value = false
+                        MusicPlaybackService.syncPlayState(true)
                     } else {
                         prefs.edit().putLong("last_position_ms", _currentPositionMs.value).apply()
                         backstagePlayer.pauseVideo()
                         _isPlaying.value = false
                         _isBuffering.value = false
+                        MusicPlaybackService.syncPlayState(false)
                     }
                 }
+            }
+        }
+        MusicPlaybackService.onSeekToCallback = { targetPosMs ->
+            viewModelScope.launch {
+                seekToPosition(targetPosMs)
             }
         }
         MusicPlaybackService.onExoPlayerTrackEndedCallback = {
@@ -1361,6 +1378,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         } else {
             val targetSeconds = clampedMs / 1000.0
             backstagePlayer.seekToSeconds(targetSeconds)
+            MusicPlaybackService.syncOnlineProgressAndDuration(clampedMs, _durationMs.value)
         }
     }
 
@@ -1624,6 +1642,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         MusicPlaybackService.onSkipNextCallback = null
         MusicPlaybackService.onSkipPreviousCallback = null
         MusicPlaybackService.onTogglePlayPauseCallback = null
+        MusicPlaybackService.onSeekToCallback = null
         MusicPlaybackService.onExoPlayerTrackEndedCallback = null
         MusicPlaybackService.onExoPlayerStreamErrorCallback = null
         MusicPlaybackService.onKeepOnlineEngineAwakeCallback = null
