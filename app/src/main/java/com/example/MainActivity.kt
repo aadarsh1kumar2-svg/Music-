@@ -116,6 +116,7 @@ import com.example.screens.NameOnboardingScreen
 import com.example.screens.SplashScreen
 import com.example.screens.TopChartsScreen
 import com.example.services.AdMobAppOpenManager
+import com.example.services.UnityAdsManager
 import com.example.ui.theme.DeepCharcoal
 import com.example.ui.theme.DividerDark
 import com.example.ui.theme.MutedGray
@@ -145,6 +146,7 @@ private enum class LaunchStage {
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        UnityAdsManager.initializeAndPreload(this)
         AdMobAppOpenManager.initializeAndPreload(this)
         enableEdgeToEdge()
         setContent {
@@ -261,8 +263,11 @@ fun AKMusicAppRoot(
 
     LaunchedEffect(launchStage) {
         if (launchStage == LaunchStage.LOADING) {
+            UnityAdsManager.initializeAndPreload(context)
             delay(1800L)
-            launchStage = LaunchStage.DEVELOPER_INTRO
+            UnityAdsManager.showStartupInterstitialAd(context as? Activity) {
+                launchStage = LaunchStage.DEVELOPER_INTRO
+            }
         }
     }
 
@@ -343,7 +348,11 @@ fun AKMusicAppRoot(
                     onContinue = {
                         if (!isOpeningAd) {
                             isOpeningAd = true
-                            AdMobAppOpenManager.showAdOnAppOpen(context as? Activity) {
+                            if (!UnityAdsManager.hasShownStartupAd()) {
+                                UnityAdsManager.showStartupInterstitialAd(context as? Activity) {
+                                    launchStage = LaunchStage.MAIN_APP
+                                }
+                            } else {
                                 launchStage = LaunchStage.MAIN_APP
                             }
                         }
