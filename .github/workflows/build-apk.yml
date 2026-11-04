@@ -2,8 +2,6 @@ name: Build and Release Debug APK
 
 on:
   push:
-    branches:
-      - main
   workflow_dispatch:
 
 permissions:
@@ -42,6 +40,14 @@ jobs:
           if [ "$MAJOR_VERSION" -lt 17 ]; then
             echo "::error::Active Java major version ($MAJOR_VERSION) is lower than required Java 17."
             exit 1
+          fi
+
+      - name: Set up Android SDK licenses and .env fallback
+        run: |
+          touch .env
+          touch .env.example
+          if [ -n "${ANDROID_HOME:-}" ] && [ -x "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" ]; then
+            yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null 2>&1 || true
           fi
 
       - name: Set up Gradle 9.3.1
