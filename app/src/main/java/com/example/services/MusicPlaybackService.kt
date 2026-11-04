@@ -30,12 +30,14 @@ import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
+import androidx.media3.common.Timeline
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.ResolvingDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.source.ForwardingTimeline
 import androidx.media3.session.DefaultMediaNotificationProvider
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
@@ -135,7 +137,7 @@ class MusicPlaybackService : MediaSessionService() {
                 if (pendingSync?.isPlaying == true && !isPausedByExternalMedia) {
                     isKeepAliveScheduled = true
                     onKeepOnlineEngineAwakeCallback?.invoke()
-                    mainHandler.postDelayed(this, 500L)
+                    mainHandler.postDelayed(this, 1500L)
                 } else {
                     isKeepAliveScheduled = false
                 }
@@ -185,7 +187,7 @@ class MusicPlaybackService : MediaSessionService() {
             mainHandler.post {
                 if (isPlaying) {
                     mainHandler.removeCallbacks(serviceKeepAliveRunnable)
-                    mainHandler.postDelayed(serviceKeepAliveRunnable, 500L)
+                    mainHandler.postDelayed(serviceKeepAliveRunnable, 1200L)
                 } else {
                     mainHandler.removeCallbacks(serviceKeepAliveRunnable)
                 }
@@ -211,7 +213,7 @@ class MusicPlaybackService : MediaSessionService() {
                     if (!isKeepAliveScheduled) {
                         isKeepAliveScheduled = true
                         mainHandler.removeCallbacks(serviceKeepAliveRunnable)
-                        mainHandler.postDelayed(serviceKeepAliveRunnable, 500L)
+                        mainHandler.postDelayed(serviceKeepAliveRunnable, 1200L)
                     }
                 } else {
                     isKeepAliveScheduled = false
@@ -257,43 +259,49 @@ class MusicPlaybackService : MediaSessionService() {
         }
 
         /**
-         * Generates a 60-second standard 16-bit signed PCM silent WAV file used by MusicPlaybackService
+         * Generates a 600-second (10-minute) standard 16-bit signed PCM silent WAV file used by MusicPlaybackService
          * to keep the Foreground MediaSession, WakeLock, WifiLock, Quick Settings Media Tile, Lock Screen,
          * and Notification Bar media controls active while BackstageYouTubePlayerController streams online audio.
          */
         fun getOrCreateSilentWavUri(context: Context): String {
-            val file = File(context.cacheDir, "aadify_keepalive_16bit_60s.wav")
-            if (file.exists() && file.length() > 100_000L) {
+            val file = File(context.cacheDir, "aadify_keepalive_16bit_600s_v2.wav")
+            if (file.exists() && file.length() > 4_000_000L) {
                 return Uri.fromFile(file).toString()
             }
             try {
-                val sampleRate = 8000
-                val durationSeconds = 60
+                val sampleRate = 4000
+                val durationSeconds = 600
                 val numSamples = sampleRate * durationSeconds
                 val bytesPerSample = 2 // 16-bit signed PCM (0x0000 = pure silence)
                 val dataSize = numSamples * bytesPerSample
-                val buffer = ByteBuffer.allocate(44 + dataSize).order(ByteOrder.LITTLE_ENDIAN)
+                val header = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN)
 
                 // RIFF header
-                buffer.put("RIFF".toByteArray(Charsets.US_ASCII))
-                buffer.putInt(36 + dataSize)
-                buffer.put("WAVE".toByteArray(Charsets.US_ASCII))
+                header.put("RIFF".toByteArray(Charsets.US_ASCII))
+                header.putInt(36 + dataSize)
+                header.put("WAVE".toByteArray(Charsets.US_ASCII))
                 // fmt subchunk
-                buffer.put("fmt ".toByteArray(Charsets.US_ASCII))
-                buffer.putInt(16) // PCM
-                buffer.putShort(1.toShort()) // AudioFormat = 1 (PCM)
-                buffer.putShort(1.toShort()) // NumChannels = 1 (Mono)
-                buffer.putInt(sampleRate)
-                buffer.putInt(sampleRate * bytesPerSample) // ByteRate
-                buffer.putShort(bytesPerSample.toShort()) // BlockAlign
-                buffer.putShort(16.toShort()) // BitsPerSample = 16
+                header.put("fmt ".toByteArray(Charsets.US_ASCII))
+                header.putInt(16) // PCM
+                header.putShort(1.toShort()) // AudioFormat = 1 (PCM)
+                header.putShort(1.toShort()) // NumChannels = 1 (Mono)
+                header.putInt(sampleRate)
+                header.putInt(sampleRate * bytesPerSample) // ByteRate
+                header.putShort(bytesPerSample.toShort()) // BlockAlign
+                header.putShort(16.toShort()) // BitsPerSample = 16
                 // data subchunk (all zero bytes = 16-bit signed silence)
-                buffer.put("data".toByteArray(Charsets.US_ASCII))
-                buffer.putInt(dataSize)
-                buffer.position(44 + dataSize)
+                header.put("data".toByteArray(Charsets.US_ASCII))
+                header.putInt(dataSize)
 
                 FileOutputStream(file).use { out ->
-                    out.write(buffer.array())
+                    out.write(header.array())
+                    val chunk = ByteArray(64 * 1024)
+                    var remaining = dataSize
+                    while (remaining > 0) {
+                        val toWrite = minOf(remaining, chunk.size)
+                        out.write(chunk, 0, toWrite)
+                        remaining -= toWrite
+                    }
                 }
             } catch (_: Exception) {
             }
@@ -303,6 +311,7 @@ class MusicPlaybackService : MediaSessionService() {
 
     private var mediaSession: MediaSession? = null
     private var exoPlayerInstance: ExoPlayer? = null
+    private var currentActiveMetadata: MediaMetadata = MediaMetadata.EMPTY
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
     private var audioManager: AudioManager? = null
@@ -511,15 +520,10 @@ class MusicPlaybackService : MediaSessionService() {
                     .add(Player.COMMAND_SEEK_TO_PREVIOUS)
                     .add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
                     .add(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)
+                    .add(Player.COMMAND_GET_CURRENT_MEDIA_ITEM)
+                    .add(Player.COMMAND_GET_TIMELINE)
+                    .add(Player.COMMAND_GET_METADATA)
                     .build()
-            }
-
-            override fun addListener(listener: Player.Listener) {
-                super.addListener(object : Player.Listener by listener {
-                    override fun onAvailableCommandsChanged(availableCommands: Player.Commands) {
-                        listener.onAvailableCommandsChanged(buildAllCommands(availableCommands))
-                    }
-                })
             }
 
             override fun getAvailableCommands(): Player.Commands {
@@ -534,7 +538,10 @@ class MusicPlaybackService : MediaSessionService() {
                     Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM,
                     Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM,
                     Player.COMMAND_PLAY_PAUSE,
-                    Player.COMMAND_STOP -> true
+                    Player.COMMAND_STOP,
+                    Player.COMMAND_GET_CURRENT_MEDIA_ITEM,
+                    Player.COMMAND_GET_TIMELINE,
+                    Player.COMMAND_GET_METADATA -> true
                     else -> super.isCommandAvailable(command)
                 }
             }
@@ -544,6 +551,48 @@ class MusicPlaybackService : MediaSessionService() {
             override fun hasPreviousMediaItem(): Boolean = true
 
             override fun getMaxSeekToPreviousPosition(): Long = Long.MAX_VALUE
+
+            override fun getMediaMetadata(): MediaMetadata {
+                if (currentActiveMetadata != MediaMetadata.EMPTY) {
+                    return currentActiveMetadata
+                }
+                return super.getMediaMetadata()
+            }
+
+            override fun getCurrentTimeline(): Timeline {
+                val baseTimeline = super.getCurrentTimeline()
+                if (!isDirectAudioMode && syncedOnlineDurationMs > 0L && !baseTimeline.isEmpty) {
+                    val onlineDurUs = syncedOnlineDurationMs * 1000L
+                    return object : ForwardingTimeline(baseTimeline) {
+                        override fun getWindow(
+                            windowIndex: Int,
+                            window: Window,
+                            defaultPositionProjectionUs: Long
+                        ): Window {
+                            super.getWindow(windowIndex, window, defaultPositionProjectionUs)
+                            if (windowIndex == 1) {
+                                window.durationUs = onlineDurUs
+                                window.isSeekable = true
+                                window.isDynamic = false
+                            }
+                            return window
+                        }
+
+                        override fun getPeriod(
+                            periodIndex: Int,
+                            period: Period,
+                            setIds: Boolean
+                        ): Period {
+                            super.getPeriod(periodIndex, period, setIds)
+                            if (periodIndex == 1) {
+                                period.durationUs = onlineDurUs
+                            }
+                            return period
+                        }
+                    }
+                }
+                return baseTimeline
+            }
 
             override fun getDuration(): Long {
                 if (!isDirectAudioMode && syncedOnlineDurationMs > 0L) {
@@ -830,7 +879,7 @@ class MusicPlaybackService : MediaSessionService() {
                 .setContentIntent(contentPendingIntent)
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                 .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
-                .setOngoing(isPlaying)
+                .setOngoing(true)
                 .setOnlyAlertOnce(true)
                 .setShowWhen(false)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
@@ -1084,25 +1133,30 @@ class MusicPlaybackService : MediaSessionService() {
 
     private fun updateOnlineProgressAndDurationInternal(positionMs: Long, durationMs: Long) {
         if (isDirectAudioMode) return
+        val player = exoPlayerInstance ?: return
+        var shouldTriggerPositionDiscontinuity = false
         if (positionMs >= 0L) {
+            val drift = kotlin.math.abs(player.currentPosition - positionMs)
             syncedOnlinePositionMs = positionMs
+            if (drift > 2200L) {
+                shouldTriggerPositionDiscontinuity = true
+            }
         }
-        if (durationMs > 0L && Math.abs(syncedOnlineDurationMs - durationMs) > 500L) {
+        if (durationMs > 0L && kotlin.math.abs(syncedOnlineDurationMs - durationMs) > 500L) {
             syncedOnlineDurationMs = durationMs
-            val activeSong = pendingSync?.song ?: return
-            val player = exoPlayerInstance ?: return
-            val bannerUrl = activeSong.highResBannerUrl
-            val cachedArt = if (bannerUrl.isNotBlank()) artworkBytesCache.get(bannerUrl) else null
-            val enrichedMetadata = buildMediaMetadataForSong(activeSong, cachedArt, durationMs)
+            val activeSong = pendingSync?.song
+            if (activeSong != null) {
+                val bannerUrl = activeSong.highResBannerUrl
+                val cachedArt = if (bannerUrl.isNotBlank()) artworkBytesCache.get(bannerUrl) else null
+                currentActiveMetadata = buildMediaMetadataForSong(activeSong, cachedArt, durationMs)
+            }
+            shouldTriggerPositionDiscontinuity = true
+        }
+        if (shouldTriggerPositionDiscontinuity && player.mediaItemCount >= 3) {
             isInternalSync = true
             try {
-                if (player.mediaItemCount >= 3) {
-                    val currentItem = player.getMediaItemAt(1)
-                    val updatedItem = currentItem.buildUpon()
-                        .setMediaMetadata(enrichedMetadata)
-                        .build()
-                    player.replaceMediaItem(1, updatedItem)
-                }
+                val targetSeekMs = syncedOnlinePositionMs.coerceIn(0L, 590_000L)
+                player.seekTo(1, targetSeekMs)
             } catch (_: Exception) {
             } finally {
                 isInternalSync = false
@@ -1133,6 +1187,7 @@ class MusicPlaybackService : MediaSessionService() {
             val bannerUrl = song.highResBannerUrl
             val cachedArt = if (bannerUrl.isNotBlank()) artworkBytesCache.get(bannerUrl) else null
             val metadata = buildMediaMetadataForSong(song, cachedArt, syncedOnlineDurationMs)
+            currentActiveMetadata = metadata
 
             // Build a 3-item queue [prevSentinel, activeItem, nextSentinel] starting at index 1
             // so ExoPlayer natively reports hasPreviousMediaItem() = true and hasNextMediaItem() = true!
@@ -1159,7 +1214,7 @@ class MusicPlaybackService : MediaSessionService() {
             player.volume = 1.0f
             player.repeatMode = if (isDirectAudioMode) Player.REPEAT_MODE_OFF else Player.REPEAT_MODE_ONE
             player.playbackParameters = PlaybackParameters(req.playbackSpeed)
-            val startPos = if (isDirectAudioMode) req.startPositionMs.coerceAtLeast(0L) else 0L
+            val startPos = req.startPositionMs.coerceAtLeast(0L)
             player.setMediaItems(listOf(prevItem, currentItem, nextItem), /* startIndex = */ 1, /* startPositionMs = */ startPos)
             player.prepare()
             if (req.isPlaying) {
@@ -1220,18 +1275,10 @@ class MusicPlaybackService : MediaSessionService() {
                 isInternalSync = true
                 try {
                     val enrichedMetadata = buildMediaMetadataForSong(song, bytes, syncedOnlineDurationMs)
-                    val currentItem = player.getMediaItemAt(1)
-                    val resolvedUri = currentItem.localConfiguration?.uri?.toString()
-                        ?.takeIf { it.isNotBlank() }
-                        ?: activeUri.ifBlank { silentUri }
+                    currentActiveMetadata = enrichedMetadata
                     val updatedPrev = MediaItem.Builder()
                         .setMediaId("${song.id}_prev")
                         .setUri(silentUri)
-                        .setMediaMetadata(enrichedMetadata)
-                        .build()
-                    val updatedCurrent = currentItem.buildUpon()
-                        .setMediaId(song.id)
-                        .setUri(resolvedUri)
                         .setMediaMetadata(enrichedMetadata)
                         .build()
                     val updatedNext = MediaItem.Builder()
@@ -1240,8 +1287,8 @@ class MusicPlaybackService : MediaSessionService() {
                         .setMediaMetadata(enrichedMetadata)
                         .build()
                     if (player.mediaItemCount >= 3) {
+                        // Replace only items 0 and 2 (never item 1 while playing) so ExoPlayer never enters STATE_BUFFERING (...)!
                         player.replaceMediaItem(0, updatedPrev)
-                        player.replaceMediaItem(1, updatedCurrent)
                         player.replaceMediaItem(2, updatedNext)
                     }
                     val playingNow = pendingSync?.isPlaying == true

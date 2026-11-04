@@ -73,7 +73,7 @@ public final class BackgroundGamingAudioKeeper {
                 Log.w(TAG, "Urgent pulse warning: " + t.getMessage());
             }
             if (isKeeperActive) {
-                urgentAudioHandler.postDelayed(this, 300L);
+                urgentAudioHandler.postDelayed(this, 1500L);
             }
         }
     };
@@ -89,27 +89,6 @@ public final class BackgroundGamingAudioKeeper {
                 if (wv != null) {
                     wv.onResume();
                     wv.resumeTimers();
-                    wv.evaluateJavascript(
-                        "(function() {" +
-                        "  try {" +
-                        "    window._lact = Date.now();" +
-                        "    if (!window.__akUserPaused && !window.__akExternalPaused && !window.__akTrackEndedFired) {" +
-                        "      var v = document.querySelector('video');" +
-                        "      if (v) {" +
-                        "        v.muted = false;" +
-                        "        v.volume = 1.0;" +
-                        "        if (v.paused && !v.ended) {" +
-                        "          var mp = document.getElementById('movie_player') || document.querySelector('.html5-video-player');" +
-                        "          if (mp && typeof mp.playVideo === 'function') { try { mp.playVideo(); } catch(e1){} }" +
-                        "          var p = v.play();" +
-                        "          if (p && typeof p.catch === 'function') { p.catch(function(){}); }" +
-                        "        }" +
-                        "      }" +
-                        "    }" +
-                        "  } catch(e) {}" +
-                        "})();",
-                        null
-                    );
                 }
                 Runnable action = keepAliveAction;
                 if (action != null) {

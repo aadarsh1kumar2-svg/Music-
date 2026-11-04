@@ -190,10 +190,12 @@ class BackstageYouTubePlayerController(
             } catch (_: Exception) {
             }
             if (currentLoadedVideoId.isNotBlank() && !hasFiredEndedForCurrentTrack) {
-                mainHandler.postDelayed(this, 500L)
+                mainHandler.postDelayed(this, 1200L)
             }
         }
     }
+
+    private var fallbackUrlReloadRunnable: Runnable? = null
 
     @SuppressLint("SetJavaScriptEnabled")
     fun getOrCreateWebView(): BackstageAudioWebView {
@@ -332,6 +334,8 @@ class BackstageYouTubePlayerController(
         hasSeenValidStartForCurrentToken = false
         lastKnownPositionSeconds = 0.0
         pendingResumeTargetSeconds = 0.0
+        fallbackUrlReloadRunnable?.let { mainHandler.removeCallbacks(it) }
+        fallbackUrlReloadRunnable = null
         mainHandler.removeCallbacks(nativeHeartbeatRunnable)
     }
 
@@ -410,41 +414,105 @@ class BackstageYouTubePlayerController(
             val startParam = if (safeStartSec >= 1.0) "&t=${safeStartSec.toInt()}s" else ""
             val watchUrl = "https://m.youtube.com/watch?v=$cleanId&autoplay=1$startParam"
 
+            fallbackUrlReloadRunnable?.let { mainHandler.removeCallbacks(it) }
+            fallbackUrlReloadRunnable = null
             mainHandler.removeCallbacks(nativeHeartbeatRunnable)
 
-            view.evaluateJavascript(
-                """
-                (function() {
-                    window.__akLoadToken = $token;
-                    window.__akTargetVideoId = '$cleanId';
-                    window.__akUserPaused = false;
-                    window.__akExternalPaused = false;
-                    window.__akSongTitle = '$safeTitle';
-                    window.__akSongArtist = '$safeArtist';
-                    window.__akSongArtwork = '$safeArtwork';
-                    window.__akSongFallbackArtwork = '$safeFallbackArt';
-                    window.__akTrackEndedFired = false;
-                    window.__akErrorFired = false;
-                    window.__akHasSeenStartOfTrack = $hasResumeStart;
-                    window.__akMaxDurationForTrack = 0;
-                    window.__akResumeTargetSeconds = $safeStartSec;
-                    window.__akLastGoodTime = $safeStartSec;
-                    window.__akLastReportedDur = 0;
-                    window.__akLastMetaKey = '';
-                    if (typeof window.__akSyncMediaSession === 'function') {
-                        window.__akSyncMediaSession();
-                    }
-                    var vOld = document.querySelector('video');
-                    if (vOld) {
-                        try { vOld.pause(); } catch (e2) {}
-                    }
-                })();
-                """.trimIndent(),
-                null
-            )
+            val currentWebUrl = view.url.orEmpty()
+            val canAttemptInPlace = currentWebUrl.contains("youtube.com")
 
-            view.loadUrl(watchUrl)
-            mainHandler.postDelayed(nativeHeartbeatRunnable, 200L)
+            if (canAttemptInPlace) {
+                view.evaluateJavascript(
+                    """
+                    (function() {
+                        window.__akLoadToken = $token;
+                        window.__akTargetVideoId = '$cleanId';
+                        window.__akLoadedInPlaceId = '';
+                        window.__akUserPaused = false;
+                        window.__akExternalPaused = false;
+                        window.__akSongTitle = '$safeTitle';
+                        window.__akSongArtist = '$safeArtist';
+                        window.__akSongArtwork = '$safeArtwork';
+                        window.__akSongFallbackArtwork = '$safeFallbackArt';
+                        window.__akTrackEndedFired = false;
+                        window.__akErrorFired = false;
+                        window.__akHasSeenStartOfTrack = $hasResumeStart;
+                        window.__akMaxDurationForTrack = 0;
+                        window.__akResumeTargetSeconds = $safeStartSec;
+                        window.__akLastGoodTime = $safeStartSec;
+                        window.__akLastReportedDur = 0;
+                        window.__akLastMetaKey = '';
+                        if (typeof window.__akSyncMediaSession === 'function') {
+                            window.__akSyncMediaSession();
+                        }
+                        try {
+                            var mp = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
+                            if (mp && typeof mp.loadVideoById === 'function') {
+                                window.__akLoadedInPlaceId = '$cleanId';
+                                mp.loadVideoById('$cleanId', $safeStartSec);
+                                if (typeof mp.playVideo === 'function') {
+                                    mp.playVideo();
+                                }
+                                return 'IN_PLACE_OK';
+                            }
+                        } catch (e) {}
+                        var vOld = document.querySelector('video');
+                        if (vOld) {
+                            try { vOld.pause(); } catch (e2) {}
+                        }
+                        return 'NEEDS_URL_LOAD';
+                    })();
+                    """.trimIndent()
+                ) { result ->
+                    if (token != currentLoadToken) return@evaluateJavascript
+                    if (result?.contains("IN_PLACE_OK") == true) {
+                        val reloadCheck = Runnable {
+                            if (token == currentLoadToken &&
+                                currentLoadedVideoId == cleanId &&
+                                !hasSeenValidStartForCurrentToken &&
+                                !isUserPaused &&
+                                !isPausedByExternalAudio
+                            ) {
+                                view.loadUrl(watchUrl)
+                            }
+                        }
+                        fallbackUrlReloadRunnable = reloadCheck
+                        mainHandler.postDelayed(reloadCheck, 4500L)
+                    } else {
+                        view.loadUrl(watchUrl)
+                    }
+                }
+            } else {
+                view.evaluateJavascript(
+                    """
+                    (function() {
+                        window.__akLoadToken = $token;
+                        window.__akTargetVideoId = '$cleanId';
+                        window.__akLoadedInPlaceId = '';
+                        window.__akUserPaused = false;
+                        window.__akExternalPaused = false;
+                        window.__akSongTitle = '$safeTitle';
+                        window.__akSongArtist = '$safeArtist';
+                        window.__akSongArtwork = '$safeArtwork';
+                        window.__akSongFallbackArtwork = '$safeFallbackArt';
+                        window.__akTrackEndedFired = false;
+                        window.__akErrorFired = false;
+                        window.__akHasSeenStartOfTrack = $hasResumeStart;
+                        window.__akMaxDurationForTrack = 0;
+                        window.__akResumeTargetSeconds = $safeStartSec;
+                        window.__akLastGoodTime = $safeStartSec;
+                        window.__akLastReportedDur = 0;
+                        window.__akLastMetaKey = '';
+                        if (typeof window.__akSyncMediaSession === 'function') {
+                            window.__akSyncMediaSession();
+                        }
+                    })();
+                    """.trimIndent(),
+                    null
+                )
+                view.loadUrl(watchUrl)
+            }
+            mainHandler.postDelayed(nativeHeartbeatRunnable, 400L)
         }
     }
 
@@ -461,6 +529,8 @@ class BackstageYouTubePlayerController(
         hasSeenValidStartForCurrentToken = false
         lastKnownPositionSeconds = 0.0
         pendingResumeTargetSeconds = 0.0
+        fallbackUrlReloadRunnable?.let { mainHandler.removeCallbacks(it) }
+        fallbackUrlReloadRunnable = null
         mainHandler.removeCallbacks(nativeHeartbeatRunnable)
         mainHandler.post {
             try {
@@ -884,16 +954,20 @@ class BackstageYouTubePlayerController(
 
                         var v = vOpt || document.querySelector('video');
                         if (v && typeof ms.setPositionState === 'function') {
-                            var domDur = (v.duration && isFinite(v.duration) && v.duration > 0) ? v.duration : (window.__akMaxDurationForTrack || 0);
-                            var curPos = (typeof v.currentTime === 'number' && isFinite(v.currentTime) && v.currentTime >= 0) ? v.currentTime : (window.__akLastGoodTime || 0);
-                            if (domDur > 0) {
-                                var clampedPos = Math.min(Math.max(0, curPos), domDur);
-                                var rate = (v.playbackRate && isFinite(v.playbackRate) && v.playbackRate > 0) ? v.playbackRate : (window.__akPlaybackRate || 1.0);
-                                ms.setPositionState({
-                                    duration: domDur,
-                                    playbackRate: rate,
-                                    position: clampedPos
-                                });
+                            var nowPosSync = Date.now();
+                            if (nowPosSync - (window.__akLastPosSyncMs || 0) >= 1000) {
+                                var domDur = (v.duration && isFinite(v.duration) && v.duration > 0) ? v.duration : (window.__akMaxDurationForTrack || 0);
+                                var curPos = (typeof v.currentTime === 'number' && isFinite(v.currentTime) && v.currentTime >= 0) ? v.currentTime : (window.__akLastGoodTime || 0);
+                                if (domDur > 0) {
+                                    window.__akLastPosSyncMs = nowPosSync;
+                                    var clampedPos = Math.min(Math.max(0, curPos), domDur);
+                                    var rate = (v.playbackRate && isFinite(v.playbackRate) && v.playbackRate > 0) ? v.playbackRate : (window.__akPlaybackRate || 1.0);
+                                    ms.setPositionState({
+                                        duration: domDur,
+                                        playbackRate: rate,
+                                        position: clampedPos
+                                    });
+                                }
                             }
                         }
                     } catch (e) {}
@@ -923,8 +997,7 @@ class BackstageYouTubePlayerController(
                 function isCurrentVideoMatchingTarget() {
                     var target = window.__akTargetVideoId || '';
                     if (!target) return false;
-                    var href = window.location.href || '';
-                    if (href.indexOf(target) !== -1) return true;
+                    if (window.__akLoadedInPlaceId === target) return true;
                     try {
                         var mp = getMoviePlayer();
                         if (mp && typeof mp.getVideoData === 'function') {
@@ -934,6 +1007,8 @@ class BackstageYouTubePlayerController(
                             }
                         }
                     } catch (e) {}
+                    var href = window.location.href || '';
+                    if (href.indexOf(target) !== -1) return true;
                     return false;
                 }
 
@@ -1112,7 +1187,8 @@ class BackstageYouTubePlayerController(
                         if (!isCurrentVideoMatchingTarget()) return;
                         applyResumeSeekIfNeeded(v);
                         var totalDur = getTrueDuration(v);
-                        if (!isAdPlaying() && v.currentTime >= 0.05 && (totalDur <= 0 || v.currentTime < totalDur - 2.0)) {
+                        var canMarkStarted = (v.currentTime >= 0.15) && (v.currentTime < 10.0 || (window.__akResumeTargetSeconds || 0) >= 1.0);
+                        if (!isAdPlaying() && canMarkStarted && (totalDur <= 0 || v.currentTime < totalDur - 2.0)) {
                             window.__akHasSeenStartOfTrack = true;
                         }
                         window.__akLastReportedState = 1;
@@ -1222,9 +1298,10 @@ class BackstageYouTubePlayerController(
                         applyResumeSeekIfNeeded(v);
 
                         var totalDur = getTrueDuration(v);
-                        if (!v.paused && !v.ended && v.currentTime >= 0.05) {
+                        if (!v.paused && !v.ended && v.currentTime >= 0.15) {
                             if (!window.__akHasSeenStartOfTrack) {
-                                if (totalDur <= 0 || v.currentTime < totalDur - 2.0) {
+                                var validFreshStart = (v.currentTime < 10.0) || ((window.__akResumeTargetSeconds || 0) >= 1.0);
+                                if (validFreshStart && (totalDur <= 0 || v.currentTime < totalDur - 2.0)) {
                                     window.__akHasSeenStartOfTrack = true;
                                 }
                             }
@@ -1292,9 +1369,10 @@ class BackstageYouTubePlayerController(
                         applyResumeSeekIfNeeded(v);
 
                         var totalDur = getTrueDuration(v);
-                        if (!v.paused && !v.ended && v.currentTime >= 0.05) {
+                        if (!v.paused && !v.ended && v.currentTime >= 0.15) {
                             if (!window.__akHasSeenStartOfTrack) {
-                                if (totalDur <= 0 || v.currentTime < totalDur - 2.0) {
+                                var validFreshStart = (v.currentTime < 10.0) || ((window.__akResumeTargetSeconds || 0) >= 1.0);
+                                if (validFreshStart && (totalDur <= 0 || v.currentTime < totalDur - 2.0)) {
                                     window.__akHasSeenStartOfTrack = true;
                                 }
                             }
