@@ -146,6 +146,7 @@ private enum class LaunchStage {
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        UnityAdsManager.attachActivity(this)
         UnityAdsManager.initializeAndPreload(this)
         AdMobAppOpenManager.initializeAndPreload(this)
         enableEdgeToEdge()
@@ -154,6 +155,11 @@ class MainActivity : ComponentActivity() {
                 AKMusicAppRoot()
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        UnityAdsManager.attachActivity(this)
     }
 }
 
@@ -264,8 +270,8 @@ fun AKMusicAppRoot(
     LaunchedEffect(launchStage) {
         if (launchStage == LaunchStage.LOADING) {
             UnityAdsManager.initializeAndPreload(context)
-            delay(1800L)
-            UnityAdsManager.showStartupInterstitialAd(context as? Activity) {
+            delay(2000L)
+            UnityAdsManager.showStartupInterstitialAfterLoading(context) {
                 launchStage = LaunchStage.DEVELOPER_INTRO
             }
         }
@@ -343,18 +349,16 @@ fun AKMusicAppRoot(
                 SplashScreen()
             }
             launchStage == LaunchStage.DEVELOPER_INTRO -> {
-                var isOpeningAd by remember { mutableStateOf(false) }
+                var hasClickedContinue by remember { mutableStateOf(false) }
                 DeveloperIntroScreen(
                     onContinue = {
-                        if (!isOpeningAd) {
-                            isOpeningAd = true
-                            if (!UnityAdsManager.hasShownStartupAd()) {
-                                UnityAdsManager.showStartupInterstitialAd(context as? Activity) {
-                                    launchStage = LaunchStage.MAIN_APP
-                                }
-                            } else {
+                        if (!hasClickedContinue) {
+                            hasClickedContinue = true
+                            UnityAdsManager.showIfLoadedNowOrProceedImmediately(context) {
                                 launchStage = LaunchStage.MAIN_APP
                             }
+                        } else {
+                            launchStage = LaunchStage.MAIN_APP
                         }
                     }
                 )

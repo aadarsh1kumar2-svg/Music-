@@ -2,6 +2,7 @@ package com.example.services
 
 import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -10,28 +11,37 @@ import com.unity3d.ads.IUnityAdsLoadListener
 import com.unity3d.ads.IUnityAdsShowListener
 import com.unity3d.ads.UnityAds
 import com.unity3d.ads.UnityAdsShowOptions
+import java.lang.ref.WeakReference
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Official Unity Ads Manager for AADIFY
  *
  * Unity Game ID:           800424673
- * Interstitial Ad Unit ID: 800424673
+ * Interstitial Ad Unit ID: BP_Interstitial_Android
  *
  * Strictly configured to show ONLY ONCE at app startup (right after the loading screen,
- * before the Continue screen / entering the main app) and NEVER inside the app during music playback.
+ * before the Continue button screen / entering the main app) and NEVER inside the app.
  */
 object UnityAdsManager {
 
     private const val TAG = "UnityAdsManager"
 
     const val UNITY_GAME_ID = "800424673"
-    const val INTERSTITIAL_AD_UNIT_ID = "800424673"
-    private const val FALLBACK_INTERSTITIAL_PLACEMENT_ID = "Interstitial_Android"
+    const val INTERSTITIAL_AD_UNIT_ID = "BP_Interstitial_Android"
+
+    private val PLACEMENT_CANDIDATES = listOf(
+        "BP_Interstitial_Android",
+        "Interstitial_Android",
+        "800424673"
+    )
     private const val TEST_MODE = false
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val isInitializing = AtomicBoolean(false)
+
+    @Volatile
+    private var currentActivityRef: WeakReference<Activity>? = null
 
     @Volatile
     private var isAdLoaded: Boolean = false
@@ -51,13 +61,38 @@ object UnityAdsManager {
     @Volatile
     private var pendingReadyCallback: (() -> Unit)? = null
 
+    fun attachActivity(activity: Activity) {
+        currentActivityRef = WeakReference(activity)
+    }
+
+    private fun resolveActivity(contextOrActivity: Context?): Activity? {
+        var ctx = contextOrActivity
+        while (ctx != null) {
+            if (ctx is Activity) {
+                if (!ctx.isFinishing && !ctx.isDestroyed) {
+                    return ctx
+                }
+                break
+            }
+            ctx = (ctx as? ContextWrapper)?.baseContext
+        }
+        val cached = currentActivityRef?.get()
+        if (cached != null && !cached.isFinishing && !cached.isDestroyed) {
+            return cached
+        }
+        return null
+    }
+
     fun hasShownStartupAd(): Boolean = hasShownStartupAdThisSession
+
+    fun isAdReadyNow(): Boolean = isAdLoaded && !hasShownStartupAdThisSession && !isShowingAd
 
     /**
      * Initializes the Unity Ads SDK with Game ID 800424673 and immediately preloads
-     * the Interstitial Ad Unit 800424673 during the app's startup loading screen.
+     * the Interstitial Ad Unit BP_Interstitial_Android during the app's startup loading screen.
      */
     fun initializeAndPreload(context: Context) {
+        resolveActivity(context)?.let { attachActivity(it) }
         if (hasShownStartupAdThisSession) return
         val appContext = context.applicationContext
         mainHandler.post {
@@ -105,11 +140,18 @@ object UnityAdsManager {
         mainHandler.post {
             if (hasShownStartupAdThisSession || isAdLoaded || isLoadingAd) return@post
             isLoadingAd = true
-            loadPlacementWithFallback(INTERSTITIAL_AD_UNIT_ID, allowFallback = true)
+            loadPlacementCandidateAtIndex(0)
         }
     }
 
-    private fun loadPlacementWithFallback(placementId: String, allowFallback: Boolean) {
+    private fun loadPlacementCandidateAtIndex(index: Int) {
+        if (index >= PLACEMENT_CANDIDATES.size) {
+            isLoadingAd = false
+            isAdLoaded = false
+            notifyPendingWaiterIfAny()
+            return
+        }
+        val placementId = PLACEMENT_CANDIDATES[index]
         try {
             UnityAds.load(
                 placementId,
@@ -128,20 +170,12 @@ object UnityAdsManager {
                         message: String?
                     ) {
                         Log.w(TAG, "Unity Interstitial Ad failed to load ($failedId): $error - $message")
-                        if (allowFallback && placementId != FALLBACK_INTERSTITIAL_PLACEMENT_ID) {
-                            loadPlacementWithFallback(FALLBACK_INTERSTITIAL_PLACEMENT_ID, allowFallback = false)
-                        } else {
-                            isLoadingAd = false
-                            isAdLoaded = false
-                            notifyPendingWaiterIfAny()
-                        }
+                        loadPlacementCandidateAtIndex(index + 1)
                     }
                 }
             )
         } catch (t: Throwable) {
-            isLoadingAd = false
-            isAdLoaded = false
-            notifyPendingWaiterIfAny()
+            loadPlacementCandidateAtIndex(index + 1)
         }
     }
 
@@ -154,11 +188,15 @@ object UnityAdsManager {
     }
 
     /**
-     * Shows the Unity Interstitial Ad ONCE right after the startup loading screen completes
-     * (before the Continue screen / entering the main app).
-     * Never shows again inside the app after startup.
+     * Called right after the startup loading screen finishes.
+     * Waits up to [maxWaitMs] for BP_Interstitial_Android to finish loading if it is still loading,
+     * shows the ad once, and invokes [onComplete] as soon as the ad is closed.
      */
-    fun showStartupInterstitialAd(activity: Activity?, onComplete: () -> Unit) {
+    fun showStartupInterstitialAfterLoading(
+        context: Context?,
+        maxWaitMs: Long = 3600L,
+        onComplete: () -> Unit
+    ) {
         val completed = AtomicBoolean(false)
         val finishOnce = {
             if (completed.compareAndSet(false, true)) {
@@ -174,7 +212,8 @@ object UnityAdsManager {
             return
         }
 
-        if (activity == null || activity.isFinishing || activity.isDestroyed) {
+        val activity = resolveActivity(context)
+        if (activity == null) {
             finishOnce()
             return
         }
@@ -190,12 +229,13 @@ object UnityAdsManager {
                 return@post
             }
 
-            // Ensure initialization & preload are running and wait briefly (up to 2.5s) after loading screen
-            initializeAndPreload(activity.applicationContext)
+            // Ensure initialization & preload are running while waiting briefly at end of loading screen
+            initializeAndPreload(activity)
 
             val timeoutRunnable = Runnable {
-                if (isAdLoaded && !hasShownStartupAdThisSession && !activity.isFinishing && !activity.isDestroyed) {
-                    displayUnityInterstitialNow(activity, finishOnce)
+                val act = resolveActivity(activity)
+                if (isAdLoaded && !hasShownStartupAdThisSession && act != null) {
+                    displayUnityInterstitialNow(act, finishOnce)
                 } else {
                     finishOnce()
                 }
@@ -203,14 +243,36 @@ object UnityAdsManager {
 
             pendingReadyCallback = {
                 mainHandler.removeCallbacks(timeoutRunnable)
-                if (isAdLoaded && !hasShownStartupAdThisSession && !activity.isFinishing && !activity.isDestroyed) {
-                    displayUnityInterstitialNow(activity, finishOnce)
+                val act = resolveActivity(activity)
+                if (isAdLoaded && !hasShownStartupAdThisSession && act != null) {
+                    displayUnityInterstitialNow(act, finishOnce)
                 } else {
                     finishOnce()
                 }
             }
 
-            mainHandler.postDelayed(timeoutRunnable, 2500L)
+            mainHandler.postDelayed(timeoutRunnable, maxWaitMs)
+        }
+    }
+
+    /**
+     * Called when the user clicks the "Continue" button on the intro screen.
+     * NEVER blocks or delays the Continue button:
+     * - If the ad finished loading late and is ready right now, shows it immediately (0ms delay).
+     * - Otherwise proceeds to the Main App in 0ms so the Continue button always feels instant!
+     */
+    fun showIfLoadedNowOrProceedImmediately(context: Context?, onComplete: () -> Unit) {
+        val act = resolveActivity(context)
+        if (!hasShownStartupAdThisSession && isAdLoaded && !isShowingAd && act != null) {
+            val completed = AtomicBoolean(false)
+            displayUnityInterstitialNow(act) {
+                if (completed.compareAndSet(false, true)) {
+                    mainHandler.post { onComplete() }
+                }
+            }
+        } else {
+            hasShownStartupAdThisSession = true
+            onComplete()
         }
     }
 
