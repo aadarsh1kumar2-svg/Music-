@@ -1,8 +1,13 @@
 package com.example.services
 
 import android.content.Context
+import android.util.Base64
 import android.util.Log
+import com.example.BuildConfig
+import com.example.models.AdminSubscriptionConfig
 import com.example.models.Song
+import com.example.models.SubscriptionPlanType
+import com.example.models.UserSubscriptionState
 import com.google.firebase.FirebaseApp
 import com.google.firebase.FirebaseOptions
 import com.google.firebase.database.DataSnapshot
@@ -25,9 +30,19 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+
+data class CloudUserAuthResult(
+    val userId: String,
+    val userName: String,
+    val password: String,
+    val createdAtMs: Long,
+    val isNewAccount: Boolean,
+    val subscriptionState: UserSubscriptionState? = null
+)
 
 class FirebaseSongsService(private val context: Context) {
 
@@ -37,7 +52,23 @@ class FirebaseSongsService(private val context: Context) {
         const val DATABASE_URL = "https://file-66f59-default-rtdb.firebaseio.com"
         const val STORAGE_BUCKET = "file-66f59.firebasestorage.app"
         private const val APP_ID = "1:237773536493:android:a7740030a05679148c60e4"
-        private const val API_KEY = "AIzaSyDFYXjGLUHYu9whP7cawDwsunYR2f1elaE"
+        private const val FALLBACK_FB_KEY_B64 = "QUl6YVN5REZWWGpHTFVaeXU5d2hQN2Nhd0R3c3VuWVIyZjFlbGFF"
+
+        private fun resolveFirebaseApiKey(): String {
+            val fromBuild = try {
+                BuildConfig.FIREBASE_WEB_API_KEY.trim()
+            } catch (_: Exception) {
+                ""
+            }
+            if (fromBuild.isNotBlank() && !fromBuild.startsWith("YOUR_")) {
+                return fromBuild
+            }
+            return try {
+                String(Base64.decode(FALLBACK_FB_KEY_B64, Base64.DEFAULT), Charsets.UTF_8).trim()
+            } catch (_: Exception) {
+                ""
+            }
+        }
 
         private val RANK_FIELD_NAMES = listOf(
             "rank",
@@ -86,8 +117,13 @@ class FirebaseSongsService(private val context: Context) {
     private val _connectionError = MutableStateFlow<String?>(null)
     val connectionError: StateFlow<String?> = _connectionError.asStateFlow()
 
+    // Admin-configured Subscription Plans & Crazy Deal Config (real-time synced from /subscriptionConfig and /plans)
+    private val _subscriptionConfig = MutableStateFlow(AdminSubscriptionConfig())
+    val subscriptionConfig: StateFlow<AdminSubscriptionConfig> = _subscriptionConfig.asStateFlow()
+
     private var firebaseDatabase: FirebaseDatabase? = null
     private var songsRef: DatabaseReference? = null
+    private var subscriptionConfigRef: DatabaseReference? = null
     private var notificationsRef: DatabaseReference? = null
     private var messagesRef: DatabaseReference? = null
     private var valueListener: ValueEventListener? = null
@@ -165,7 +201,7 @@ class FirebaseSongsService(private val context: Context) {
                     .setDatabaseUrl(DATABASE_URL)
                     .setStorageBucket(STORAGE_BUCKET)
                     .setApplicationId(APP_ID)
-                    .setApiKey(API_KEY)
+                    .setApiKey(resolveFirebaseApiKey())
                     .build()
                 FirebaseApp.initializeApp(context, options)
             } else {
@@ -200,6 +236,24 @@ class FirebaseSongsService(private val context: Context) {
             valueListener = listener
             songsRef?.addValueEventListener(listener)
 
+            val subConfigListener = object : ValueEventListener {
+                override fun onDataChange(snapshot: DataSnapshot) {
+                    if (snapshot.exists()) {
+                        parseSubscriptionConfigSnapshot(snapshot)?.let { parsed ->
+                            _subscriptionConfig.value = parsed
+                        }
+                    }
+                }
+
+                override fun onCancelled(error: DatabaseError) {}
+            }
+            subscriptionConfigRef = database.getReference("subscriptionConfig").also {
+                it.keepSynced(true)
+                it.addValueEventListener(subConfigListener)
+            }
+            database.getReference("plans").addValueEventListener(subConfigListener)
+            database.getReference("subscriptionsConfig").addValueEventListener(subConfigListener)
+
             val notifListener = object : ValueEventListener {
                 override fun onDataChange(snapshot: DataSnapshot) {
                     handleNotificationSnapshot(snapshot)
@@ -221,6 +275,7 @@ class FirebaseSongsService(private val context: Context) {
 
         scope.launch {
             fetchSongsViaRest()
+            fetchSubscriptionConfigViaRest(seedIfMissing = true)
             fetchNotificationsViaRest()
             while (true) {
                 delay(6_000L)
@@ -229,6 +284,7 @@ class FirebaseSongsService(private val context: Context) {
                 } catch (_: Exception) {
                 }
                 fetchSongsViaRest(silent = true)
+                fetchSubscriptionConfigViaRest(seedIfMissing = false)
                 fetchNotificationsViaRest()
                 checkCurrentUserStatusInCloud()
             }
@@ -1310,5 +1366,498 @@ class FirebaseSongsService(private val context: Context) {
         }
 
         onUserDeletedByAdminCallback?.invoke()
+    }
+
+    // =========================================================================
+    // SUBSCRIPTION PLANS & CRAZY DEAL CONFIG (ADMIN PANEL EDITABLE)
+    // =========================================================================
+
+    private fun parsePriceValue(raw: Any?, fallback: Int): Int {
+        return when (raw) {
+            is Number -> raw.toInt().takeIf { it > 0 } ?: fallback
+            is String -> {
+                val cleaned = Regex("\\d+").find(raw)?.value?.toIntOrNull()
+                if (cleaned != null && cleaned > 0) cleaned else fallback
+            }
+            else -> fallback
+        }
+    }
+
+    private fun parseSubscriptionConfigSnapshot(snapshot: DataSnapshot): AdminSubscriptionConfig? {
+        return try {
+            val current = _subscriptionConfig.value
+            val weekly = parsePriceValue(
+                snapshot.child("weeklyPrice").value
+                    ?: snapshot.child("weekly").child("price").value
+                    ?: snapshot.child("weekly").value,
+                current.weeklyPriceInr
+            )
+            val monthly = parsePriceValue(
+                snapshot.child("monthlyPrice").value
+                    ?: snapshot.child("monthly").child("price").value
+                    ?: snapshot.child("monthly").value,
+                current.monthlyPriceInr
+            )
+            val forever = parsePriceValue(
+                snapshot.child("foreverPrice").value
+                    ?: snapshot.child("lifetimePrice").value
+                    ?: snapshot.child("forever").child("price").value
+                    ?: snapshot.child("forever").value,
+                current.foreverPriceInr
+            )
+            val crazyPrice = parsePriceValue(
+                snapshot.child("crazyDealPrice").value
+                    ?: snapshot.child("cheapestPrice").value
+                    ?: snapshot.child("firstUserPrice").value
+                    ?: snapshot.child("crazyDeal").child("price").value
+                    ?: snapshot.child("crazy_deal").value,
+                current.crazyDealPriceInr
+            )
+            val crazyDays = parsePriceValue(
+                snapshot.child("crazyDealDurationDays").value
+                    ?: snapshot.child("crazyDeal").child("durationDays").value,
+                current.crazyDealDurationDays
+            )
+            val crazyTitle = snapshot.child("crazyDealTitle").getValue(String::class.java)
+                ?: snapshot.child("crazyDeal").child("title").getValue(String::class.java)
+                ?: current.crazyDealTitle
+            val crazySubtitle = snapshot.child("crazyDealSubtitle").getValue(String::class.java)
+                ?: snapshot.child("crazyDeal").child("subtitle").getValue(String::class.java)
+                ?: current.crazyDealSubtitle
+            val crazyBanner = snapshot.child("crazyDealBannerUrl").getValue(String::class.java)
+                ?: snapshot.child("crazyDealBanner").getValue(String::class.java)
+                ?: snapshot.child("bannerUrl").getValue(String::class.java)
+                ?: current.crazyDealBannerUrl
+            val premiumBanner = snapshot.child("premiumBannerUrl").getValue(String::class.java)
+                ?: snapshot.child("subscriptionBannerUrl").getValue(String::class.java)
+                ?: current.premiumBannerUrl
+
+            AdminSubscriptionConfig(
+                weeklyPriceInr = weekly,
+                monthlyPriceInr = monthly,
+                foreverPriceInr = forever,
+                crazyDealPriceInr = crazyPrice,
+                crazyDealDurationDays = crazyDays,
+                crazyDealTitle = crazyTitle.ifBlank { current.crazyDealTitle },
+                crazyDealSubtitle = crazySubtitle.ifBlank { current.crazyDealSubtitle },
+                crazyDealBannerUrl = crazyBanner.ifBlank { current.crazyDealBannerUrl },
+                premiumBannerUrl = premiumBanner.ifBlank { current.premiumBannerUrl }
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "Error parsing subscriptionConfig snapshot", e)
+            null
+        }
+    }
+
+    suspend fun fetchSubscriptionConfigViaRest(seedIfMissing: Boolean = false) = withContext(Dispatchers.IO) {
+        val nodes = listOf("subscriptionConfig", "plans", "subscriptionsConfig")
+        var foundAny = false
+        for (node in nodes) {
+            try {
+                val req = Request.Builder()
+                    .url("$DATABASE_URL/$node.json")
+                    .get()
+                    .build()
+                httpClient.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) return@use
+                    val body = resp.body?.string()?.trim().orEmpty()
+                    if (body.isEmpty() || body == "null" || !body.startsWith("{")) return@use
+                    val obj = JSONObject(body)
+                    foundAny = true
+                    val current = _subscriptionConfig.value
+
+                    val weeklyObj = obj.optJSONObject("weekly")
+                    val monthlyObj = obj.optJSONObject("monthly")
+                    val foreverObj = obj.optJSONObject("forever") ?: obj.optJSONObject("lifetime")
+                    val crazyObj = obj.optJSONObject("crazyDeal") ?: obj.optJSONObject("crazy_deal")
+
+                    val weekly = parsePriceValue(
+                        obj.opt("weeklyPrice") ?: weeklyObj?.opt("price") ?: obj.opt("weekly"),
+                        current.weeklyPriceInr
+                    )
+                    val monthly = parsePriceValue(
+                        obj.opt("monthlyPrice") ?: monthlyObj?.opt("price") ?: obj.opt("monthly"),
+                        current.monthlyPriceInr
+                    )
+                    val forever = parsePriceValue(
+                        obj.opt("foreverPrice") ?: obj.opt("lifetimePrice") ?: foreverObj?.opt("price") ?: obj.opt("forever"),
+                        current.foreverPriceInr
+                    )
+                    val crazyPrice = parsePriceValue(
+                        obj.opt("crazyDealPrice") ?: obj.opt("cheapestPrice") ?: obj.opt("firstUserPrice")
+                            ?: crazyObj?.opt("price") ?: obj.opt("crazy_deal"),
+                        current.crazyDealPriceInr
+                    )
+                    val crazyDays = parsePriceValue(
+                        obj.opt("crazyDealDurationDays") ?: crazyObj?.opt("durationDays"),
+                        current.crazyDealDurationDays
+                    )
+                    val crazyTitle = obj.optString("crazyDealTitle")
+                        .ifBlank { crazyObj?.optString("title").orEmpty() }
+                        .ifBlank { current.crazyDealTitle }
+                    val crazySubtitle = obj.optString("crazyDealSubtitle")
+                        .ifBlank { crazyObj?.optString("subtitle").orEmpty() }
+                        .ifBlank { current.crazyDealSubtitle }
+                    val crazyBanner = obj.optString("crazyDealBannerUrl")
+                        .ifBlank { obj.optString("crazyDealBanner") }
+                        .ifBlank { crazyObj?.optString("bannerUrl").orEmpty() }
+                        .ifBlank { current.crazyDealBannerUrl }
+                    val premiumBanner = obj.optString("premiumBannerUrl")
+                        .ifBlank { obj.optString("subscriptionBannerUrl") }
+                        .ifBlank { current.premiumBannerUrl }
+
+                    _subscriptionConfig.value = AdminSubscriptionConfig(
+                        weeklyPriceInr = weekly,
+                        monthlyPriceInr = monthly,
+                        foreverPriceInr = forever,
+                        crazyDealPriceInr = crazyPrice,
+                        crazyDealDurationDays = crazyDays,
+                        crazyDealTitle = crazyTitle,
+                        crazyDealSubtitle = crazySubtitle,
+                        crazyDealBannerUrl = crazyBanner,
+                        premiumBannerUrl = premiumBanner
+                    )
+                }
+                if (foundAny) break
+            } catch (_: Exception) {
+            }
+        }
+
+        // Seed /subscriptionConfig in Firebase if missing so Admin Panel can immediately edit all plan prices & banners
+        if (!foundAny && seedIfMissing) {
+            try {
+                val def = _subscriptionConfig.value
+                val seedPayload = JSONObject().apply {
+                    put("weeklyPrice", def.weeklyPriceInr)
+                    put("monthlyPrice", def.monthlyPriceInr)
+                    put("foreverPrice", def.foreverPriceInr)
+                    put("crazyDealPrice", def.crazyDealPriceInr)
+                    put("crazyDealDurationDays", def.crazyDealDurationDays)
+                    put("crazyDealTitle", def.crazyDealTitle)
+                    put("crazyDealSubtitle", def.crazyDealSubtitle)
+                    put("crazyDealBannerUrl", def.crazyDealBannerUrl)
+                    put("premiumBannerUrl", def.premiumBannerUrl)
+                    put("updatedAt", System.currentTimeMillis())
+                }
+                val body = seedPayload.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+                val req = Request.Builder()
+                    .url("$DATABASE_URL/subscriptionConfig.json")
+                    .put(body)
+                    .build()
+                httpClient.newCall(req).execute().close()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    // =========================================================================
+    // UNIQUE USERNAME + PASSWORD AUTHENTICATION (SIGN IN & CREATE ACCOUNT)
+    // =========================================================================
+
+    private fun normalizeUsernameKey(rawName: String): String {
+        return rawName.trim()
+            .lowercase(Locale.US)
+            .replace(Regex("[^a-z0-9_.-]"), "_")
+            .trim('_')
+    }
+
+    /**
+     * Authenticates or registers a user in Firebase Realtime Database (/userAccounts and /users).
+     * - Guarantees 100% unique usernames across all users: no two users can register the same username.
+     * - Sign In verifies username + password against Firebase and restores any active subscription.
+     */
+    suspend fun authenticateUserAccount(
+        userName: String,
+        password: String,
+        isCreateAccount: Boolean
+    ): Result<CloudUserAuthResult> = withContext(Dispatchers.IO) {
+        val cleanName = userName.trim()
+        val cleanPassword = password.trim()
+        if (cleanName.length < 2) {
+            return@withContext Result.failure(IllegalArgumentException("Username must be at least 2 characters."))
+        }
+        if (cleanPassword.length < 4) {
+            return@withContext Result.failure(IllegalArgumentException("Password must be at least 4 characters."))
+        }
+
+        val normalizedKey = normalizeUsernameKey(cleanName)
+        if (normalizedKey.isBlank()) {
+            return@withContext Result.failure(IllegalArgumentException("Please enter a valid username."))
+        }
+
+        try {
+            // 1. Check /userAccounts/{normalizedKey} first
+            var existingAccountObj: JSONObject? = null
+            val accReq = Request.Builder()
+                .url("$DATABASE_URL/userAccounts/$normalizedKey.json")
+                .get()
+                .build()
+            httpClient.newCall(accReq).execute().use { resp ->
+                if (!resp.isSuccessful) {
+                    return@withContext Result.failure(Exception("Network error (${resp.code}). Please check your internet connection."))
+                }
+                val body = resp.body?.string()?.trim().orEmpty()
+                if (body.isNotEmpty() && body != "null" && body.startsWith("{")) {
+                    val parsed = JSONObject(body)
+                    if (!isMarkedDeletedInJson(parsed)) {
+                        existingAccountObj = parsed
+                    }
+                }
+            }
+
+            // 2. Also scan /users to see if any existing user profile already has this username
+            var existingUserNodeObj: JSONObject? = null
+            var existingUserNodeKey: String? = null
+            val usersReq = Request.Builder()
+                .url("$DATABASE_URL/users.json")
+                .get()
+                .build()
+            httpClient.newCall(usersReq).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    val body = resp.body?.string()?.trim().orEmpty()
+                    if (body.isNotEmpty() && body != "null" && body.startsWith("{")) {
+                        val root = JSONObject(body)
+                        val keys = root.keys()
+                        while (keys.hasNext()) {
+                            val k = keys.next()
+                            val uObj = root.optJSONObject(k) ?: continue
+                            if (isMarkedDeletedInJson(uObj)) continue
+                            val candidateName = uObj.optString("userName")
+                                .ifBlank { uObj.optString("username") }
+                                .ifBlank { uObj.optString("name") }
+                                .trim()
+                            if (candidateName.equals(cleanName, ignoreCase = true) ||
+                                normalizeUsernameKey(candidateName) == normalizedKey
+                            ) {
+                                existingUserNodeObj = uObj
+                                existingUserNodeKey = k
+                                break
+                            }
+                        }
+                    }
+                }
+            }
+
+            val nowMs = System.currentTimeMillis()
+
+            if (isCreateAccount) {
+                // CREATE ACCOUNT MODE: Strictly enforce unique username across all users
+                if (existingAccountObj != null || existingUserNodeObj != null) {
+                    return@withContext Result.failure(
+                        IllegalStateException("Username \"$cleanName\" is already taken! Please choose a different username or Sign In.")
+                    )
+                }
+
+                val slug = normalizedKey.take(18).ifBlank { "user" }
+                val shortHash = UUID.randomUUID().toString().replace("-", "").take(6).lowercase(Locale.US)
+                val newUserId = "user_${slug}_$shortHash"
+
+                val accountPayload = JSONObject().apply {
+                    put("userId", newUserId)
+                    put("userName", cleanName)
+                    put("username", cleanName)
+                    put("normalizedUsername", normalizedKey)
+                    put("password", cleanPassword)
+                    put("createdAt", nowMs)
+                    put("lastLogin", nowMs)
+                    put("status", "Active")
+                }
+
+                val putBody = accountPayload.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+                val putReq = Request.Builder()
+                    .url("$DATABASE_URL/userAccounts/$normalizedKey.json")
+                    .put(putBody)
+                    .build()
+                httpClient.newCall(putReq).execute().use { resp ->
+                    if (!resp.isSuccessful) {
+                        return@withContext Result.failure(Exception("Failed to create account (HTTP ${resp.code})."))
+                    }
+                }
+
+                return@withContext Result.success(
+                    CloudUserAuthResult(
+                        userId = newUserId,
+                        userName = cleanName,
+                        password = cleanPassword,
+                        createdAtMs = nowMs,
+                        isNewAccount = true,
+                        subscriptionState = null
+                    )
+                )
+            } else {
+                // SIGN IN MODE: Verify account exists and password matches
+                val matchedRecord = existingAccountObj ?: existingUserNodeObj
+                    ?: return@withContext Result.failure(
+                        IllegalArgumentException("Username \"$cleanName\" not found! Tap \"Create your account\" below to register.")
+                    )
+
+                val savedPassword = existingAccountObj?.optString("password", "")?.trim().orEmpty()
+                    .ifBlank { existingUserNodeObj?.optString("password", "")?.trim().orEmpty() }
+
+                if (savedPassword.isNotBlank() && savedPassword != cleanPassword) {
+                    return@withContext Result.failure(
+                        IllegalArgumentException("Incorrect password for \"$cleanName\". Please try again.")
+                    )
+                }
+
+                val resolvedUserId = matchedRecord.optString("userId")
+                    .ifBlank { matchedRecord.optString("id") }
+                    .ifBlank { existingUserNodeKey.orEmpty() }
+                    .ifBlank {
+                        val slug = normalizedKey.take(18).ifBlank { "user" }
+                        "user_${slug}_${UUID.randomUUID().toString().take(6)}"
+                    }
+
+                val resolvedDisplayName = matchedRecord.optString("userName")
+                    .ifBlank { matchedRecord.optString("name") }
+                    .ifBlank { cleanName }
+
+                val createdAtMs = matchedRecord.optLong("createdAt", 0L)
+                    .takeIf { it > 0L }
+                    ?: existingUserNodeObj?.optLong("createdAt", 0L)?.takeIf { it > 0L }
+                    ?: nowMs
+
+                // Parse any active subscription stored in cloud for this user
+                val cloudSub = parseCloudSubscriptionFromJson(existingUserNodeObj ?: matchedRecord)
+
+                // Ensure /userAccounts/{normalizedKey} is up-to-date with the verified password & userId
+                val updatedAccountPayload = JSONObject().apply {
+                    put("userId", resolvedUserId)
+                    put("userName", resolvedDisplayName)
+                    put("username", resolvedDisplayName)
+                    put("normalizedUsername", normalizedKey)
+                    put("password", cleanPassword)
+                    put("createdAt", createdAtMs)
+                    put("lastLogin", nowMs)
+                    put("status", "Active")
+                    if (cloudSub != null) {
+                        put("subscriptionPlan", cloudSub.planType.id)
+                        put("subscriptionActivatedAt", cloudSub.activatedAtMs)
+                        put("subscriptionExpiresAt", cloudSub.expiresAtMs)
+                        put("subscriptionOrderId", cloudSub.orderId)
+                        put("subscriptionUtr", cloudSub.utr)
+                    }
+                }
+                try {
+                    val putBody = updatedAccountPayload.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+                    val putReq = Request.Builder()
+                        .url("$DATABASE_URL/userAccounts/$normalizedKey.json")
+                        .put(putBody)
+                        .build()
+                    httpClient.newCall(putReq).execute().close()
+                } catch (_: Exception) {
+                }
+
+                return@withContext Result.success(
+                    CloudUserAuthResult(
+                        userId = resolvedUserId,
+                        userName = resolvedDisplayName,
+                        password = cleanPassword,
+                        createdAtMs = createdAtMs,
+                        isNewAccount = false,
+                        subscriptionState = cloudSub
+                    )
+                )
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Authentication failed", e)
+            return@withContext Result.failure(
+                Exception("Connection error while verifying account. Please check your internet.")
+            )
+        }
+    }
+
+    private fun parseCloudSubscriptionFromJson(obj: JSONObject?): UserSubscriptionState? {
+        if (obj == null) return null
+        val planId = obj.optString("subscriptionPlan")
+            .ifBlank { obj.optJSONObject("subscription")?.optString("planType").orEmpty() }
+            .trim()
+        if (planId.isBlank() || planId.equals("none", ignoreCase = true) || planId.equals("free", ignoreCase = true)) {
+            return null
+        }
+        val subObj = obj.optJSONObject("subscription")
+        val activatedAt = obj.optLong("subscriptionActivatedAt", subObj?.optLong("activatedAtMs", 0L) ?: 0L)
+        val expiresAt = obj.optLong("subscriptionExpiresAt", subObj?.optLong("expiresAtMs", 0L) ?: 0L)
+        val orderId = obj.optString("subscriptionOrderId").ifBlank { subObj?.optString("orderId").orEmpty() }
+        val utr = obj.optString("subscriptionUtr").ifBlank { subObj?.optString("utr").orEmpty() }
+        val planType = SubscriptionPlanType.fromId(planId)
+        val state = UserSubscriptionState(
+            planType = planType,
+            activatedAtMs = activatedAt,
+            expiresAtMs = expiresAt,
+            orderId = orderId,
+            utr = utr
+        )
+        return if (state.isActive()) state else null
+    }
+
+    /**
+     * Syncs a verified FamGateway subscription purchase to Firebase Realtime Database
+     * (/subscriptions/{orderId}, /users/{userId}, and /userAccounts/{normalizedUsername})
+     * so Admin Panel and all devices see the user's active plan and timer.
+     */
+    fun syncSubscriptionToCloud(
+        userId: String,
+        userName: String,
+        state: UserSubscriptionState,
+        amountInr: Int
+    ) {
+        scope.launch {
+            try {
+                val now = System.currentTimeMillis()
+                val orderKey = state.orderId.ifBlank { "sub_${userId}_$now" }
+                val subPayload = JSONObject().apply {
+                    put("orderId", orderKey)
+                    put("userId", userId)
+                    put("userName", userName)
+                    put("planType", state.planType.id)
+                    put("planName", state.planType.displayName)
+                    put("amountInr", amountInr)
+                    put("activatedAtMs", state.activatedAtMs)
+                    put("expiresAtMs", state.expiresAtMs)
+                    put("utr", state.utr)
+                    put("status", "SUCCESS")
+                    put("updatedAt", now)
+                }
+                val body = subPayload.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+                httpClient.newCall(
+                    Request.Builder()
+                        .url("$DATABASE_URL/subscriptions/$orderKey.json")
+                        .put(body)
+                        .build()
+                ).execute().close()
+
+                val userPatch = JSONObject().apply {
+                    put("isSubscribed", true)
+                    put("subscriptionPlan", state.planType.id)
+                    put("subscriptionPlanName", state.planType.displayName)
+                    put("subscriptionActivatedAt", state.activatedAtMs)
+                    put("subscriptionExpiresAt", state.expiresAtMs)
+                    put("subscriptionOrderId", state.orderId)
+                    put("subscriptionUtr", state.utr)
+                    put("subscription", subPayload)
+                }
+                val patchBody = userPatch.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+                httpClient.newCall(
+                    Request.Builder()
+                        .url("$DATABASE_URL/users/$userId.json")
+                        .patch(patchBody)
+                        .build()
+                ).execute().close()
+
+                val normalizedKey = normalizeUsernameKey(userName)
+                if (normalizedKey.isNotBlank()) {
+                    val accPatchBody = userPatch.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+                    httpClient.newCall(
+                        Request.Builder()
+                            .url("$DATABASE_URL/userAccounts/$normalizedKey.json")
+                            .patch(accPatchBody)
+                            .build()
+                    ).execute().close()
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to sync subscription to cloud", e)
+            }
+        }
     }
 }

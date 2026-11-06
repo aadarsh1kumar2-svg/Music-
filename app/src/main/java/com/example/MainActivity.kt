@@ -46,8 +46,10 @@ import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.LibraryMusic
+import androidx.compose.material.icons.filled.LocalFireDepartment
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Timer
+import androidx.compose.material.icons.filled.WorkspacePremium
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DrawerValue
@@ -104,19 +106,24 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.models.SubscriptionPlanType
 import com.example.providers.LibrarySubScreen
 import com.example.providers.MainTab
 import com.example.providers.MusicViewModel
+import com.example.screens.CrazyDealsPopupDialog
+import com.example.screens.DailyLimitReachedDialog
 import com.example.screens.DeveloperIntroScreen
 import com.example.screens.ExploreScreen
+import com.example.screens.FamGatewayCheckoutDialog
 import com.example.screens.FullScreenPlayerModal
 import com.example.screens.HomeScreen
 import com.example.screens.LibraryScreen
 import com.example.screens.NameOnboardingScreen
+import com.example.screens.NoInternetScreen
 import com.example.screens.SplashScreen
+import com.example.screens.SubscriptionPlansDialog
 import com.example.screens.TopChartsScreen
-import com.example.services.AdMobAppOpenManager
-import com.example.services.UnityAdsManager
+import com.example.screens.formatCountdownTimer
 import com.example.ui.theme.DeepCharcoal
 import com.example.ui.theme.DividerDark
 import com.example.ui.theme.MutedGray
@@ -146,20 +153,12 @@ private enum class LaunchStage {
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        UnityAdsManager.attachActivity(this)
-        UnityAdsManager.initializeAndPreload(this)
-        AdMobAppOpenManager.initializeAndPreload(this)
         enableEdgeToEdge()
         setContent {
             MyApplicationTheme {
                 AKMusicAppRoot()
             }
         }
-    }
-
-    override fun onResume() {
-        super.onResume()
-        UnityAdsManager.attachActivity(this)
     }
 }
 
@@ -209,11 +208,30 @@ fun AKMusicAppRoot(
         }
     }
 
+    val isInternetAvailable by musicViewModel.isInternetAvailable.collectAsStateWithLifecycle()
     val userName by musicViewModel.userName.collectAsStateWithLifecycle()
+    val userPassword by musicViewModel.userPassword.collectAsStateWithLifecycle()
+    val isAuthenticating by musicViewModel.isAuthenticating.collectAsStateWithLifecycle()
+    val authErrorMessage by musicViewModel.authErrorMessage.collectAsStateWithLifecycle()
     val isEditNameDialogOpen by musicViewModel.isEditNameDialogOpen.collectAsStateWithLifecycle()
     val isDeveloperScreenOpen by musicViewModel.isDeveloperScreenOpen.collectAsStateWithLifecycle()
     val hasAudioStoragePermission by musicViewModel.hasAudioStoragePermission.collectAsStateWithLifecycle()
     val deviceLocalSongs by musicViewModel.deviceLocalSongs.collectAsStateWithLifecycle()
+
+    // Subscription, Crazy Deal 3-day timer, 1-hour daily limit & FamGateway checkout states
+    val subscriptionConfig by musicViewModel.subscriptionConfig.collectAsStateWithLifecycle()
+    val subscriptionState by musicViewModel.subscriptionState.collectAsStateWithLifecycle()
+    val activeSubscriptionRemainingSeconds by musicViewModel.activeSubscriptionRemainingSeconds.collectAsStateWithLifecycle()
+    val crazyDealRemainingSeconds by musicViewModel.crazyDealRemainingSeconds.collectAsStateWithLifecycle()
+    val dailyListenedSeconds by musicViewModel.dailyListenedSeconds.collectAsStateWithLifecycle()
+    val isSubscriptionModalOpen by musicViewModel.isSubscriptionModalOpen.collectAsStateWithLifecycle()
+    val isCrazyDealsPopupOpen by musicViewModel.isCrazyDealsPopupOpen.collectAsStateWithLifecycle()
+    val isDailyLimitReachedModalOpen by musicViewModel.isDailyLimitReachedModalOpen.collectAsStateWithLifecycle()
+    val isFamGatewayCheckoutOpen by musicViewModel.isFamGatewayCheckoutOpen.collectAsStateWithLifecycle()
+    val activeCheckoutOrder by musicViewModel.activeCheckoutOrder.collectAsStateWithLifecycle()
+    val isCreatingPaymentOrder by musicViewModel.isCreatingPaymentOrder.collectAsStateWithLifecycle()
+    val paymentStatusMessage by musicViewModel.paymentStatusMessage.collectAsStateWithLifecycle()
+    val paymentErrorMessage by musicViewModel.paymentErrorMessage.collectAsStateWithLifecycle()
 
     val selectedTab by musicViewModel.selectedTab.collectAsStateWithLifecycle()
     val librarySubScreen by musicViewModel.librarySubScreen.collectAsStateWithLifecycle()
@@ -260,7 +278,7 @@ fun AKMusicAppRoot(
         )
     }
 
-    // If Admin deletes the user from the Admin Panel while the app is open, immediately return to Name Login screen
+    // If Admin deletes the user from the Admin Panel while the app is open, immediately return to Sign In screen
     LaunchedEffect(userName) {
         if (userName.isBlank() && launchStage != LaunchStage.ENTER_NAME) {
             launchStage = LaunchStage.ENTER_NAME
@@ -269,11 +287,10 @@ fun AKMusicAppRoot(
 
     LaunchedEffect(launchStage) {
         if (launchStage == LaunchStage.LOADING) {
-            UnityAdsManager.initializeAndPreload(context)
-            delay(2000L)
-            UnityAdsManager.showStartupInterstitialAfterLoading(context) {
-                launchStage = LaunchStage.DEVELOPER_INTRO
-            }
+            delay(1800L)
+            launchStage = LaunchStage.DEVELOPER_INTRO
+        } else if (launchStage == LaunchStage.MAIN_APP) {
+            musicViewModel.onHomeScreenEntered()
         }
     }
 
@@ -336,12 +353,29 @@ fun AKMusicAppRoot(
         }
 
         when {
+            !isInternetAvailable -> {
+                NoInternetScreen(
+                    onRetryConnection = {
+                        musicViewModel.refreshNetworkState()
+                    }
+                )
+            }
             launchStage == LaunchStage.ENTER_NAME -> {
                 NameOnboardingScreen(
                     initialName = userName,
-                    onSubmitName = { entered ->
-                        musicViewModel.saveUserName(entered)
-                        launchStage = LaunchStage.LOADING
+                    initialPassword = userPassword,
+                    isAuthenticating = isAuthenticating,
+                    authErrorMessage = authErrorMessage,
+                    onClearError = { musicViewModel.clearAuthError() },
+                    onAuthenticate = { enteredName, enteredPass, isCreate ->
+                        musicViewModel.authenticateWithNameAndPassword(
+                            name = enteredName,
+                            password = enteredPass,
+                            isCreateAccount = isCreate,
+                            onAuthenticated = {
+                                launchStage = LaunchStage.LOADING
+                            }
+                        )
                     }
                 )
             }
@@ -349,25 +383,25 @@ fun AKMusicAppRoot(
                 SplashScreen()
             }
             launchStage == LaunchStage.DEVELOPER_INTRO -> {
-                var hasClickedContinue by remember { mutableStateOf(false) }
                 DeveloperIntroScreen(
                     onContinue = {
-                        if (!hasClickedContinue) {
-                            hasClickedContinue = true
-                            UnityAdsManager.showIfLoadedNowOrProceedImmediately(context) {
-                                launchStage = LaunchStage.MAIN_APP
-                            }
-                        } else {
-                            launchStage = LaunchStage.MAIN_APP
-                        }
+                        launchStage = LaunchStage.MAIN_APP
                     }
                 )
             }
             isEditNameDialogOpen -> {
                 NameOnboardingScreen(
                     initialName = userName,
-                    onSubmitName = { entered ->
-                        musicViewModel.saveUserName(entered)
+                    initialPassword = userPassword,
+                    isAuthenticating = isAuthenticating,
+                    authErrorMessage = authErrorMessage,
+                    onClearError = { musicViewModel.clearAuthError() },
+                    onAuthenticate = { enteredName, enteredPass, isCreate ->
+                        musicViewModel.authenticateWithNameAndPassword(
+                            name = enteredName,
+                            password = enteredPass,
+                            isCreateAccount = isCreate
+                        )
                     }
                 )
             }
@@ -377,7 +411,9 @@ fun AKMusicAppRoot(
                     drawerContent = {
                         ModalDrawerSheet(
                             drawerContainerColor = DeepCharcoal,
-                            modifier = Modifier.width(300.dp)
+                            modifier = Modifier
+                                .width(305.dp)
+                                .verticalScroll(rememberScrollState())
                         ) {
                             Column(
                                 modifier = Modifier
@@ -409,9 +445,18 @@ fun AKMusicAppRoot(
                                         fontSize = 14.sp
                                     )
                                 )
+                                val planBadgeText = if (subscriptionState.isActive()) {
+                                    "👑 ${subscriptionState.planType.displayName} Active"
+                                } else {
+                                    val remMins = ((3600 - dailyListenedSeconds).coerceAtLeast(0)) / 60
+                                    "Free Plan • ${remMins}m / 60m left today"
+                                }
                                 Text(
-                                    text = "Your Music Universe",
-                                    style = MaterialTheme.typography.labelSmall.copy(color = MutedGray)
+                                    text = planBadgeText,
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        color = if (subscriptionState.isActive()) SpotifyVibrantGreen else MutedGray,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
                                 )
                             }
 
@@ -495,8 +540,118 @@ fun AKMusicAppRoot(
                                 modifier = Modifier.padding(vertical = 12.dp)
                             )
 
+                            // 3-Day New User "Crazy Deal" Tab (with live 3-day countdown timer).
+                            // Automatically disappears after 3 days and transitions to Premium Subscription tab!
+                            if (crazyDealRemainingSeconds > 0L) {
+                                NavigationDrawerItem(
+                                    label = {
+                                        Column {
+                                            Text(
+                                                text = "🔥 Crazy Deal (₹${subscriptionConfig.crazyDealPriceInr})",
+                                                style = MaterialTheme.typography.bodyMedium.copy(
+                                                    color = Color(0xFFFFAB40),
+                                                    fontWeight = FontWeight.ExtraBold
+                                                )
+                                            )
+                                            Text(
+                                                text = "Ends in ${formatCountdownTimer(crazyDealRemainingSeconds)}",
+                                                style = MaterialTheme.typography.labelSmall.copy(
+                                                    color = SpotifyVibrantGreen,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                            )
+                                        }
+                                    },
+                                    icon = {
+                                        Icon(
+                                            imageVector = Icons.Default.LocalFireDepartment,
+                                            contentDescription = "Crazy Deal",
+                                            tint = Color(0xFFFF9100)
+                                        )
+                                    },
+                                    selected = isCrazyDealsPopupOpen,
+                                    onClick = {
+                                        coroutineScope.launch { drawerState.close() }
+                                        musicViewModel.setCrazyDealsPopupOpen(true)
+                                    },
+                                    colors = NavigationDrawerItemDefaults.colors(
+                                        selectedContainerColor = SpotifyDarkGreenPill,
+                                        unselectedContainerColor = Color(0xFFFF6D00).copy(alpha = 0.12f),
+                                        selectedIconColor = Color(0xFFFF9100),
+                                        selectedTextColor = Color(0xFFFFAB40),
+                                        unselectedIconColor = Color(0xFFFF9100),
+                                        unselectedTextColor = PrimaryWhite
+                                    ),
+                                    modifier = Modifier
+                                        .padding(horizontal = 12.dp, vertical = 4.dp)
+                                        .testTag("drawer_crazy_deal_item")
+                                )
+                            }
+
+                            // Subscription / Premium Plans Tab (Weekly, Monthly, Forever)
                             NavigationDrawerItem(
-                                label = { Text("Change User Name ($userName)") },
+                                label = {
+                                    Column {
+                                        Text(
+                                            text = if (crazyDealRemainingSeconds <= 0L) {
+                                                "👑 Premium Subscription"
+                                            } else {
+                                                "Subscription Plans"
+                                            },
+                                            style = MaterialTheme.typography.bodyMedium.copy(
+                                                color = PrimaryWhite,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        )
+                                        if (subscriptionState.isActive()) {
+                                            val subSubtext = if (subscriptionState.planType == SubscriptionPlanType.FOREVER) {
+                                                "Forever Plan Active ♾️"
+                                            } else {
+                                                "Active • ${formatCountdownTimer(activeSubscriptionRemainingSeconds)}"
+                                            }
+                                            Text(
+                                                text = subSubtext,
+                                                style = MaterialTheme.typography.labelSmall.copy(
+                                                    color = SpotifyVibrantGreen,
+                                                    fontWeight = FontWeight.SemiBold
+                                                )
+                                            )
+                                        } else {
+                                            Text(
+                                                text = "Weekly • Monthly • Forever",
+                                                style = MaterialTheme.typography.labelSmall.copy(
+                                                    color = MutedGray
+                                                )
+                                            )
+                                        }
+                                    }
+                                },
+                                icon = {
+                                    Icon(
+                                        imageVector = Icons.Default.WorkspacePremium,
+                                        contentDescription = "Subscription",
+                                        tint = SpotifyVibrantGreen
+                                    )
+                                },
+                                selected = isSubscriptionModalOpen,
+                                onClick = {
+                                    coroutineScope.launch { drawerState.close() }
+                                    musicViewModel.setSubscriptionModalOpen(true)
+                                },
+                                colors = NavigationDrawerItemDefaults.colors(
+                                    selectedContainerColor = SpotifyDarkGreenPill,
+                                    selectedIconColor = SpotifyVibrantGreen,
+                                    selectedTextColor = SpotifyVibrantGreen,
+                                    unselectedIconColor = SpotifyVibrantGreen,
+                                    unselectedTextColor = PrimaryWhite
+                                ),
+                                modifier = Modifier
+                                    .padding(horizontal = 12.dp, vertical = 2.dp)
+                                    .testTag("drawer_subscription_item")
+                            )
+
+                            NavigationDrawerItem(
+                                label = { Text("Account / Switch User ($userName)") },
                                 icon = { Icon(Icons.Default.Person, contentDescription = null) },
                                 selected = false,
                                 onClick = {
@@ -799,6 +954,66 @@ fun AKMusicAppRoot(
         if (isDeveloperScreenOpen) {
             DeveloperProfileDialog(
                 onDismiss = { musicViewModel.setDeveloperScreenOpen(false) }
+            )
+        }
+
+        // First-User Crazy Deals Popup (shown once on Home screen within first 3 days, or when opened from 3-lines drawer)
+        if (isCrazyDealsPopupOpen && launchStage == LaunchStage.MAIN_APP) {
+            CrazyDealsPopupDialog(
+                config = subscriptionConfig,
+                remainingWindowSeconds = crazyDealRemainingSeconds,
+                onBuyClick = {
+                    musicViewModel.startFamGatewayCheckout(SubscriptionPlanType.CRAZY_DEAL)
+                },
+                onNotNowClick = {
+                    musicViewModel.setCrazyDealsPopupOpen(false)
+                }
+            )
+        }
+
+        // Subscription Plans Modal (Weekly, Monthly, Forever)
+        if (isSubscriptionModalOpen && launchStage == LaunchStage.MAIN_APP) {
+            SubscriptionPlansDialog(
+                config = subscriptionConfig,
+                subscriptionState = subscriptionState,
+                activeSubscriptionRemainingSeconds = activeSubscriptionRemainingSeconds,
+                crazyDealRemainingSeconds = crazyDealRemainingSeconds,
+                dailyListenedSeconds = dailyListenedSeconds,
+                onSelectPlanToBuy = { plan ->
+                    musicViewModel.startFamGatewayCheckout(plan)
+                },
+                onDismiss = {
+                    musicViewModel.setSubscriptionModalOpen(false)
+                }
+            )
+        }
+
+        // 1-Hour Daily Free Listening Limit Reached Modal
+        if (isDailyLimitReachedModalOpen && launchStage == LaunchStage.MAIN_APP) {
+            DailyLimitReachedDialog(
+                onBuySubscriptionClick = {
+                    musicViewModel.setDailyLimitReachedModalOpen(false)
+                    musicViewModel.setSubscriptionModalOpen(true)
+                },
+                onDismiss = {
+                    musicViewModel.setDailyLimitReachedModalOpen(false)
+                }
+            )
+        }
+
+        // FamGateway Automated UPI Checkout Modal
+        if (isFamGatewayCheckoutOpen) {
+            FamGatewayCheckoutDialog(
+                orderSession = activeCheckoutOrder,
+                isCreatingOrder = isCreatingPaymentOrder,
+                paymentStatusMessage = paymentStatusMessage,
+                errorMessage = paymentErrorMessage,
+                onVerifyNowClick = {
+                    musicViewModel.triggerImmediatePaymentVerification()
+                },
+                onDismiss = {
+                    musicViewModel.closeFamGatewayCheckout()
+                }
             )
         }
     }

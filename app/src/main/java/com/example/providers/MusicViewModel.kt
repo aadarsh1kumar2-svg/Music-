@@ -4,7 +4,11 @@ import android.Manifest
 import android.app.Application
 import android.content.ComponentName
 import android.content.ContentUris
+import android.content.Context
 import android.content.pm.PackageManager
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
@@ -17,14 +21,19 @@ import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import androidx.room.Room
 import com.example.models.AKMusicDatabase
+import com.example.models.AdminSubscriptionConfig
 import com.example.models.DownloadedSongEntity
 import com.example.models.FavoriteSongEntity
 import com.example.models.PlaylistEntity
 import com.example.models.PlaylistSongEntity
 import com.example.models.SessionHistoryEntity
 import com.example.models.Song
+import com.example.models.SubscriptionPlanType
+import com.example.models.UserSubscriptionState
 import com.example.services.AudioStreamExtractor
 import com.example.services.BackstageYouTubePlayerController
+import com.example.services.FamGatewayOrderSession
+import com.example.services.FamGatewayService
 import com.example.services.FirebaseSongsService
 import com.example.services.MusicPlaybackService
 import com.example.utils.CountryOption
@@ -86,14 +95,58 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     companion object {
         private const val TAG = "MusicViewModel"
         val PLAYBACK_SPEEDS = listOf(0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
+        const val FREE_DAILY_LIMIT_SECONDS = 3600 // 1 hour (3600 seconds) per day for Free users
+        const val CRAZY_DEAL_WINDOW_MS = 3L * 24L * 60L * 60L * 1000L // 3 days (72 hours) for new users
     }
 
     private val appContext = application.applicationContext
-    private val prefs = appContext.getSharedPreferences("ak_music_user_prefs", android.content.Context.MODE_PRIVATE)
+    private val prefs = appContext.getSharedPreferences("ak_music_user_prefs", Context.MODE_PRIVATE)
+    private val connectivityManager =
+        appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
 
-    // User Name State (First-time login)
+    // Real-time Internet Connectivity State (for No Internet Full-Screen Page)
+    private val _isInternetAvailable = MutableStateFlow(checkNetworkConnected())
+    val isInternetAvailable: StateFlow<Boolean> = _isInternetAvailable.asStateFlow()
+
+    fun checkNetworkConnected(): Boolean {
+        return try {
+            val cm = connectivityManager ?: return true
+            val activeNet = cm.activeNetwork ?: return false
+            val caps = cm.getNetworkCapabilities(activeNet) ?: return false
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ||
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) ||
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN))
+        } catch (_: Exception) {
+            true
+        }
+    }
+
+    fun refreshNetworkState() {
+        val connected = checkNetworkConnected()
+        _isInternetAvailable.value = connected
+        if (connected) {
+            refreshFirebaseCatalog()
+        }
+    }
+
+    // User Name & Password Auth State
     private val _userName = MutableStateFlow(prefs.getString("user_name", "")?.trim() ?: "")
     val userName: StateFlow<String> = _userName.asStateFlow()
+
+    private val _userPassword = MutableStateFlow(prefs.getString("user_password", "")?.trim() ?: "")
+    val userPassword: StateFlow<String> = _userPassword.asStateFlow()
+
+    private val _isAuthenticating = MutableStateFlow(false)
+    val isAuthenticating: StateFlow<Boolean> = _isAuthenticating.asStateFlow()
+
+    private val _authErrorMessage = MutableStateFlow<String?>(null)
+    val authErrorMessage: StateFlow<String?> = _authErrorMessage.asStateFlow()
+
+    fun clearAuthError() {
+        _authErrorMessage.value = null
+    }
 
     private val _isEditNameDialogOpen = MutableStateFlow(false)
     val isEditNameDialogOpen: StateFlow<Boolean> = _isEditNameDialogOpen.asStateFlow()
@@ -106,31 +159,73 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         _isDeveloperScreenOpen.value = open
     }
 
+    /**
+     * Authenticates (Sign In) or registers (Create Account) a user with unique username + password
+     * against Firebase Realtime Database.
+     */
+    fun authenticateWithNameAndPassword(
+        name: String,
+        password: String,
+        isCreateAccount: Boolean,
+        onAuthenticated: () -> Unit = {}
+    ) {
+        val cleanedName = name.trim()
+        val cleanedPass = password.trim()
+        if (cleanedName.isEmpty() || cleanedPass.isEmpty()) return
+        if (_isAuthenticating.value) return
+
+        viewModelScope.launch {
+            _isAuthenticating.value = true
+            _authErrorMessage.value = null
+
+            val result = firebaseService.authenticateUserAccount(
+                userName = cleanedName,
+                password = cleanedPass,
+                isCreateAccount = isCreateAccount
+            )
+
+            _isAuthenticating.value = false
+            result.fold(
+                onSuccess = { authRes ->
+                    val now = System.currentTimeMillis()
+                    prefs.edit()
+                        .putString("user_name", authRes.userName)
+                        .putString("user_password", authRes.password)
+                        .putString("cloud_user_id", authRes.userId)
+                        .putLong("user_created_at_ms", authRes.createdAtMs)
+                        .putLong("user_last_login_ms", now)
+                        .apply()
+
+                    _userName.value = authRes.userName
+                    _userPassword.value = authRes.password
+                    _isEditNameDialogOpen.value = false
+
+                    // Restore cloud subscription if active
+                    if (authRes.subscriptionState != null && authRes.subscriptionState.isActive(now)) {
+                        saveSubscriptionStateLocally(authRes.subscriptionState)
+                    }
+
+                    updateSubscriptionAndCrazyDealTimers()
+                    firebaseService.resetAdminDeletionFlagForFreshLogin()
+                    syncCurrentUserDataToAdminCloud(isExplicitLogin = true)
+
+                    if (authRes.isNewAccount) {
+                        emitSnackbar("Account created! Welcome to AADIFY, ${authRes.userName}! 🎉")
+                    } else {
+                        emitSnackbar("Welcome back, ${authRes.userName}! 🎵")
+                    }
+                    onAuthenticated()
+                },
+                onFailure = { err ->
+                    _authErrorMessage.value = err.message ?: "Authentication failed. Please try again."
+                }
+            )
+        }
+    }
+
     fun saveUserName(name: String) {
-        val cleaned = name.trim()
-        if (cleaned.isEmpty()) return
-        val previousName = _userName.value
-        val now = System.currentTimeMillis()
-        if (prefs.getLong("user_created_at_ms", 0L) <= 0L) {
-            prefs.edit().putLong("user_created_at_ms", now).apply()
-        }
-        // Ensure a stable cloud_user_id exists (or create a fresh one if logging in for the first time / after Admin deletion)
-        val existingUserId = prefs.getString("cloud_user_id", "")?.trim().orEmpty()
-        val resolvedUserId = if (existingUserId.isNotBlank() && previousName.isNotBlank()) {
-            existingUserId
-        } else {
-            generateCloudUserId(cleaned)
-        }
-        prefs.edit()
-            .putString("user_name", cleaned)
-            .putString("cloud_user_id", resolvedUserId)
-            .putLong("user_last_login_ms", now)
-            .apply()
-        _userName.value = cleaned
-        _isEditNameDialogOpen.value = false
-        firebaseService.resetAdminDeletionFlagForFreshLogin()
-        syncCurrentUserDataToAdminCloud(isExplicitLogin = true)
-        emitSnackbar("Welcome to AADIFY, $cleaned! 🎵")
+        val pass = _userPassword.value.ifBlank { "aadify123" }
+        authenticateWithNameAndPassword(name, pass, isCreateAccount = false)
     }
 
     private fun generateCloudUserId(userName: String): String {
@@ -160,6 +255,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setEditNameDialogOpen(open: Boolean) {
+        _authErrorMessage.value = null
         _isEditNameDialogOpen.value = open
     }
 
@@ -293,6 +389,49 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     // Services
     private val firebaseService = FirebaseSongsService(appContext)
     private val audioExtractor = AudioStreamExtractor()
+    private val famGatewayService = FamGatewayService()
+
+    // Subscription & Daily Free Limit State
+    val subscriptionConfig: StateFlow<AdminSubscriptionConfig> = firebaseService.subscriptionConfig
+
+    private val _subscriptionState = MutableStateFlow(loadPersistedSubscriptionState())
+    val subscriptionState: StateFlow<UserSubscriptionState> = _subscriptionState.asStateFlow()
+
+    private val _activeSubscriptionRemainingSeconds = MutableStateFlow(0L)
+    val activeSubscriptionRemainingSeconds: StateFlow<Long> = _activeSubscriptionRemainingSeconds.asStateFlow()
+
+    private val _crazyDealRemainingSeconds = MutableStateFlow(0L)
+    val crazyDealRemainingSeconds: StateFlow<Long> = _crazyDealRemainingSeconds.asStateFlow()
+
+    private val _dailyListenedSeconds = MutableStateFlow(loadTodayListenedSeconds())
+    val dailyListenedSeconds: StateFlow<Int> = _dailyListenedSeconds.asStateFlow()
+
+    private val _isSubscriptionModalOpen = MutableStateFlow(false)
+    val isSubscriptionModalOpen: StateFlow<Boolean> = _isSubscriptionModalOpen.asStateFlow()
+
+    private val _isCrazyDealsPopupOpen = MutableStateFlow(false)
+    val isCrazyDealsPopupOpen: StateFlow<Boolean> = _isCrazyDealsPopupOpen.asStateFlow()
+
+    private val _isDailyLimitReachedModalOpen = MutableStateFlow(false)
+    val isDailyLimitReachedModalOpen: StateFlow<Boolean> = _isDailyLimitReachedModalOpen.asStateFlow()
+
+    // FamGateway Checkout Session State
+    private val _isFamGatewayCheckoutOpen = MutableStateFlow(false)
+    val isFamGatewayCheckoutOpen: StateFlow<Boolean> = _isFamGatewayCheckoutOpen.asStateFlow()
+
+    private val _activeCheckoutOrder = MutableStateFlow<FamGatewayOrderSession?>(null)
+    val activeCheckoutOrder: StateFlow<FamGatewayOrderSession?> = _activeCheckoutOrder.asStateFlow()
+
+    private val _isCreatingPaymentOrder = MutableStateFlow(false)
+    val isCreatingPaymentOrder: StateFlow<Boolean> = _isCreatingPaymentOrder.asStateFlow()
+
+    private val _paymentStatusMessage = MutableStateFlow("Waiting for UPI payment...")
+    val paymentStatusMessage: StateFlow<String> = _paymentStatusMessage.asStateFlow()
+
+    private val _paymentErrorMessage = MutableStateFlow<String?>(null)
+    val paymentErrorMessage: StateFlow<String?> = _paymentErrorMessage.asStateFlow()
+
+    private var paymentPollingJob: Job? = null
 
     // Media3 Controller (Foreground MediaSessionService for Notification Bar + Lockscreen + Offline Playback)
     private var controllerFuture: ListenableFuture<MediaController>? = null
@@ -696,6 +835,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         initializeMediaController()
         restorePersistedPlaybackState()
         startProgressPoller()
+        startSubscriptionAndDailyLimitMonitor()
+        registerNetworkCallbackMonitor()
         if (checkAudioPermissionGranted()) {
             loadDeviceLocalSongs()
         }
@@ -747,6 +888,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         cloudUserSyncJob?.cancel()
         prefs.edit()
             .remove("user_name")
+            .remove("user_password")
             .remove("cloud_user_id")
             .remove("user_created_at_ms")
             .remove("user_last_login_ms")
@@ -762,7 +904,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         _isFullScreenPlayerOpen.value = false
         _isEditNameDialogOpen.value = false
         _userName.value = ""
-        emitSnackbar("Your account was removed by Admin. Please enter your name to login again.")
+        _userPassword.value = ""
+        emitSnackbar("Your account was removed by Admin. Please sign in or create a new account.")
     }
 
     private fun syncCurrentUserDataToAdminCloud(isExplicitLogin: Boolean = false) {
@@ -905,6 +1048,15 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             put("playlists", playlistsJsonArray)
             put("downloads", downloadsJsonArray)
             put("recentSongs", historyJsonArray)
+
+            // Subscription & Daily Free Usage Metadata for Admin Panel
+            val activeSub = _subscriptionState.value
+            val isSubActive = activeSub.isActive(nowMs)
+            put("isSubscribed", isSubActive)
+            put("subscriptionPlan", if (isSubActive) activeSub.planType.id else "free")
+            put("subscriptionPlanName", if (isSubActive) activeSub.planType.displayName else "Free Plan (1h/day limit)")
+            put("subscriptionExpiresAt", activeSub.expiresAtMs)
+            put("dailyListenedSeconds", _dailyListenedSeconds.value)
         }
 
         firebaseService.syncUserProfileToCloud(
@@ -1173,6 +1325,13 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         startPositionMs: Long = 0L,
         forceRestartFromBeginning: Boolean = false
     ) {
+        // Enforce 1-hour daily listening limit for Free users
+        refreshDailyLimitBucketIfNeeded()
+        if (!_subscriptionState.value.isActive() && _dailyListenedSeconds.value >= FREE_DAILY_LIMIT_SECONDS) {
+            pausePlaybackForDailyLimit()
+            return
+        }
+
         val currentList = customQueue?.takeIf { it.isNotEmpty() }
             ?: allSongs.value.takeIf { it.isNotEmpty() }
             ?: listOf(song)
@@ -1335,6 +1494,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     fun togglePlayPause() {
         val activeSong = _currentSong.value ?: return
+        refreshDailyLimitBucketIfNeeded()
+        if (!_isPlaying.value && !_subscriptionState.value.isActive() && _dailyListenedSeconds.value >= FREE_DAILY_LIMIT_SECONDS) {
+            pausePlaybackForDailyLimit()
+            return
+        }
         MusicPlaybackService.clearExternalMediaPauseState()
         if (!isCurrentSongLoadedInEngine) {
             playSong(activeSong, _queue.value, startPositionMs = getValidResumePositionMs())
@@ -1456,6 +1620,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun cycleRepeatMode() {
+        if (!_subscriptionState.value.isActive()) {
+            _repeatMode.value = RepeatModeState.OFF
+            emitSnackbar("Repeat mode is for Premium subscribers. Upgrade to unlock Repeat!")
+            _isSubscriptionModalOpen.value = true
+            return
+        }
         val next = when (_repeatMode.value) {
             RepeatModeState.OFF -> RepeatModeState.ALL
             RepeatModeState.ALL -> RepeatModeState.ONE
@@ -1488,6 +1658,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun createNewPlaylist(name: String, initialSong: Song? = null) {
+        if (!_subscriptionState.value.isActive()) {
+            emitSnackbar("Free users cannot create playlists. Buy a subscription to create playlists!")
+            _isSubscriptionModalOpen.value = true
+            return
+        }
         val trimmed = name.trim()
         if (trimmed.isEmpty()) return
         viewModelScope.launch {
@@ -1636,8 +1811,351 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         _snackbarMessage.tryEmit(message)
     }
 
+    // =========================================================================
+    // SUBSCRIPTION, CRAZY DEAL 3-DAY WINDOW, 1-HR DAILY LIMIT & FAMGATEWAY UPI
+    // =========================================================================
+
+    private fun registerNetworkCallbackMonitor() {
+        try {
+            val cm = connectivityManager ?: return
+            cm.registerDefaultNetworkCallback(object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    _isInternetAvailable.value = true
+                }
+
+                override fun onLost(network: Network) {
+                    _isInternetAvailable.value = checkNetworkConnected()
+                }
+
+                override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+                    val hasNet = networkCapabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    _isInternetAvailable.value = hasNet
+                }
+            })
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun todayDateKey(): String {
+        return SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+    }
+
+    private fun loadTodayListenedSeconds(): Int {
+        val today = todayDateKey()
+        val savedDay = prefs.getString("daily_limit_date_key", "") ?: ""
+        return if (savedDay == today) {
+            prefs.getInt("daily_listened_seconds", 0).coerceAtLeast(0)
+        } else {
+            prefs.edit()
+                .putString("daily_limit_date_key", today)
+                .putInt("daily_listened_seconds", 0)
+                .apply()
+            0
+        }
+    }
+
+    private fun refreshDailyLimitBucketIfNeeded() {
+        val today = todayDateKey()
+        val savedDay = prefs.getString("daily_limit_date_key", "") ?: ""
+        if (savedDay != today) {
+            prefs.edit()
+                .putString("daily_limit_date_key", today)
+                .putInt("daily_listened_seconds", 0)
+                .apply()
+            _dailyListenedSeconds.value = 0
+            _isDailyLimitReachedModalOpen.value = false
+        }
+    }
+
+    private fun loadPersistedSubscriptionState(): UserSubscriptionState {
+        val planId = prefs.getString("sub_plan_id", "none") ?: "none"
+        val activatedAt = prefs.getLong("sub_activated_at_ms", 0L)
+        val expiresAt = prefs.getLong("sub_expires_at_ms", 0L)
+        val orderId = prefs.getString("sub_order_id", "") ?: ""
+        val utr = prefs.getString("sub_utr", "") ?: ""
+        val state = UserSubscriptionState(
+            planType = SubscriptionPlanType.fromId(planId),
+            activatedAtMs = activatedAt,
+            expiresAtMs = expiresAt,
+            orderId = orderId,
+            utr = utr
+        )
+        return if (state.isActive()) state else UserSubscriptionState()
+    }
+
+    private fun saveSubscriptionStateLocally(state: UserSubscriptionState) {
+        prefs.edit()
+            .putString("sub_plan_id", state.planType.id)
+            .putLong("sub_activated_at_ms", state.activatedAtMs)
+            .putLong("sub_expires_at_ms", state.expiresAtMs)
+            .putString("sub_order_id", state.orderId)
+            .putString("sub_utr", state.utr)
+            .apply()
+        _subscriptionState.value = state
+        _activeSubscriptionRemainingSeconds.value = state.remainingSeconds()
+    }
+
+    private fun updateSubscriptionAndCrazyDealTimers() {
+        val nowMs = System.currentTimeMillis()
+        // 1. Check active subscription timer
+        val currentSub = _subscriptionState.value
+        if (currentSub.planType != SubscriptionPlanType.NONE) {
+            if (currentSub.isActive(nowMs)) {
+                _activeSubscriptionRemainingSeconds.value = currentSub.remainingSeconds(nowMs)
+            } else {
+                // Plan expired -> revert to Free
+                saveSubscriptionStateLocally(UserSubscriptionState())
+                _repeatMode.value = RepeatModeState.OFF
+                emitSnackbar("Your subscription plan has expired.")
+            }
+        } else {
+            _activeSubscriptionRemainingSeconds.value = 0L
+        }
+
+        // 2. Check 3-day (72-hour) Crazy Deal window for new users
+        val createdAtMs = prefs.getLong("user_created_at_ms", 0L)
+        if (createdAtMs > 0L) {
+            val endWindowMs = createdAtMs + CRAZY_DEAL_WINDOW_MS
+            val remSec = ((endWindowMs - nowMs) / 1000L).coerceAtLeast(0L)
+            _crazyDealRemainingSeconds.value = remSec
+        } else {
+            _crazyDealRemainingSeconds.value = 0L
+        }
+    }
+
+    private fun startSubscriptionAndDailyLimitMonitor() {
+        updateSubscriptionAndCrazyDealTimers()
+        viewModelScope.launch {
+            while (isActive) {
+                delay(1000L)
+                _isInternetAvailable.value = checkNetworkConnected()
+                refreshDailyLimitBucketIfNeeded()
+                updateSubscriptionAndCrazyDealTimers()
+
+                // Track active listening seconds for Free users (1 hour = 3600s daily limit)
+                if (_isPlaying.value && !_isBuffering.value && !_subscriptionState.value.isActive()) {
+                    val nextSec = _dailyListenedSeconds.value + 1
+                    _dailyListenedSeconds.value = nextSec
+                    if (nextSec % 5 == 0 || nextSec >= FREE_DAILY_LIMIT_SECONDS) {
+                        prefs.edit()
+                            .putString("daily_limit_date_key", todayDateKey())
+                            .putInt("daily_listened_seconds", nextSec)
+                            .apply()
+                    }
+                    if (nextSec >= FREE_DAILY_LIMIT_SECONDS) {
+                        pausePlaybackForDailyLimit()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun pausePlaybackForDailyLimit() {
+        try {
+            if (isUsingExoPlayerFallback) {
+                MusicPlaybackService.syncPlayState(false)
+            } else {
+                backstagePlayer.pauseVideo()
+                MusicPlaybackService.syncPlayState(false)
+            }
+        } catch (_: Exception) {
+        }
+        _isPlaying.value = false
+        _isBuffering.value = false
+        _isDailyLimitReachedModalOpen.value = true
+        emitSnackbar("Your 1-hour daily free limit has been reached! Buy a subscription or wait for next day.")
+    }
+
+    /**
+     * Called when the user enters the Home screen after onboarding/splash.
+     * Shows the Crazy Deals popup ONLY once for new users (within the 3-day window) so it
+     * doesn't annoyingly pop up every single time the user opens the app.
+     */
+    fun onHomeScreenEntered() {
+        val currentName = _userName.value.trim()
+        if (currentName.isEmpty()) return
+        if (_subscriptionState.value.isActive()) return
+        updateSubscriptionAndCrazyDealTimers()
+        if (_crazyDealRemainingSeconds.value <= 0L) return
+
+        val userId = getOrCreateCloudUserId(currentName)
+        val seenKey = "crazy_deal_popup_seen_$userId"
+        val alreadySeen = prefs.getBoolean(seenKey, false)
+        if (!alreadySeen) {
+            prefs.edit().putBoolean(seenKey, true).apply()
+            _isCrazyDealsPopupOpen.value = true
+        }
+    }
+
+    fun setCrazyDealsPopupOpen(open: Boolean) {
+        _isCrazyDealsPopupOpen.value = open
+    }
+
+    fun setSubscriptionModalOpen(open: Boolean) {
+        _isSubscriptionModalOpen.value = open
+    }
+
+    fun setDailyLimitReachedModalOpen(open: Boolean) {
+        _isDailyLimitReachedModalOpen.value = open
+    }
+
+    /**
+     * Initiates FamGateway v2.0 automated UPI payment for the chosen plan (`CRAZY_DEAL`, `WEEKLY`, `MONTHLY`, `FOREVER`).
+     */
+    fun startFamGatewayCheckout(planType: SubscriptionPlanType) {
+        val config = subscriptionConfig.value
+        val amountInr = when (planType) {
+            SubscriptionPlanType.CRAZY_DEAL -> config.crazyDealPriceInr
+            SubscriptionPlanType.WEEKLY -> config.weeklyPriceInr
+            SubscriptionPlanType.MONTHLY -> config.monthlyPriceInr
+            SubscriptionPlanType.FOREVER -> config.foreverPriceInr
+            SubscriptionPlanType.NONE -> return
+        }
+
+        val currentName = _userName.value.trim().ifBlank { "AADIFY User" }
+        val userId = getOrCreateCloudUserId(currentName)
+
+        paymentPollingJob?.cancel()
+        _isCrazyDealsPopupOpen.value = false
+        _isSubscriptionModalOpen.value = false
+        _isDailyLimitReachedModalOpen.value = false
+        _isFamGatewayCheckoutOpen.value = true
+        _isCreatingPaymentOrder.value = true
+        _activeCheckoutOrder.value = null
+        _paymentErrorMessage.value = null
+        _paymentStatusMessage.value = "Creating FamGateway UPI order..."
+
+        viewModelScope.launch {
+            val result = famGatewayService.createOrder(
+                planType = planType,
+                amountInr = amountInr,
+                customerName = currentName,
+                customerId = userId
+            )
+            _isCreatingPaymentOrder.value = false
+            result.fold(
+                onSuccess = { session ->
+                    _activeCheckoutOrder.value = session
+                    _paymentStatusMessage.value = "Waiting for payment confirmation (auto-checking every 3s)..."
+                    startPollingFamGatewayOrder(session)
+                },
+                onFailure = { err ->
+                    _paymentErrorMessage.value = err.message ?: "Could not create payment order."
+                }
+            )
+        }
+    }
+
+    private fun startPollingFamGatewayOrder(session: FamGatewayOrderSession) {
+        paymentPollingJob?.cancel()
+        paymentPollingJob = viewModelScope.launch {
+            val startTimeMs = System.currentTimeMillis()
+            val maxPollDurationMs = 15 * 60 * 1000L // 15 minutes
+            while (isActive && _isFamGatewayCheckoutOpen.value && (System.currentTimeMillis() - startTimeMs) < maxPollDurationMs) {
+                delay(3000L)
+                val statusResult = famGatewayService.checkOrderStatus(session.orderId)
+                statusResult.onSuccess { status ->
+                    when {
+                        status.isSuccess -> {
+                            onFamGatewayPaymentVerified(
+                                session = session,
+                                utr = status.utr
+                            )
+                            return@launch
+                        }
+                        status.isFailed -> {
+                            _paymentStatusMessage.value = "Payment failed or expired. Please try again."
+                            return@launch
+                        }
+                        else -> {
+                            _paymentStatusMessage.value = "Waiting for UPI payment approval (${status.status})..."
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fun triggerImmediatePaymentVerification() {
+        val session = _activeCheckoutOrder.value ?: return
+        viewModelScope.launch {
+            _paymentStatusMessage.value = "Verifying payment status with FamGateway..."
+            val res = famGatewayService.verifyOrderAuthoritative(session.orderId)
+            res.fold(
+                onSuccess = { status ->
+                    if (status.isSuccess) {
+                        onFamGatewayPaymentVerified(session, status.utr)
+                    } else {
+                        _paymentStatusMessage.value = "Status: ${status.status} — Complete payment in your UPI app."
+                    }
+                },
+                onFailure = {
+                    _paymentStatusMessage.value = "Still waiting for UPI payment confirmation..."
+                }
+            )
+        }
+    }
+
+    private fun onFamGatewayPaymentVerified(session: FamGatewayOrderSession, utr: String) {
+        paymentPollingJob?.cancel()
+        val nowMs = System.currentTimeMillis()
+        val config = subscriptionConfig.value
+        val durationMs = when (session.planType) {
+            SubscriptionPlanType.CRAZY_DEAL -> config.crazyDealDurationDays.coerceAtLeast(1) * 86_400_000L
+            SubscriptionPlanType.WEEKLY -> 7L * 86_400_000L
+            SubscriptionPlanType.MONTHLY -> 30L * 86_400_000L
+            SubscriptionPlanType.FOREVER -> 100L * 365L * 86_400_000L
+            SubscriptionPlanType.NONE -> 0L
+        }
+
+        val currentSub = _subscriptionState.value
+        val baseStartMs = if (currentSub.isActive(nowMs) && currentSub.expiresAtMs > nowMs && currentSub.planType != SubscriptionPlanType.FOREVER) {
+            currentSub.expiresAtMs
+        } else {
+            nowMs
+        }
+
+        val newState = UserSubscriptionState(
+            planType = session.planType,
+            activatedAtMs = nowMs,
+            expiresAtMs = baseStartMs + durationMs,
+            orderId = session.orderId,
+            utr = utr
+        )
+
+        saveSubscriptionStateLocally(newState)
+        _isFamGatewayCheckoutOpen.value = false
+        _isDailyLimitReachedModalOpen.value = false
+        _isSubscriptionModalOpen.value = false
+        _isCrazyDealsPopupOpen.value = false
+        _activeCheckoutOrder.value = null
+
+        val currentName = _userName.value.trim()
+        if (currentName.isNotBlank()) {
+            val userId = getOrCreateCloudUserId(currentName)
+            firebaseService.syncSubscriptionToCloud(
+                userId = userId,
+                userName = currentName,
+                state = newState,
+                amountInr = session.amountInr
+            )
+            syncCurrentUserDataToAdminCloud(isExplicitLogin = false)
+        }
+
+        emitSnackbar("🎉 Payment Successful! ${session.planType.displayName} activated!")
+    }
+
+    fun closeFamGatewayCheckout() {
+        paymentPollingJob?.cancel()
+        _isFamGatewayCheckoutOpen.value = false
+        _activeCheckoutOrder.value = null
+        _isCreatingPaymentOrder.value = false
+        _paymentErrorMessage.value = null
+    }
+
     override fun onCleared() {
         super.onCleared()
+        paymentPollingJob?.cancel()
         firebaseService.onUserDeletedByAdminCallback = null
         MusicPlaybackService.onSkipNextCallback = null
         MusicPlaybackService.onSkipPreviousCallback = null
