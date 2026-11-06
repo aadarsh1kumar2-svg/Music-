@@ -312,6 +312,7 @@ private fun LibraryRootContent(
                         icon = Icons.Default.Favorite,
                         title = stringResource(id = R.string.library_favorites),
                         countBadge = favoritesCount,
+                        showVipBadge = true,
                         testTag = "library_row_favorites",
                         onClick = { onNavigateSubScreen(LibrarySubScreen.Favorites) }
                     )
@@ -334,6 +335,7 @@ private fun LibraryRootContent(
                         icon = Icons.AutoMirrored.Filled.PlaylistPlay,
                         title = stringResource(id = R.string.library_playlists),
                         countBadge = playlistsCount,
+                        showVipBadge = true,
                         testTag = "library_row_playlists",
                         onClick = { onNavigateSubScreen(LibrarySubScreen.Playlists) }
                     )
@@ -408,6 +410,7 @@ private fun LibraryMenuCardRow(
     title: String,
     countBadge: Int,
     testTag: String,
+    showVipBadge: Boolean = false,
     onClick: () -> Unit
 ) {
     Row(
@@ -428,22 +431,48 @@ private fun LibraryMenuCardRow(
             Icon(
                 imageVector = icon,
                 contentDescription = title,
-                tint = PrimaryWhite,
+                tint = if (showVipBadge) SpotifyVibrantGreen else PrimaryWhite,
                 modifier = Modifier.size(26.dp)
             )
         }
 
         Spacer(modifier = Modifier.width(18.dp))
 
-        Text(
-            text = title,
-            style = MaterialTheme.typography.titleLarge.copy(
-                color = PrimaryWhite,
-                fontWeight = FontWeight.Medium,
-                fontSize = 19.sp
-            ),
-            modifier = Modifier.weight(1f)
-        )
+        Row(
+            modifier = Modifier.weight(1f),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleLarge.copy(
+                    color = PrimaryWhite,
+                    fontWeight = FontWeight.Medium,
+                    fontSize = 19.sp
+                )
+            )
+            if (showVipBadge) {
+                Spacer(modifier = Modifier.width(10.dp))
+                Surface(
+                    color = SpotifyDarkGreenPill,
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.border(
+                        width = 1.dp,
+                        color = SpotifyVibrantGreen,
+                        shape = RoundedCornerShape(8.dp)
+                    )
+                ) {
+                    Text(
+                        text = "👑 VIP",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            color = SpotifyVibrantGreen,
+                            fontWeight = FontWeight.ExtraBold,
+                            fontSize = 11.sp
+                        ),
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                    )
+                }
+            }
+        }
 
         if (countBadge > 0) {
             Text(

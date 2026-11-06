@@ -134,7 +134,7 @@ class MusicPlaybackService : MediaSessionService() {
         private val serviceKeepAliveRunnable = object : Runnable {
             override fun run() {
                 mainHandler.removeCallbacks(this)
-                if (pendingSync?.isPlaying == true && !isPausedByExternalMedia) {
+                if (pendingSync != null && !isPausedByExternalMedia) {
                     isKeepAliveScheduled = true
                     onKeepOnlineEngineAwakeCallback?.invoke()
                     mainHandler.postDelayed(this, 1500L)
@@ -185,12 +185,9 @@ class MusicPlaybackService : MediaSessionService() {
             val req = SyncRequest(song, isPlaying, directStreamUri, playbackSpeed, startPositionMs.coerceAtLeast(0L))
             pendingSync = req
             mainHandler.post {
-                if (isPlaying) {
-                    mainHandler.removeCallbacks(serviceKeepAliveRunnable)
-                    mainHandler.postDelayed(serviceKeepAliveRunnable, 1200L)
-                } else {
-                    mainHandler.removeCallbacks(serviceKeepAliveRunnable)
-                }
+                mainHandler.removeCallbacks(serviceKeepAliveRunnable)
+                isKeepAliveScheduled = true
+                mainHandler.postDelayed(serviceKeepAliveRunnable, 1200L)
                 if (!isForegroundServiceStarted) {
                     BackgroundGamingAudioKeeper.ensureForegroundMediaServiceStarted(context)
                 }
@@ -204,22 +201,18 @@ class MusicPlaybackService : MediaSessionService() {
         }
 
         fun syncPlayState(isPlaying: Boolean) {
-            val stateChanged = pendingSync?.isPlaying != isPlaying
             pendingSync = pendingSync?.copy(isPlaying = isPlaying)
             mainHandler.post {
                 if (isPlaying) {
                     isPausedByExternalMedia = false
                     instance?.cancelExternalMediaResumeWatch()
-                    if (!isKeepAliveScheduled) {
-                        isKeepAliveScheduled = true
-                        mainHandler.removeCallbacks(serviceKeepAliveRunnable)
-                        mainHandler.postDelayed(serviceKeepAliveRunnable, 1200L)
-                    }
-                } else {
-                    isKeepAliveScheduled = false
-                    mainHandler.removeCallbacks(serviceKeepAliveRunnable)
                 }
-                instance?.applyPlayStateInternal(isPlaying, forceNotificationUpdate = stateChanged)
+                if (!isKeepAliveScheduled && pendingSync != null) {
+                    isKeepAliveScheduled = true
+                    mainHandler.removeCallbacks(serviceKeepAliveRunnable)
+                    mainHandler.postDelayed(serviceKeepAliveRunnable, 1200L)
+                }
+                instance?.applyPlayStateInternal(isPlaying, forceNotificationUpdate = true)
             }
         }
 
@@ -688,44 +681,77 @@ class MusicPlaybackService : MediaSessionService() {
                 super.seekTo(mediaItemIndex, positionMs)
             }
 
+            override fun getPlayWhenReady(): Boolean {
+                if (!isDirectAudioMode && pendingSync != null) {
+                    return pendingSync?.isPlaying == true
+                }
+                return super.getPlayWhenReady()
+            }
+
+            override fun isPlaying(): Boolean {
+                if (!isDirectAudioMode && pendingSync != null) {
+                    return pendingSync?.isPlaying == true
+                }
+                return super.isPlaying()
+            }
+
+            override fun getPlaybackState(): Int {
+                if (!isDirectAudioMode && pendingSync != null) {
+                    return Player.STATE_READY
+                }
+                return super.getPlaybackState()
+            }
+
             override fun play() {
-                super.play()
+                if (isDirectAudioMode) {
+                    super.play()
+                }
                 if (!isInternalSync) {
                     isPausedByExternalMedia = false
                     cancelExternalMediaResumeWatch()
                     pendingSync = pendingSync?.copy(isPlaying = true)
+                    applyPlayStateInternal(true, forceNotificationUpdate = true)
                     onTogglePlayPauseCallback?.invoke(true)
                 }
             }
 
             override fun pause() {
-                super.pause()
+                if (isDirectAudioMode) {
+                    super.pause()
+                }
                 if (!isInternalSync) {
                     isPausedByExternalMedia = false
                     cancelExternalMediaResumeWatch()
                     pendingSync = pendingSync?.copy(isPlaying = false)
+                    applyPlayStateInternal(false, forceNotificationUpdate = true)
                     onTogglePlayPauseCallback?.invoke(false)
                 }
             }
 
             override fun setPlayWhenReady(playWhenReady: Boolean) {
-                super.setPlayWhenReady(playWhenReady)
+                if (isDirectAudioMode) {
+                    super.setPlayWhenReady(playWhenReady)
+                }
                 if (!isInternalSync) {
                     if (playWhenReady) {
                         isPausedByExternalMedia = false
                         cancelExternalMediaResumeWatch()
                     }
                     pendingSync = pendingSync?.copy(isPlaying = playWhenReady)
+                    applyPlayStateInternal(playWhenReady, forceNotificationUpdate = true)
                     onTogglePlayPauseCallback?.invoke(playWhenReady)
                 }
             }
 
             override fun stop() {
-                super.pause()
+                if (isDirectAudioMode) {
+                    super.pause()
+                }
                 if (!isInternalSync) {
                     isPausedByExternalMedia = false
                     cancelExternalMediaResumeWatch()
                     pendingSync = pendingSync?.copy(isPlaying = false)
+                    applyPlayStateInternal(false, forceNotificationUpdate = true)
                     onTogglePlayPauseCallback?.invoke(false)
                 }
             }
@@ -1217,7 +1243,7 @@ class MusicPlaybackService : MediaSessionService() {
             val startPos = req.startPositionMs.coerceAtLeast(0L)
             player.setMediaItems(listOf(prevItem, currentItem, nextItem), /* startIndex = */ 1, /* startPositionMs = */ startPos)
             player.prepare()
-            if (req.isPlaying) {
+            if (req.isPlaying || !isDirectAudioMode) {
                 player.play()
                 try {
                     if (wakeLock?.isHeld == false) wakeLock?.acquire(6 * 60 * 60 * 1000L)
@@ -1339,7 +1365,6 @@ class MusicPlaybackService : MediaSessionService() {
 
     private fun applyPlayStateInternal(shouldPlay: Boolean, forceNotificationUpdate: Boolean = true) {
         val player = exoPlayerInstance ?: return
-        val wasPlayWhenReady = player.playWhenReady
         isInternalSync = true
         try {
             player.volume = 1.0f
@@ -1356,6 +1381,10 @@ class MusicPlaybackService : MediaSessionService() {
                     if (!player.isPlaying || !player.playWhenReady) {
                         player.play()
                     }
+                    if (!isDirectAudioMode && player.mediaItemCount >= 3) {
+                        val targetSeekMs = syncedOnlinePositionMs.coerceIn(0L, 590_000L)
+                        player.seekTo(1, targetSeekMs)
+                    }
                 }
                 try {
                     if (wakeLock?.isHeld == false) wakeLock?.acquire(6 * 60 * 60 * 1000L)
@@ -1364,11 +1393,27 @@ class MusicPlaybackService : MediaSessionService() {
                 } catch (_: Exception) {
                 }
             } else {
-                if (player.isPlaying || player.playWhenReady) {
-                    player.pause()
+                if (isDirectAudioMode) {
+                    if (player.isPlaying || player.playWhenReady) {
+                        player.pause()
+                    }
+                } else {
+                    // Keep silent keep-alive WAV active in background even while paused so Android
+                    // never suspends the WebView or MediaSession process; nudge seek position so
+                    // MediaSession re-evaluates ForwardingPlayer.isPlaying() = false immediately!
+                    if (player.playbackState == Player.STATE_IDLE || player.playbackState == Player.STATE_ENDED) {
+                        player.prepare()
+                    }
+                    if (!player.isPlaying || !player.playWhenReady) {
+                        player.play()
+                    }
+                    if (player.mediaItemCount >= 3) {
+                        val targetSeekMs = syncedOnlinePositionMs.coerceIn(0L, 590_000L)
+                        player.seekTo(1, targetSeekMs)
+                    }
                 }
             }
-            if (forceNotificationUpdate || wasPlayWhenReady != shouldPlay) {
+            if (forceNotificationUpdate) {
                 mediaSession?.let { session ->
                     try {
                         onUpdateNotification(session, shouldPlay)

@@ -544,9 +544,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun keepEngineAwakeInBackground() {
-        if (_currentSong.value != null && _isPlaying.value && !isUsingExoPlayerFallback) {
+        if (_currentSong.value != null && !isUsingExoPlayerFallback) {
             backstagePlayer.keepAwake()
-            MusicPlaybackService.syncPlayState(true)
+            if (_isPlaying.value) {
+                MusicPlaybackService.syncPlayState(true)
+            }
         }
     }
 
@@ -725,33 +727,34 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             viewModelScope.launch { skipToPrevious() }
         }
         MusicPlaybackService.onTogglePlayPauseCallback = { shouldPlay ->
-            viewModelScope.launch {
-                val active = _currentSong.value ?: return@launch
-                if (!isCurrentSongLoadedInEngine && shouldPlay) {
-                    playSong(active, _queue.value, startPositionMs = getValidResumePositionMs())
-                    return@launch
-                }
-                if (isUsingExoPlayerFallback) {
-                    _isPlaying.value = shouldPlay
-                    if (shouldPlay) {
-                        _isBuffering.value = false
-                    } else {
-                        prefs.edit().putLong("last_position_ms", _currentPositionMs.value).apply()
-                    }
-                    MusicPlaybackService.syncPlayState(shouldPlay)
-                } else {
-                    if (shouldPlay) {
-                        backstagePlayer.playVideo()
+            val active = _currentSong.value
+            if (active != null) {
+                if (shouldPlay) {
+                    refreshDailyLimitBucketIfNeeded()
+                    if (!_subscriptionState.value.isActive() && _dailyListenedSeconds.value >= FREE_DAILY_LIMIT_SECONDS) {
+                        viewModelScope.launch { pausePlaybackForDailyLimit() }
+                    } else if (!isCurrentSongLoadedInEngine || hasHandledEndForCurrentSong) {
+                        viewModelScope.launch {
+                            playSong(active, _queue.value, startPositionMs = getValidResumePositionMs())
+                        }
+                    } else if (isUsingExoPlayerFallback) {
                         _isPlaying.value = true
                         _isBuffering.value = false
                         MusicPlaybackService.syncPlayState(true)
                     } else {
-                        prefs.edit().putLong("last_position_ms", _currentPositionMs.value).apply()
-                        backstagePlayer.pauseVideo()
-                        _isPlaying.value = false
+                        backstagePlayer.playVideo()
+                        _isPlaying.value = true
                         _isBuffering.value = false
-                        MusicPlaybackService.syncPlayState(false)
+                        MusicPlaybackService.syncPlayState(true)
                     }
+                } else {
+                    prefs.edit().putLong("last_position_ms", _currentPositionMs.value).apply()
+                    if (!isUsingExoPlayerFallback) {
+                        backstagePlayer.pauseVideo()
+                    }
+                    _isPlaying.value = false
+                    _isBuffering.value = false
+                    MusicPlaybackService.syncPlayState(false)
                 }
             }
         }
@@ -799,7 +802,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         MusicPlaybackService.onKeepOnlineEngineAwakeCallback = {
-            if (_currentSong.value != null && _isPlaying.value && !isUsingExoPlayerFallback && !hasHandledEndForCurrentSong) {
+            if (_currentSong.value != null && !isUsingExoPlayerFallback && !hasHandledEndForCurrentSong) {
                 backstagePlayer.keepAwake()
             }
         }
@@ -850,6 +853,22 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         firebaseService.onUserDeletedByAdminCallback = {
             viewModelScope.launch {
                 handleCurrentUserDeletedByAdmin()
+            }
+        }
+
+        firebaseService.onAdminVipStateSyncedCallback = { cloudVipState ->
+            viewModelScope.launch {
+                if (cloudVipState != null && cloudVipState.isActive()) {
+                    val current = _subscriptionState.value
+                    val isNewOrChanged = !current.isActive() ||
+                        current.planType != cloudVipState.planType ||
+                        kotlin.math.abs(current.expiresAtMs - cloudVipState.expiresAtMs) > 60_000L
+                    if (isNewOrChanged) {
+                        saveSubscriptionStateLocally(cloudVipState)
+                        _isDailyLimitReachedModalOpen.value = false
+                        emitSnackbar("👑 VIP Activated (${cloudVipState.planType.displayName})!")
+                    }
+                }
             }
         }
 
@@ -1004,10 +1023,14 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             put("email", "$slug@aadify.app")
 
             // Status & Device Metadata
-            put("status", "Active")
+            val activeSub = _subscriptionState.value
+            val isSubActive = activeSub.isActive(nowMs)
+            put("status", if (isSubActive) "VIP" else "Active")
             put("isOnline", true)
             put("active", true)
-            put("role", "User")
+            if (isSubActive) {
+                put("role", "VIP")
+            }
             put("loginType", "Name Login")
             put("appName", "AADIFY")
             put("platform", "Android")
@@ -1050,12 +1073,17 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             put("recentSongs", historyJsonArray)
 
             // Subscription & Daily Free Usage Metadata for Admin Panel
-            val activeSub = _subscriptionState.value
-            val isSubActive = activeSub.isActive(nowMs)
-            put("isSubscribed", isSubActive)
-            put("subscriptionPlan", if (isSubActive) activeSub.planType.id else "free")
-            put("subscriptionPlanName", if (isSubActive) activeSub.planType.displayName else "Free Plan (1h/day limit)")
-            put("subscriptionExpiresAt", activeSub.expiresAtMs)
+            if (isSubActive) {
+                put("isSubscribed", true)
+                put("isVip", true)
+                put("vip", true)
+                put("isPremium", true)
+                put("subscriptionPlan", activeSub.planType.id)
+                put("vipPlan", activeSub.planType.id)
+                put("subscriptionPlanName", activeSub.planType.displayName)
+                put("subscriptionExpiresAt", activeSub.expiresAtMs)
+                put("vipExpiresAt", activeSub.expiresAtMs)
+            }
             put("dailyListenedSeconds", _dailyListenedSeconds.value)
         }
 
@@ -1209,6 +1237,15 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun openLibrarySubScreen(subScreen: LibrarySubScreen) {
+        if ((subScreen is LibrarySubScreen.Playlists ||
+                subScreen is LibrarySubScreen.PlaylistDetail ||
+                subScreen is LibrarySubScreen.Favorites) &&
+            !_subscriptionState.value.isActive()
+        ) {
+            emitSnackbar("👑 VIP Subscription required! Buy a subscription to unlock Playlists & Favorites.")
+            _isSubscriptionModalOpen.value = true
+            return
+        }
         _selectedTab.value = MainTab.LIBRARY
         _librarySubScreen.value = subScreen
         if (subScreen is LibrarySubScreen.MyMusic && checkAudioPermissionGranted()) {
@@ -1300,6 +1337,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun openPlaylistPicker(song: Song) {
+        if (!_subscriptionState.value.isActive()) {
+            emitSnackbar("👑 Playlists are a VIP feature! Buy a subscription to unlock Playlists.")
+            _isSubscriptionModalOpen.value = true
+            return
+        }
         _playlistPickerSong.value = song
     }
 
@@ -1645,6 +1687,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun toggleFavorite(song: Song) {
+        if (!_subscriptionState.value.isActive()) {
+            emitSnackbar("👑 Favorite Songs is a VIP feature! Buy a subscription to save Favorites.")
+            _isSubscriptionModalOpen.value = true
+            return
+        }
         viewModelScope.launch {
             val currentlyFav = favoriteEntities.value.any { it.id == song.id }
             if (currentlyFav) {
@@ -2023,7 +2070,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         _isCreatingPaymentOrder.value = true
         _activeCheckoutOrder.value = null
         _paymentErrorMessage.value = null
-        _paymentStatusMessage.value = "Creating FamGateway UPI order..."
+        _paymentStatusMessage.value = "Creating AadarshPay UPI order..."
 
         viewModelScope.launch {
             val result = famGatewayService.createOrder(
@@ -2036,7 +2083,13 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             result.fold(
                 onSuccess = { session ->
                     _activeCheckoutOrder.value = session
-                    _paymentStatusMessage.value = "Waiting for payment confirmation (auto-checking every 3s)..."
+                    _paymentStatusMessage.value = "Waiting for AadarshPay confirmation (auto-checking every 3s)..."
+                    firebaseService.logPaymentAttemptToCloud(
+                        userId = userId,
+                        userName = currentName,
+                        session = session,
+                        status = "PENDING"
+                    )
                     startPollingFamGatewayOrder(session)
                 },
                 onFailure = { err ->
@@ -2048,6 +2101,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun startPollingFamGatewayOrder(session: FamGatewayOrderSession) {
         paymentPollingJob?.cancel()
+        val currentName = _userName.value.trim().ifBlank { "AADIFY User" }
+        val userId = getOrCreateCloudUserId(currentName)
         paymentPollingJob = viewModelScope.launch {
             val startTimeMs = System.currentTimeMillis()
             val maxPollDurationMs = 15 * 60 * 1000L // 15 minutes
@@ -2065,10 +2120,16 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                         }
                         status.isFailed -> {
                             _paymentStatusMessage.value = "Payment failed or expired. Please try again."
+                            firebaseService.logPaymentAttemptToCloud(
+                                userId = userId,
+                                userName = currentName,
+                                session = session,
+                                status = "FAILED"
+                            )
                             return@launch
                         }
                         else -> {
-                            _paymentStatusMessage.value = "Waiting for UPI payment approval (${status.status})..."
+                            _paymentStatusMessage.value = "Waiting for AadarshPay UPI approval (${status.status})..."
                         }
                     }
                 }
@@ -2079,7 +2140,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     fun triggerImmediatePaymentVerification() {
         val session = _activeCheckoutOrder.value ?: return
         viewModelScope.launch {
-            _paymentStatusMessage.value = "Verifying payment status with FamGateway..."
+            _paymentStatusMessage.value = "Verifying payment status with AadarshPay..."
             val res = famGatewayService.verifyOrderAuthoritative(session.orderId)
             res.fold(
                 onSuccess = { status ->
@@ -2090,7 +2151,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 },
                 onFailure = {
-                    _paymentStatusMessage.value = "Still waiting for UPI payment confirmation..."
+                    _paymentStatusMessage.value = "Still waiting for AadarshPay UPI confirmation..."
                 }
             )
         }
@@ -2130,23 +2191,39 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         _isCrazyDealsPopupOpen.value = false
         _activeCheckoutOrder.value = null
 
-        val currentName = _userName.value.trim()
-        if (currentName.isNotBlank()) {
-            val userId = getOrCreateCloudUserId(currentName)
-            firebaseService.syncSubscriptionToCloud(
-                userId = userId,
-                userName = currentName,
-                state = newState,
-                amountInr = session.amountInr
-            )
-            syncCurrentUserDataToAdminCloud(isExplicitLogin = false)
-        }
+        val currentName = _userName.value.trim().ifBlank { "AADIFY User" }
+        val userId = getOrCreateCloudUserId(currentName)
+        firebaseService.logPaymentAttemptToCloud(
+            userId = userId,
+            userName = currentName,
+            session = session,
+            status = "SUCCESS",
+            utr = utr
+        )
+        firebaseService.syncSubscriptionToCloud(
+            userId = userId,
+            userName = currentName,
+            state = newState,
+            amountInr = session.amountInr
+        )
+        syncCurrentUserDataToAdminCloud(isExplicitLogin = false)
 
         emitSnackbar("🎉 Payment Successful! ${session.planType.displayName} activated!")
     }
 
     fun closeFamGatewayCheckout() {
         paymentPollingJob?.cancel()
+        val pendingSession = _activeCheckoutOrder.value
+        if (pendingSession != null) {
+            val currentName = _userName.value.trim().ifBlank { "AADIFY User" }
+            val userId = getOrCreateCloudUserId(currentName)
+            firebaseService.logPaymentAttemptToCloud(
+                userId = userId,
+                userName = currentName,
+                session = pendingSession,
+                status = "CANCELLED"
+            )
+        }
         _isFamGatewayCheckoutOpen.value = false
         _activeCheckoutOrder.value = null
         _isCreatingPaymentOrder.value = false
@@ -2157,6 +2234,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         super.onCleared()
         paymentPollingJob?.cancel()
         firebaseService.onUserDeletedByAdminCallback = null
+        firebaseService.onAdminVipStateSyncedCallback = null
         MusicPlaybackService.onSkipNextCallback = null
         MusicPlaybackService.onSkipPreviousCallback = null
         MusicPlaybackService.onTogglePlayPauseCallback = null

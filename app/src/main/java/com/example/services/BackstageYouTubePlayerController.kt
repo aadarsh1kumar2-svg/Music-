@@ -566,19 +566,21 @@ class BackstageYouTubePlayerController(
         isPausedByExternalAudio = false
         val savedSec = lastKnownPositionSeconds.coerceAtLeast(0.0)
         mainHandler.post {
-            webView?.onResume()
-            webView?.resumeTimers()
+            val view = webView
+            view?.onResume()
+            view?.resumeTimers()
+            view?.dispatchWindowVisibilityChanged(View.VISIBLE)
+            view?.onWindowFocusChanged(true)
             try {
                 BackgroundGamingAudioKeeper.getInstance(context).startGamingKeepAlive()
             } catch (_: Exception) {
             }
-            webView?.evaluateJavascript(
-                """
+            val resumeJs = """
                 (function() {
                     window.__akUserPaused = false;
                     window.__akExternalPaused = false;
                     var mp = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
-                    var matched = false;
+                    var matched = (window.__akLoadedInPlaceId === '$targetId' || window.__akTargetVideoId === '$targetId');
                     try {
                         if (mp && typeof mp.getVideoData === 'function') {
                             var vd = mp.getVideoData();
@@ -606,21 +608,33 @@ class BackstageYouTubePlayerController(
                             v.currentTime = bestSaved;
                         } catch(e) {}
                     }
-                    if (v.paused && !window.__akTrackEndedFired) {
+                    if (!window.__akTrackEndedFired) {
                         if (mp && typeof mp.playVideo === 'function') {
                             try { mp.playVideo(); } catch(e) {}
                         }
-                        var p = v.play();
-                        if (p && typeof p.catch === 'function') { p.catch(function(){}); }
+                        try {
+                            var p = v.play();
+                            if (p && typeof p.catch === 'function') {
+                                p.catch(function() {
+                                    if (mp && typeof mp.playVideo === 'function') {
+                                        try { mp.playVideo(); } catch(e2) {}
+                                    }
+                                });
+                            }
+                        } catch (e) {}
+                    }
+                    if (typeof window.__akTick === 'function') {
+                        window.__akTick();
                     }
                     if (typeof window.__akSyncMediaSession === 'function') {
-                        window.__akSyncMediaSession();
+                        window.__akSyncMediaSession(v);
                     }
-                    return 'OK';
+                    return v.paused ? 'STILL_PAUSED' : 'OK';
                 })();
-                """.trimIndent()
-            ) { result ->
-                if (result?.contains("NEEDS_RELOAD") == true && currentLoadedVideoId.isNotBlank()) {
+            """.trimIndent()
+
+            view?.evaluateJavascript(resumeJs) { result ->
+                if (result?.contains("NEEDS_RELOAD") == true && currentLoadedVideoId.isNotBlank() && !isUserPaused) {
                     loadVideoById(
                         rawVideoId = currentLoadedVideoId,
                         startSeconds = savedSec,
@@ -630,8 +644,21 @@ class BackstageYouTubePlayerController(
                     )
                 }
             }
+
+            // Schedule rapid follow-up wake pulses so background WebView audio starts immediately
+            val retryDelays = longArrayOf(120L, 300L, 600L)
+            for (delayMs in retryDelays) {
+                mainHandler.postDelayed({
+                    if (!isUserPaused && !isPausedByExternalAudio && currentLoadedVideoId == targetId && !hasFiredEndedForCurrentTrack) {
+                        webView?.onResume()
+                        webView?.resumeTimers()
+                        webView?.evaluateJavascript(resumeJs, null)
+                    }
+                }, delayMs)
+            }
+
             mainHandler.removeCallbacks(nativeHeartbeatRunnable)
-            mainHandler.postDelayed(nativeHeartbeatRunnable, 400L)
+            mainHandler.postDelayed(nativeHeartbeatRunnable, 350L)
         }
     }
 
@@ -904,21 +931,25 @@ class BackstageYouTubePlayerController(
                             var playFn = function() {
                                 window.__akUserPaused = false;
                                 window.__akExternalPaused = false;
+                                if (window.AndroidBridge) window.AndroidBridge.onMediaAction('play');
+                                var mp = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
+                                if (mp && typeof mp.playVideo === 'function') {
+                                    try { mp.playVideo(); } catch (e) {}
+                                }
                                 var v = document.querySelector('video');
                                 if (v && v.paused) {
                                     try { v.play(); } catch (e) {}
                                 }
-                                if (window.AndroidBridge) window.AndroidBridge.onMediaAction('play');
                             };
                             playFn.__akOwned = true;
 
                             var pauseFn = function() {
                                 window.__akUserPaused = true;
+                                if (window.AndroidBridge) window.AndroidBridge.onMediaAction('pause');
                                 var v = document.querySelector('video');
                                 if (v && !v.paused) {
                                     try { v.pause(); } catch (e) {}
                                 }
-                                if (window.AndroidBridge) window.AndroidBridge.onMediaAction('pause');
                             };
                             pauseFn.__akOwned = true;
 
@@ -1520,14 +1551,11 @@ class BackstageYouTubePlayerController(
                 if (hasFiredEndedForCurrentTrack) return@post
                 if (state == STATE_PLAYING) {
                     hasSeenValidStartForCurrentToken = true
-                    if (isUserPaused) {
-                        pauseVideo()
-                        return@post
-                    }
                     if (isPausedByExternalAudio) {
                         pauseForExternalAudio()
                         return@post
                     }
+                    isUserPaused = false
                 }
                 onStateChangeUpdate(state)
             }
@@ -1548,6 +1576,12 @@ class BackstageYouTubePlayerController(
 
         @JavascriptInterface
         fun onMediaAction(action: String) {
+            if (action == "play") {
+                isUserPaused = false
+                isPausedByExternalAudio = false
+            } else if (action == "pause") {
+                isUserPaused = true
+            }
             mainHandler.post {
                 onMediaButtonAction?.invoke(action)
             }

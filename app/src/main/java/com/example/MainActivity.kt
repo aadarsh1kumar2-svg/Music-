@@ -765,6 +765,13 @@ fun AKMusicAppRoot(
                                         isLoading = isLoadingSongs,
                                         currentSong = currentSong,
                                         isPlaying = isPlaying,
+                                        isUserSubscribed = subscriptionState.isActive(),
+                                        subscriptionPlanName = subscriptionState.planType.displayName,
+                                        activeSubscriptionRemainingSeconds = activeSubscriptionRemainingSeconds,
+                                        dailyListenedSeconds = dailyListenedSeconds,
+                                        onOpenSubscriptionModal = {
+                                            musicViewModel.setSubscriptionModalOpen(true)
+                                        },
                                         onSearchQueryChange = { musicViewModel.updateHomeSearchQuery(it) },
                                         onSongClick = { song, list -> musicViewModel.playSong(song, list) },
                                         onSongMoreClick = { musicViewModel.openSongOptions(it) },

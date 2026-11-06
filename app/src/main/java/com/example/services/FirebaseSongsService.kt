@@ -132,6 +132,7 @@ class FirebaseSongsService(private val context: Context) {
 
     // User Identity & Admin User Panel Sync State
     var onUserDeletedByAdminCallback: (() -> Unit)? = null
+    var onAdminVipStateSyncedCallback: ((UserSubscriptionState?) -> Unit)? = null
     @Volatile
     private var currentWatchedUserId: String? = null
     private var currentUserNodeRef: DatabaseReference? = null
@@ -1203,7 +1204,7 @@ class FirebaseSongsService(private val context: Context) {
 
                 val primaryReq = Request.Builder()
                     .url("$DATABASE_URL/users/$cleanId.json")
-                    .put(jsonBytes)
+                    .patch(jsonBytes)
                     .build()
 
                 var uploadedOk = false
@@ -1218,7 +1219,7 @@ class FirebaseSongsService(private val context: Context) {
                     val mirrorBody = userPayload.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
                     val mirrorReq = Request.Builder()
                         .url("$DATABASE_URL/akMusic/users/$cleanId.json")
-                        .put(mirrorBody)
+                        .patch(mirrorBody)
                         .build()
                     httpClient.newCall(mirrorReq).execute().close()
                 } catch (_: Exception) {
@@ -1282,7 +1283,7 @@ class FirebaseSongsService(private val context: Context) {
             override fun onDataChange(snapshot: DataSnapshot) {
                 if (!hasConfirmedCloudUserUpload || isCurrentUserDeletedByAdmin) return
                 val elapsedSinceWrite = System.currentTimeMillis() - lastUserUploadTimestampMs
-                if (elapsedSinceWrite < 4_000L) return
+                if (elapsedSinceWrite < 2_500L) return
 
                 if (!snapshot.exists() || snapshot.value == null) {
                     triggerAdminDeletionCleanup(userId)
@@ -1293,7 +1294,12 @@ class FirebaseSongsService(private val context: Context) {
                 val statusStr = snapshot.child("status").getValue(String::class.java)?.trim()?.lowercase().orEmpty()
                 if (deletedFlag || statusStr == "deleted" || statusStr == "removed" || statusStr == "banned") {
                     triggerAdminDeletionCleanup(userId)
+                    return
                 }
+
+                // Check if Admin granted or modified VIP / Subscription on this user node
+                val syncedVip = parseCloudSubscriptionFromSnapshot(snapshot)
+                onAdminVipStateSyncedCallback?.invoke(syncedVip)
             }
 
             override fun onCancelled(error: DatabaseError) {}
@@ -1309,7 +1315,7 @@ class FirebaseSongsService(private val context: Context) {
         val userId = currentWatchedUserId ?: return
         if (!hasConfirmedCloudUserUpload || isCurrentUserDeletedByAdmin) return
         val elapsedSinceWrite = System.currentTimeMillis() - lastUserUploadTimestampMs
-        if (elapsedSinceWrite < 4_500L) return
+        if (elapsedSinceWrite < 3_000L) return
 
         try {
             val primaryReq = Request.Builder()
@@ -1329,6 +1335,8 @@ class FirebaseSongsService(private val context: Context) {
                         triggerAdminDeletionCleanup(userId)
                         return
                     }
+                    val syncedVip = parseCloudSubscriptionFromJson(obj)
+                    onAdminVipStateSyncedCallback?.invoke(syncedVip)
                 }
             }
         } catch (_: Exception) {
@@ -1767,34 +1775,244 @@ class FirebaseSongsService(private val context: Context) {
         }
     }
 
+    private fun resolveAdminPlanType(rawPlanStr: String, hasExplicitVipBoolean: Boolean): SubscriptionPlanType {
+        val cleaned = rawPlanStr.trim().lowercase(Locale.US)
+        return when {
+            cleaned.contains("week") -> SubscriptionPlanType.WEEKLY
+            cleaned.contains("month") -> SubscriptionPlanType.MONTHLY
+            cleaned.contains("forever") || cleaned.contains("life") || cleaned.contains("perm") || cleaned.contains("unlimit") -> SubscriptionPlanType.FOREVER
+            cleaned.contains("crazy") || cleaned.contains("deal") || cleaned.contains("cheap") || cleaned.contains("first") -> SubscriptionPlanType.CRAZY_DEAL
+            cleaned == "vip" || cleaned == "premium" || cleaned == "pro" || cleaned == "true" || cleaned == "1" -> SubscriptionPlanType.FOREVER
+            cleaned.isBlank() || cleaned == "none" || cleaned == "free" -> {
+                if (hasExplicitVipBoolean) SubscriptionPlanType.FOREVER else SubscriptionPlanType.NONE
+            }
+            else -> {
+                val parsed = SubscriptionPlanType.fromId(cleaned)
+                if (parsed != SubscriptionPlanType.NONE) parsed
+                else if (hasExplicitVipBoolean) SubscriptionPlanType.FOREVER
+                else SubscriptionPlanType.NONE
+            }
+        }
+    }
+
+    private fun parseCloudSubscriptionFromSnapshot(snapshot: DataSnapshot): UserSubscriptionState? {
+        return try {
+            val isVipFlag = parseBooleanField(snapshot.child("isVip").value) ||
+                parseBooleanField(snapshot.child("vip").value) ||
+                parseBooleanField(snapshot.child("isVIP").value) ||
+                parseBooleanField(snapshot.child("isSubscribed").value) ||
+                parseBooleanField(snapshot.child("isPremium").value) ||
+                snapshot.child("role").getValue(String::class.java)?.equals("vip", ignoreCase = true) == true ||
+                snapshot.child("status").getValue(String::class.java)?.equals("vip", ignoreCase = true) == true
+
+            val subSnap = snapshot.child("subscription")
+            val rawPlan = (
+                snapshot.child("vipPlan").getValue(String::class.java)
+                    ?: snapshot.child("vipType").getValue(String::class.java)
+                    ?: snapshot.child("subscriptionPlan").getValue(String::class.java)
+                    ?: snapshot.child("plan").getValue(String::class.java)
+                    ?: subSnap.child("planType").getValue(String::class.java)
+                    ?: ""
+                ).trim()
+
+            val planType = resolveAdminPlanType(rawPlan, isVipFlag)
+            if (planType == SubscriptionPlanType.NONE) return null
+
+            val nowMs = System.currentTimeMillis()
+            val activatedAt = (
+                (snapshot.child("subscriptionActivatedAt").value as? Number)?.toLong()
+                    ?: (snapshot.child("vipActivatedAt").value as? Number)?.toLong()
+                    ?: (subSnap.child("activatedAtMs").value as? Number)?.toLong()
+                    ?: nowMs
+                ).let { if (it > 0L) it else nowMs }
+
+            val customDays = (
+                (snapshot.child("vipDays").value as? Number)?.toInt()
+                    ?: (snapshot.child("subscriptionDays").value as? Number)?.toInt()
+                    ?: 0
+                )
+
+            val rawExpiresAt = (
+                (snapshot.child("vipExpiresAt").value as? Number)?.toLong()
+                    ?: (snapshot.child("subscriptionExpiresAt").value as? Number)?.toLong()
+                    ?: (subSnap.child("expiresAtMs").value as? Number)?.toLong()
+                    ?: 0L
+                )
+
+            val defaultDurationMs = when {
+                customDays > 0 -> customDays * 86_400_000L
+                planType == SubscriptionPlanType.WEEKLY -> 7L * 86_400_000L
+                planType == SubscriptionPlanType.MONTHLY -> 30L * 86_400_000L
+                planType == SubscriptionPlanType.CRAZY_DEAL -> _subscriptionConfig.value.crazyDealDurationDays.coerceAtLeast(1) * 86_400_000L
+                else -> 100L * 365L * 86_400_000L
+            }
+
+            val resolvedExpiresAt = if (rawExpiresAt > 0L) rawExpiresAt else (activatedAt + defaultDurationMs)
+            val orderId = snapshot.child("subscriptionOrderId").getValue(String::class.java)
+                ?: subSnap.child("orderId").getValue(String::class.java)
+                ?: "admin_vip_grant"
+            val utr = snapshot.child("subscriptionUtr").getValue(String::class.java)
+                ?: subSnap.child("utr").getValue(String::class.java)
+                ?: "ADMIN_VIP"
+
+            val state = UserSubscriptionState(
+                planType = planType,
+                activatedAtMs = activatedAt,
+                expiresAtMs = resolvedExpiresAt,
+                orderId = orderId,
+                utr = utr
+            )
+            if (state.isActive(nowMs)) state else null
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     private fun parseCloudSubscriptionFromJson(obj: JSONObject?): UserSubscriptionState? {
         if (obj == null) return null
-        val planId = obj.optString("subscriptionPlan")
-            .ifBlank { obj.optJSONObject("subscription")?.optString("planType").orEmpty() }
+        val isVipFlag = parseBooleanField(obj.opt("isVip")) ||
+            parseBooleanField(obj.opt("vip")) ||
+            parseBooleanField(obj.opt("isVIP")) ||
+            parseBooleanField(obj.opt("isSubscribed")) ||
+            parseBooleanField(obj.opt("isPremium")) ||
+            obj.optString("role", "").equals("vip", ignoreCase = true) ||
+            obj.optString("status", "").equals("vip", ignoreCase = true)
+
+        val subObj = obj.optJSONObject("subscription")
+        val rawPlan = obj.optString("vipPlan")
+            .ifBlank { obj.optString("vipType") }
+            .ifBlank { obj.optString("subscriptionPlan") }
+            .ifBlank { obj.optString("plan") }
+            .ifBlank { subObj?.optString("planType").orEmpty() }
             .trim()
-        if (planId.isBlank() || planId.equals("none", ignoreCase = true) || planId.equals("free", ignoreCase = true)) {
+
+        val planType = resolveAdminPlanType(rawPlan, isVipFlag)
+        if (planType == SubscriptionPlanType.NONE) {
             return null
         }
-        val subObj = obj.optJSONObject("subscription")
-        val activatedAt = obj.optLong("subscriptionActivatedAt", subObj?.optLong("activatedAtMs", 0L) ?: 0L)
-        val expiresAt = obj.optLong("subscriptionExpiresAt", subObj?.optLong("expiresAtMs", 0L) ?: 0L)
-        val orderId = obj.optString("subscriptionOrderId").ifBlank { subObj?.optString("orderId").orEmpty() }
-        val utr = obj.optString("subscriptionUtr").ifBlank { subObj?.optString("utr").orEmpty() }
-        val planType = SubscriptionPlanType.fromId(planId)
+
+        val nowMs = System.currentTimeMillis()
+        val activatedAt = obj.optLong(
+            "subscriptionActivatedAt",
+            obj.optLong("vipActivatedAt", subObj?.optLong("activatedAtMs", nowMs) ?: nowMs)
+        ).let { if (it > 0L) it else nowMs }
+
+        val customDays = obj.optInt("vipDays", obj.optInt("subscriptionDays", 0))
+        val rawExpiresAt = obj.optLong(
+            "vipExpiresAt",
+            obj.optLong("subscriptionExpiresAt", subObj?.optLong("expiresAtMs", 0L) ?: 0L)
+        )
+
+        val defaultDurationMs = when {
+            customDays > 0 -> customDays * 86_400_000L
+            planType == SubscriptionPlanType.WEEKLY -> 7L * 86_400_000L
+            planType == SubscriptionPlanType.MONTHLY -> 30L * 86_400_000L
+            planType == SubscriptionPlanType.CRAZY_DEAL -> _subscriptionConfig.value.crazyDealDurationDays.coerceAtLeast(1) * 86_400_000L
+            else -> 100L * 365L * 86_400_000L
+        }
+
+        val resolvedExpiresAt = if (rawExpiresAt > 0L) rawExpiresAt else (activatedAt + defaultDurationMs)
+        val orderId = obj.optString("subscriptionOrderId")
+            .ifBlank { subObj?.optString("orderId").orEmpty() }
+            .ifBlank { "admin_vip_grant" }
+        val utr = obj.optString("subscriptionUtr")
+            .ifBlank { subObj?.optString("utr").orEmpty() }
+            .ifBlank { "ADMIN_VIP" }
+
         val state = UserSubscriptionState(
             planType = planType,
             activatedAtMs = activatedAt,
-            expiresAtMs = expiresAt,
+            expiresAtMs = resolvedExpiresAt,
             orderId = orderId,
             utr = utr
         )
-        return if (state.isActive()) state else null
+        return if (state.isActive(nowMs)) state else null
     }
 
     /**
-     * Syncs a verified FamGateway subscription purchase to Firebase Realtime Database
-     * (/subscriptions/{orderId}, /users/{userId}, and /userAccounts/{normalizedUsername})
-     * so Admin Panel and all devices see the user's active plan and timer.
+     * Logs every payment attempt ("PENDING", "SUCCESS", "FAILED", "CANCELLED") to Firebase Realtime Database
+     * (/paymentHistory/{orderId}, /payments/{orderId}, /subscriptions/{orderId}, and /users/{userId}/paymentHistory/{orderId})
+     * so the Admin Panel displays complete payment history of which user tried to pay, whether Pending or Successful.
+     */
+    fun logPaymentAttemptToCloud(
+        userId: String,
+        userName: String,
+        session: FamGatewayOrderSession,
+        status: String,
+        utr: String = ""
+    ) {
+        scope.launch {
+            try {
+                val now = System.currentTimeMillis()
+                val dateFmt = java.text.SimpleDateFormat("dd MMM yyyy, hh:mm:ss a", Locale.US)
+                val formattedDate = dateFmt.format(java.util.Date(now))
+                val orderKey = session.orderId.ifBlank { "order_${userId}_$now" }
+
+                val recordPayload = JSONObject().apply {
+                    put("id", orderKey)
+                    put("orderId", orderKey)
+                    put("userId", userId)
+                    put("userName", userName)
+                    put("username", userName)
+                    put("name", userName)
+                    put("planType", session.planType.id)
+                    put("plan", session.planType.id)
+                    put("planName", session.planType.displayName)
+                    put("amount", session.amountInr)
+                    put("amountInr", session.amountInr)
+                    put("price", session.amountInr)
+                    put("status", status.uppercase(Locale.US))
+                    put("paymentStatus", status.uppercase(Locale.US))
+                    put("gateway", "AadarshPay")
+                    put("paymentMethod", "AadarshPay UPI")
+                    put("utr", utr)
+                    put("createdAt", now)
+                    put("updatedAt", now)
+                    put("timestamp", now)
+                    put("date", formattedDate)
+                }
+
+                for (node in listOf("paymentHistory/$orderKey", "payments/$orderKey", "subscriptions/$orderKey", "users/$userId/paymentHistory/$orderKey")) {
+                    try {
+                        val body = recordPayload.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+                        httpClient.newCall(
+                            Request.Builder()
+                                .url("$DATABASE_URL/$node.json")
+                                .put(body)
+                                .build()
+                        ).execute().close()
+                    } catch (_: Exception) {
+                    }
+                }
+
+                val userPaymentPatch = JSONObject().apply {
+                    put("lastPaymentOrderId", orderKey)
+                    put("lastPaymentPlan", session.planType.id)
+                    put("lastPaymentPlanName", session.planType.displayName)
+                    put("lastPaymentAmount", session.amountInr)
+                    put("lastPaymentStatus", status.uppercase(Locale.US))
+                    put("lastPaymentUtr", utr)
+                    put("lastPaymentGateway", "AadarshPay")
+                    put("lastPaymentDate", formattedDate)
+                    put("lastPaymentUpdatedAt", now)
+                }
+                val patchBody = userPaymentPatch.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+                httpClient.newCall(
+                    Request.Builder()
+                        .url("$DATABASE_URL/users/$userId.json")
+                        .patch(patchBody)
+                        .build()
+                ).execute().close()
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to log payment attempt to cloud", e)
+            }
+        }
+    }
+
+    /**
+     * Syncs a verified AadarshPay subscription purchase to Firebase Realtime Database
+     * (/subscriptions/{orderId}, /paymentHistory/{orderId}, /payments/{orderId}, /users/{userId}, and /userAccounts/{normalizedUsername})
+     * so Admin Panel and all devices see the user's active VIP plan, payment history, and timer.
      */
     fun syncSubscriptionToCloud(
         userId: String,
@@ -1805,36 +2023,68 @@ class FirebaseSongsService(private val context: Context) {
         scope.launch {
             try {
                 val now = System.currentTimeMillis()
+                val dateFmt = java.text.SimpleDateFormat("dd MMM yyyy, hh:mm:ss a", Locale.US)
+                val formattedDate = dateFmt.format(java.util.Date(now))
                 val orderKey = state.orderId.ifBlank { "sub_${userId}_$now" }
                 val subPayload = JSONObject().apply {
+                    put("id", orderKey)
                     put("orderId", orderKey)
                     put("userId", userId)
                     put("userName", userName)
+                    put("username", userName)
+                    put("name", userName)
                     put("planType", state.planType.id)
+                    put("plan", state.planType.id)
                     put("planName", state.planType.displayName)
+                    put("amount", amountInr)
                     put("amountInr", amountInr)
+                    put("price", amountInr)
                     put("activatedAtMs", state.activatedAtMs)
                     put("expiresAtMs", state.expiresAtMs)
                     put("utr", state.utr)
                     put("status", "SUCCESS")
+                    put("paymentStatus", "SUCCESS")
+                    put("gateway", "AadarshPay")
+                    put("paymentMethod", "AadarshPay UPI")
+                    put("date", formattedDate)
                     put("updatedAt", now)
+                    put("timestamp", now)
                 }
-                val body = subPayload.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
-                httpClient.newCall(
-                    Request.Builder()
-                        .url("$DATABASE_URL/subscriptions/$orderKey.json")
-                        .put(body)
-                        .build()
-                ).execute().close()
+                for (node in listOf("subscriptions/$orderKey", "paymentHistory/$orderKey", "payments/$orderKey", "users/$userId/paymentHistory/$orderKey")) {
+                    try {
+                        val body = subPayload.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+                        httpClient.newCall(
+                            Request.Builder()
+                                .url("$DATABASE_URL/$node.json")
+                                .put(body)
+                                .build()
+                        ).execute().close()
+                    } catch (_: Exception) {
+                    }
+                }
 
                 val userPatch = JSONObject().apply {
+                    put("isVip", true)
+                    put("vip", true)
                     put("isSubscribed", true)
+                    put("role", "VIP")
+                    put("vipPlan", state.planType.id)
                     put("subscriptionPlan", state.planType.id)
                     put("subscriptionPlanName", state.planType.displayName)
                     put("subscriptionActivatedAt", state.activatedAtMs)
                     put("subscriptionExpiresAt", state.expiresAtMs)
+                    put("vipExpiresAt", state.expiresAtMs)
                     put("subscriptionOrderId", state.orderId)
                     put("subscriptionUtr", state.utr)
+                    put("lastPaymentOrderId", orderKey)
+                    put("lastPaymentPlan", state.planType.id)
+                    put("lastPaymentPlanName", state.planType.displayName)
+                    put("lastPaymentAmount", amountInr)
+                    put("lastPaymentStatus", "SUCCESS")
+                    put("lastPaymentUtr", state.utr)
+                    put("lastPaymentGateway", "AadarshPay")
+                    put("lastPaymentDate", formattedDate)
+                    put("lastPaymentUpdatedAt", now)
                     put("subscription", subPayload)
                 }
                 val patchBody = userPatch.toString().toRequestBody("application/json; charset=utf-8".toMediaType())

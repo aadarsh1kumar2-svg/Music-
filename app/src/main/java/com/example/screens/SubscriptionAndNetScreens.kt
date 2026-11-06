@@ -939,9 +939,10 @@ fun SubscriptionPlansDialog(
                             )
                         )
                         BenefitRow("Unlimited daily music streaming (No 1-hour daily limit)")
-                        BenefitRow("Create & manage unlimited custom Playlists")
-                        BenefitRow("Unlock Repeat One & Repeat All loop modes")
-                        BenefitRow("Instant automated activation via FamGateway UPI")
+                        BenefitRow("Create & manage unlimited custom Playlists 👑")
+                        BenefitRow("Save & manage unlimited Favorite Songs ❤️")
+                        BenefitRow("Unlock Repeat One & Repeat All loop modes 🔁")
+                        BenefitRow("Instant automated activation via AadarshPay UPI")
                     }
                 }
             }
@@ -1115,7 +1116,7 @@ fun FamGatewayCheckoutDialog(
                         Spacer(modifier = Modifier.width(8.dp))
                         Column {
                             Text(
-                                text = "FamGateway UPI Checkout",
+                                text = "AadarshPay UPI Checkout",
                                 style = MaterialTheme.typography.titleMedium.copy(
                                     color = PrimaryWhite,
                                     fontWeight = FontWeight.ExtraBold,
@@ -1225,7 +1226,7 @@ fun FamGatewayCheckoutDialog(
                         }
                         Spacer(modifier = Modifier.height(10.dp))
                         Text(
-                            text = "Scan QR with any UPI App (GPay, PhonePe, Paytm, FamPay)",
+                            text = "Scan QR with any UPI App (GPay, PhonePe, Paytm, AadarshPay)",
                             style = MaterialTheme.typography.labelMedium.copy(color = MutedGray),
                             textAlign = TextAlign.Center
                         )
@@ -1299,7 +1300,7 @@ fun FamGatewayCheckoutDialog(
                                 .height(46.dp)
                         ) {
                             Text(
-                                text = "Open FamGateway Web Checkout",
+                                text = "Open AadarshPay Web Checkout",
                                 style = MaterialTheme.typography.bodyMedium.copy(
                                     color = PrimaryWhite,
                                     fontWeight = FontWeight.SemiBold
@@ -1333,20 +1334,39 @@ fun FamGatewayCheckoutDialog(
                         )
                     }
 
-                    Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(14.dp))
 
-                    TextButton(onClick = onVerifyNowClick) {
+                    Button(
+                        onClick = onVerifyNowClick,
+                        shape = RoundedCornerShape(14.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = SpotifyDarkGreenPill,
+                            contentColor = PrimaryWhite
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(52.dp)
+                            .border(
+                                width = 1.5.dp,
+                                color = SpotifyVibrantGreen,
+                                shape = RoundedCornerShape(14.dp)
+                            )
+                            .testTag("aadarshpay_verify_now_button")
+                    ) {
                         Icon(
-                            imageVector = Icons.Default.Refresh,
+                            imageVector = Icons.Default.CheckCircle,
                             contentDescription = null,
-                            tint = PrimaryWhite,
-                            modifier = Modifier.size(16.dp)
+                            tint = SpotifyVibrantGreen,
+                            modifier = Modifier.size(20.dp)
                         )
-                        Spacer(modifier = Modifier.width(6.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
                         Text(
                             text = "I Have Paid • Verify Now",
-                            color = PrimaryWhite,
-                            fontWeight = FontWeight.Bold
+                            style = MaterialTheme.typography.titleMedium.copy(
+                                color = PrimaryWhite,
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 16.sp
+                            )
                         )
                     }
                 }

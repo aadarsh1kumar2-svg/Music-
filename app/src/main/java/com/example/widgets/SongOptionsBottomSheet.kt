@@ -146,10 +146,10 @@ fun SongOptionsBottomSheet(
                 modifier = Modifier.padding(vertical = 6.dp)
             )
 
-            // 1. Add to Playlist (Primary option at top — opens playlist picker with all playlists)
+            // 1. Add to Playlist (Primary option at top — opens playlist picker or VIP subscription modal)
             OptionSheetRow(
                 icon = Icons.AutoMirrored.Filled.PlaylistAdd,
-                label = stringResource(id = R.string.option_add_to_playlist),
+                label = "${stringResource(id = R.string.option_add_to_playlist)}  👑 VIP",
                 showChevron = true,
                 tint = SpotifyVibrantGreen,
                 testTag = "sheet_option_add_playlist",
