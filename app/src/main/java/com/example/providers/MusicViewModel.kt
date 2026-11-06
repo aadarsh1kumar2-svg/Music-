@@ -391,8 +391,23 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private val audioExtractor = AudioStreamExtractor()
     private val famGatewayService = FamGatewayService()
 
-    // Subscription & Daily Free Limit State
+    // Subscription & Daily Free Limit State (Admin-controllable globally and per-user)
     val subscriptionConfig: StateFlow<AdminSubscriptionConfig> = firebaseService.subscriptionConfig
+
+    private val _perUserFreeLimitSeconds = MutableStateFlow<Int?>(
+        prefs.getInt("admin_user_free_limit_seconds", -1).takeIf { it >= 60 }
+    )
+
+    val freeDailyLimitSeconds: StateFlow<Int> = combine(
+        subscriptionConfig,
+        _perUserFreeLimitSeconds
+    ) { cfg, perUserSecs ->
+        (perUserSecs ?: cfg.freeDailyLimitSeconds).coerceAtLeast(60)
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, FREE_DAILY_LIMIT_SECONDS)
+
+    private fun currentFreeDailyLimitSeconds(): Int {
+        return (_perUserFreeLimitSeconds.value ?: subscriptionConfig.value.freeDailyLimitSeconds).coerceAtLeast(60)
+    }
 
     private val _subscriptionState = MutableStateFlow(loadPersistedSubscriptionState())
     val subscriptionState: StateFlow<UserSubscriptionState> = _subscriptionState.asStateFlow()
@@ -731,7 +746,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             if (active != null) {
                 if (shouldPlay) {
                     refreshDailyLimitBucketIfNeeded()
-                    if (!_subscriptionState.value.isActive() && _dailyListenedSeconds.value >= FREE_DAILY_LIMIT_SECONDS) {
+                    if (!_subscriptionState.value.isActive() && _dailyListenedSeconds.value >= currentFreeDailyLimitSeconds()) {
                         viewModelScope.launch { pausePlaybackForDailyLimit() }
                     } else if (!isCurrentSongLoadedInEngine || hasHandledEndForCurrentSong) {
                         viewModelScope.launch {
@@ -872,6 +887,20 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
+        firebaseService.onAdminFreeLimitSyncedCallback = { customUserLimitSeconds ->
+            viewModelScope.launch {
+                if (customUserLimitSeconds != null && customUserLimitSeconds >= 60) {
+                    if (_perUserFreeLimitSeconds.value != customUserLimitSeconds) {
+                        _perUserFreeLimitSeconds.value = customUserLimitSeconds
+                        prefs.edit().putInt("admin_user_free_limit_seconds", customUserLimitSeconds).apply()
+                        if (_dailyListenedSeconds.value < customUserLimitSeconds && _isDailyLimitReachedModalOpen.value) {
+                            _isDailyLimitReachedModalOpen.value = false
+                        }
+                    }
+                }
+            }
+        }
+
         // Initial cloud sync if user is already logged in with their name:
         // Pass isExplicitLogin = false so we FIRST check if Admin deleted this user while the app was closed!
         if (_userName.value.isNotBlank()) {
@@ -917,6 +946,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             .remove("sub_expires_at_ms")
             .remove("sub_order_id")
             .remove("sub_utr")
+            .remove("admin_user_free_limit_seconds")
             .apply()
 
         try {
@@ -924,6 +954,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             MusicPlaybackService.syncPlayState(false)
         } catch (_: Exception) {
         }
+        _perUserFreeLimitSeconds.value = null
         _subscriptionState.value = UserSubscriptionState()
         _activeSubscriptionRemainingSeconds.value = 0L
         _isPlaying.value = false
@@ -1406,9 +1437,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         startPositionMs: Long = 0L,
         forceRestartFromBeginning: Boolean = false
     ) {
-        // Enforce 1-hour daily listening limit for Free users
+        // Enforce Admin-configured daily listening limit for Free users
         refreshDailyLimitBucketIfNeeded()
-        if (!_subscriptionState.value.isActive() && _dailyListenedSeconds.value >= FREE_DAILY_LIMIT_SECONDS) {
+        if (!_subscriptionState.value.isActive() && _dailyListenedSeconds.value >= currentFreeDailyLimitSeconds()) {
             pausePlaybackForDailyLimit()
             return
         }
@@ -1576,7 +1607,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     fun togglePlayPause() {
         val activeSong = _currentSong.value ?: return
         refreshDailyLimitBucketIfNeeded()
-        if (!_isPlaying.value && !_subscriptionState.value.isActive() && _dailyListenedSeconds.value >= FREE_DAILY_LIMIT_SECONDS) {
+        if (!_isPlaying.value && !_subscriptionState.value.isActive() && _dailyListenedSeconds.value >= currentFreeDailyLimitSeconds()) {
             pausePlaybackForDailyLimit()
             return
         }
@@ -2020,17 +2051,21 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 refreshDailyLimitBucketIfNeeded()
                 updateSubscriptionAndCrazyDealTimers()
 
-                // Track active listening seconds for Free users (1 hour = 3600s daily limit)
+                // Track active listening seconds for Free users (Admin-controllable daily limit)
+                val limitSecs = currentFreeDailyLimitSeconds()
+                if (!_subscriptionState.value.isActive() && _dailyListenedSeconds.value < limitSecs && _isDailyLimitReachedModalOpen.value) {
+                    _isDailyLimitReachedModalOpen.value = false
+                }
                 if (_isPlaying.value && !_isBuffering.value && !_subscriptionState.value.isActive()) {
                     val nextSec = _dailyListenedSeconds.value + 1
                     _dailyListenedSeconds.value = nextSec
-                    if (nextSec % 5 == 0 || nextSec >= FREE_DAILY_LIMIT_SECONDS) {
+                    if (nextSec % 5 == 0 || nextSec >= limitSecs) {
                         prefs.edit()
                             .putString("daily_limit_date_key", todayDateKey())
                             .putInt("daily_listened_seconds", nextSec)
                             .apply()
                     }
-                    if (nextSec >= FREE_DAILY_LIMIT_SECONDS) {
+                    if (nextSec >= limitSecs) {
                         pausePlaybackForDailyLimit()
                     }
                 }
@@ -2051,7 +2086,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         _isPlaying.value = false
         _isBuffering.value = false
         _isDailyLimitReachedModalOpen.value = true
-        emitSnackbar("Your 1-hour daily free limit has been reached! Buy a subscription or wait for next day.")
+        val limitMins = (currentFreeDailyLimitSeconds() / 60).coerceAtLeast(1)
+        emitSnackbar("Your daily ${limitMins}m free limit has been reached! Buy a subscription or wait for next day.")
     }
 
     /**

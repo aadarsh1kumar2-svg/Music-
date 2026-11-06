@@ -224,6 +224,7 @@ fun AKMusicAppRoot(
     val activeSubscriptionRemainingSeconds by musicViewModel.activeSubscriptionRemainingSeconds.collectAsStateWithLifecycle()
     val crazyDealRemainingSeconds by musicViewModel.crazyDealRemainingSeconds.collectAsStateWithLifecycle()
     val dailyListenedSeconds by musicViewModel.dailyListenedSeconds.collectAsStateWithLifecycle()
+    val freeDailyLimitSeconds by musicViewModel.freeDailyLimitSeconds.collectAsStateWithLifecycle()
     val isSubscriptionModalOpen by musicViewModel.isSubscriptionModalOpen.collectAsStateWithLifecycle()
     val isCrazyDealsPopupOpen by musicViewModel.isCrazyDealsPopupOpen.collectAsStateWithLifecycle()
     val isDailyLimitReachedModalOpen by musicViewModel.isDailyLimitReachedModalOpen.collectAsStateWithLifecycle()
@@ -448,8 +449,9 @@ fun AKMusicAppRoot(
                                 val planBadgeText = if (subscriptionState.isActive()) {
                                     "👑 ${subscriptionState.planType.displayName} Active"
                                 } else {
-                                    val remMins = ((3600 - dailyListenedSeconds).coerceAtLeast(0)) / 60
-                                    "Free Plan • ${remMins}m / 60m left today"
+                                    val totalLimitMins = (freeDailyLimitSeconds.coerceAtLeast(60)) / 60
+                                    val remMins = ((freeDailyLimitSeconds.coerceAtLeast(60) - dailyListenedSeconds).coerceAtLeast(0)) / 60
+                                    "Free Plan • ${remMins}m / ${totalLimitMins}m left today"
                                 }
                                 Text(
                                     text = planBadgeText,
@@ -769,6 +771,7 @@ fun AKMusicAppRoot(
                                         subscriptionPlanName = subscriptionState.planType.displayName,
                                         activeSubscriptionRemainingSeconds = activeSubscriptionRemainingSeconds,
                                         dailyListenedSeconds = dailyListenedSeconds,
+                                        freeDailyLimitSeconds = freeDailyLimitSeconds,
                                         onOpenSubscriptionModal = {
                                             musicViewModel.setSubscriptionModalOpen(true)
                                         },
@@ -986,6 +989,7 @@ fun AKMusicAppRoot(
                 activeSubscriptionRemainingSeconds = activeSubscriptionRemainingSeconds,
                 crazyDealRemainingSeconds = crazyDealRemainingSeconds,
                 dailyListenedSeconds = dailyListenedSeconds,
+                freeDailyLimitSeconds = freeDailyLimitSeconds,
                 onSelectPlanToBuy = { plan ->
                     musicViewModel.startFamGatewayCheckout(plan)
                 },
@@ -995,9 +999,10 @@ fun AKMusicAppRoot(
             )
         }
 
-        // 1-Hour Daily Free Listening Limit Reached Modal
+        // Daily Free Listening Limit Reached Modal
         if (isDailyLimitReachedModalOpen && launchStage == LaunchStage.MAIN_APP) {
             DailyLimitReachedDialog(
+                freeDailyLimitSeconds = freeDailyLimitSeconds,
                 onBuySubscriptionClick = {
                     musicViewModel.setDailyLimitReachedModalOpen(false)
                     musicViewModel.setSubscriptionModalOpen(true)

@@ -76,6 +76,7 @@ fun HomeScreen(
     subscriptionPlanName: String = "",
     activeSubscriptionRemainingSeconds: Long = 0L,
     dailyListenedSeconds: Int = 0,
+    freeDailyLimitSeconds: Int = 3600,
     onOpenSubscriptionModal: () -> Unit = {},
     onSearchQueryChange: (String) -> Unit,
     onSongClick: (Song, List<Song>) -> Unit,
@@ -134,7 +135,7 @@ fun HomeScreen(
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    val remainingFreeSeconds = (3600 - dailyListenedSeconds).coerceAtLeast(0)
+                    val remainingFreeSeconds = (freeDailyLimitSeconds.coerceAtLeast(60) - dailyListenedSeconds).coerceAtLeast(0)
                     val remMins = remainingFreeSeconds / 60
                     val remSecs = remainingFreeSeconds % 60
                     val isLowTime = !isUserSubscribed && remainingFreeSeconds <= 300

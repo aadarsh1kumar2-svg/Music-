@@ -537,6 +537,7 @@ fun CrazyDealsPopupDialog(
  */
 @Composable
 fun DailyLimitReachedDialog(
+    freeDailyLimitSeconds: Int = 3600,
     onBuySubscriptionClick: () -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -583,8 +584,9 @@ fun DailyLimitReachedDialog(
 
                 Spacer(modifier = Modifier.height(16.dp))
 
+                val totalMins = (freeDailyLimitSeconds.coerceAtLeast(60)) / 60
                 Text(
-                    text = "Daily 1 Hour Limit Reached",
+                    text = "Daily Free Limit (${totalMins}m) Reached",
                     style = MaterialTheme.typography.headlineMedium.copy(
                         color = PrimaryWhite,
                         fontWeight = FontWeight.ExtraBold,
@@ -658,6 +660,7 @@ fun SubscriptionPlansDialog(
     activeSubscriptionRemainingSeconds: Long,
     crazyDealRemainingSeconds: Long,
     dailyListenedSeconds: Int,
+    freeDailyLimitSeconds: Int = config.freeDailyLimitSeconds,
     onSelectPlanToBuy: (SubscriptionPlanType) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -827,7 +830,9 @@ fun SubscriptionPlansDialog(
                         }
                     }
                 } else {
-                    val remainingFreeSeconds = (3600 - dailyListenedSeconds).coerceAtLeast(0)
+                    val effectiveLimitSecs = freeDailyLimitSeconds.coerceAtLeast(60)
+                    val totalLimitMins = effectiveLimitSecs / 60
+                    val remainingFreeSeconds = (effectiveLimitSecs - dailyListenedSeconds).coerceAtLeast(0)
                     val remainingMins = remainingFreeSeconds / 60
                     val remainingSecs = remainingFreeSeconds % 60
                     Surface(
@@ -856,7 +861,7 @@ fun SubscriptionPlansDialog(
                                 )
                             }
                             Text(
-                                text = String.format("%02dm %02ds / 60m", remainingMins, remainingSecs),
+                                text = String.format("%02dm %02ds / %dm", remainingMins, remainingSecs, totalLimitMins),
                                 style = MaterialTheme.typography.bodyMedium.copy(
                                     color = if (remainingFreeSeconds > 300) PrimaryWhite else ErrorRed,
                                     fontWeight = FontWeight.Bold

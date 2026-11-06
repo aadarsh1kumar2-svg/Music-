@@ -85,8 +85,10 @@ data class AdminSubscriptionConfig(
     val premiumTitle: String = "AADIFY Premium",
     val premiumSubtitle: String = "Unlimited music, Playlists & Repeat mode",
     val premiumHeading: String = "Unlock Non-Stop Listening",
-    val premiumDescription: String = "No 1-hour daily limit • Create Unlimited Playlists • Repeat Songs",
-    val premiumBannerUrl: String = "https://images.unsplash.com/photo-1470225620780-dba8ba36b745?auto=format&fit=crop&w=1000&q=80"
+    val premiumDescription: String = "No daily limit • Create Unlimited Playlists • Repeat Songs",
+    val premiumBannerUrl: String = "https://images.unsplash.com/photo-1470225620780-dba8ba36b745?auto=format&fit=crop&w=1000&q=80",
+    val freeDailyLimitMinutes: Int = 60,
+    val freeDailyLimitSeconds: Int = 3600
 )
 
 data class UserSubscriptionState(
