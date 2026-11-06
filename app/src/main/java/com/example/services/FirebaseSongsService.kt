@@ -248,12 +248,29 @@ class FirebaseSongsService(private val context: Context) {
 
                 override fun onCancelled(error: DatabaseError) {}
             }
-            subscriptionConfigRef = database.getReference("subscriptionConfig").also {
+            subscriptionConfigRef = database.getReference("subscriptionPlans").also {
                 it.keepSynced(true)
                 it.addValueEventListener(subConfigListener)
             }
+            database.getReference("subscriptionConfig").addValueEventListener(subConfigListener)
             database.getReference("plans").addValueEventListener(subConfigListener)
             database.getReference("subscriptionsConfig").addValueEventListener(subConfigListener)
+
+            val bannersListener = object : ValueEventListener {
+                override fun onDataChange(snapshot: DataSnapshot) {
+                    if (snapshot.exists()) {
+                        parsePremiumBannersSnapshot(snapshot)?.let { updated ->
+                            _subscriptionConfig.value = updated
+                        }
+                    }
+                }
+
+                override fun onCancelled(error: DatabaseError) {}
+            }
+            database.getReference("premiumBanners").also {
+                it.keepSynced(true)
+                it.addValueEventListener(bannersListener)
+            }
 
             val notifListener = object : ValueEventListener {
                 override fun onDataChange(snapshot: DataSnapshot) {
@@ -1188,10 +1205,18 @@ class FirebaseSongsService(private val context: Context) {
         }
         if (isCurrentUserDeletedByAdmin) return
 
+        val payloadUserName = userPayload.optString("userName")
+            .ifBlank { userPayload.optString("name") }
+            .trim()
+        if (payloadUserName.isNotBlank()) {
+            currentWatchedUserName = payloadUserName
+        }
+
         scope.launch {
             try {
-                // If already uploaded in this session and not an explicit login/rename, verify Admin hasn't deleted first
-                if (!isExplicitLogin && hasConfirmedCloudUserUpload && currentWatchedUserId == cleanId) {
+                // Unless this is a brand-new login/signup that just verified/created /users/{cleanId},
+                // ALWAYS check if Admin deleted /users/{cleanId} BEFORE patching so a deleted user is NEVER re-created!
+                if (!isExplicitLogin) {
                     val stillExists = verifyUserStillExistsBeforeUpdate(cleanId)
                     if (!stillExists) {
                         triggerAdminDeletionCleanup(cleanId)
@@ -1235,6 +1260,9 @@ class FirebaseSongsService(private val context: Context) {
             }
         }
     }
+
+    @Volatile
+    private var currentWatchedUserName: String = ""
 
     private fun verifyUserStillExistsBeforeUpdate(userId: String): Boolean {
         return try {
@@ -1283,7 +1311,14 @@ class FirebaseSongsService(private val context: Context) {
             override fun onDataChange(snapshot: DataSnapshot) {
                 if (!hasConfirmedCloudUserUpload || isCurrentUserDeletedByAdmin) return
                 val elapsedSinceWrite = System.currentTimeMillis() - lastUserUploadTimestampMs
-                if (elapsedSinceWrite < 2_500L) return
+                if (elapsedSinceWrite < 1_500L) {
+                    // Still check if Admin granted a VIP plan even within 1.5s
+                    if (snapshot.exists() && snapshot.value != null) {
+                        val syncedVip = parseCloudSubscriptionFromSnapshot(snapshot)
+                        onAdminVipStateSyncedCallback?.invoke(syncedVip)
+                    }
+                    return
+                }
 
                 if (!snapshot.exists() || snapshot.value == null) {
                     triggerAdminDeletionCleanup(userId)
@@ -1315,7 +1350,7 @@ class FirebaseSongsService(private val context: Context) {
         val userId = currentWatchedUserId ?: return
         if (!hasConfirmedCloudUserUpload || isCurrentUserDeletedByAdmin) return
         val elapsedSinceWrite = System.currentTimeMillis() - lastUserUploadTimestampMs
-        if (elapsedSinceWrite < 3_000L) return
+        if (elapsedSinceWrite < 2_000L) return
 
         try {
             val primaryReq = Request.Builder()
@@ -1348,6 +1383,7 @@ class FirebaseSongsService(private val context: Context) {
         if (isCurrentUserDeletedByAdmin) return
         isCurrentUserDeletedByAdmin = true
         hasConfirmedCloudUserUpload = false
+        val watchedName = currentWatchedUserName
 
         try {
             currentUserValueListener?.let { listener ->
@@ -1359,9 +1395,17 @@ class FirebaseSongsService(private val context: Context) {
         } catch (_: Exception) {
         }
 
-        // Clean up both /users/{userId} and /akMusic/users/{userId} so no mirror node remains in Firebase
+        // Permanently delete /users/{userId}, /akMusic/users/{userId}, and /userAccounts/{normalizedKey}
         scope.launch {
-            for (path in listOf("users/$userId", "akMusic/users/$userId")) {
+            val pathsToDelete = mutableListOf(
+                "users/$userId",
+                "akMusic/users/$userId"
+            )
+            val normKey = normalizeUsernameKey(watchedName)
+            if (normKey.isNotBlank()) {
+                pathsToDelete.add("userAccounts/$normKey")
+            }
+            for (path in pathsToDelete) {
                 try {
                     val delReq = Request.Builder()
                         .url("$DATABASE_URL/$path.json")
@@ -1395,26 +1439,27 @@ class FirebaseSongsService(private val context: Context) {
         return try {
             val current = _subscriptionConfig.value
             val weekly = parsePriceValue(
-                snapshot.child("weeklyPrice").value
-                    ?: snapshot.child("weekly").child("price").value
-                    ?: snapshot.child("weekly").value,
+                snapshot.child("weekly").value
+                    ?: snapshot.child("weeklyPrice").value
+                    ?: snapshot.child("weekly").child("price").value,
                 current.weeklyPriceInr
             )
             val monthly = parsePriceValue(
-                snapshot.child("monthlyPrice").value
-                    ?: snapshot.child("monthly").child("price").value
-                    ?: snapshot.child("monthly").value,
+                snapshot.child("monthly").value
+                    ?: snapshot.child("monthlyPrice").value
+                    ?: snapshot.child("monthly").child("price").value,
                 current.monthlyPriceInr
             )
             val forever = parsePriceValue(
-                snapshot.child("foreverPrice").value
+                snapshot.child("forever").value
+                    ?: snapshot.child("foreverPrice").value
                     ?: snapshot.child("lifetimePrice").value
-                    ?: snapshot.child("forever").child("price").value
-                    ?: snapshot.child("forever").value,
+                    ?: snapshot.child("forever").child("price").value,
                 current.foreverPriceInr
             )
             val crazyPrice = parsePriceValue(
-                snapshot.child("crazyDealPrice").value
+                snapshot.child("firstUserDeal").value
+                    ?: snapshot.child("crazyDealPrice").value
                     ?: snapshot.child("cheapestPrice").value
                     ?: snapshot.child("firstUserPrice").value
                     ?: snapshot.child("crazyDeal").child("price").value
@@ -1440,7 +1485,7 @@ class FirebaseSongsService(private val context: Context) {
                 ?: snapshot.child("subscriptionBannerUrl").getValue(String::class.java)
                 ?: current.premiumBannerUrl
 
-            AdminSubscriptionConfig(
+            current.copy(
                 weeklyPriceInr = weekly,
                 monthlyPriceInr = monthly,
                 foreverPriceInr = forever,
@@ -1457,8 +1502,54 @@ class FirebaseSongsService(private val context: Context) {
         }
     }
 
+    private fun parsePremiumBannersSnapshot(snapshot: DataSnapshot): AdminSubscriptionConfig? {
+        return try {
+            var updated = _subscriptionConfig.value
+            val premiumSnap = snapshot.child("premium")
+            if (premiumSnap.exists()) {
+                val img = premiumSnap.child("image").getValue(String::class.java)?.trim().orEmpty()
+                val title = premiumSnap.child("title").getValue(String::class.java)?.trim().orEmpty()
+                val subtitle = premiumSnap.child("subtitle").getValue(String::class.java)?.trim().orEmpty()
+                val heading = premiumSnap.child("heading").getValue(String::class.java)?.trim().orEmpty()
+                val desc = premiumSnap.child("description").getValue(String::class.java)?.trim().orEmpty()
+                val enabled = premiumSnap.child("enabled").getValue(Boolean::class.java) ?: updated.premiumEnabled
+                updated = updated.copy(
+                    premiumBannerUrl = img.ifBlank { updated.premiumBannerUrl },
+                    premiumTitle = title.ifBlank { updated.premiumTitle },
+                    premiumSubtitle = subtitle.ifBlank { updated.premiumSubtitle },
+                    premiumHeading = heading.ifBlank { updated.premiumHeading },
+                    premiumDescription = desc.ifBlank { updated.premiumDescription },
+                    premiumEnabled = enabled
+                )
+            }
+            val dealSnap = snapshot.child("firstUserDeal")
+            if (dealSnap.exists()) {
+                val img = dealSnap.child("image").getValue(String::class.java)?.trim().orEmpty()
+                val title = dealSnap.child("title").getValue(String::class.java)?.trim().orEmpty()
+                val desc = dealSnap.child("description").getValue(String::class.java)?.trim().orEmpty()
+                val price = parsePriceValue(dealSnap.child("price").value, updated.crazyDealPriceInr)
+                val duration = parsePriceValue(dealSnap.child("duration").value, updated.crazyDealDurationDays)
+                val validity = parsePriceValue(dealSnap.child("validity").value, updated.crazyDealValidityHours)
+                val enabled = dealSnap.child("enabled").getValue(Boolean::class.java) ?: updated.crazyDealEnabled
+                updated = updated.copy(
+                    crazyDealBannerUrl = img.ifBlank { updated.crazyDealBannerUrl },
+                    crazyDealTitle = title.ifBlank { updated.crazyDealTitle },
+                    crazyDealSubtitle = desc.ifBlank { updated.crazyDealSubtitle },
+                    crazyDealPriceInr = price,
+                    crazyDealDurationDays = duration,
+                    crazyDealValidityHours = validity,
+                    crazyDealEnabled = enabled
+                )
+            }
+            updated
+        } catch (e: Exception) {
+            Log.w(TAG, "Error parsing premiumBanners snapshot", e)
+            null
+        }
+    }
+
     suspend fun fetchSubscriptionConfigViaRest(seedIfMissing: Boolean = false) = withContext(Dispatchers.IO) {
-        val nodes = listOf("subscriptionConfig", "plans", "subscriptionsConfig")
+        val nodes = listOf("subscriptionPlans", "subscriptionConfig", "plans", "subscriptionsConfig")
         var foundAny = false
         for (node in nodes) {
             try {
@@ -1480,19 +1571,19 @@ class FirebaseSongsService(private val context: Context) {
                     val crazyObj = obj.optJSONObject("crazyDeal") ?: obj.optJSONObject("crazy_deal")
 
                     val weekly = parsePriceValue(
-                        obj.opt("weeklyPrice") ?: weeklyObj?.opt("price") ?: obj.opt("weekly"),
+                        obj.opt("weekly") ?: obj.opt("weeklyPrice") ?: weeklyObj?.opt("price"),
                         current.weeklyPriceInr
                     )
                     val monthly = parsePriceValue(
-                        obj.opt("monthlyPrice") ?: monthlyObj?.opt("price") ?: obj.opt("monthly"),
+                        obj.opt("monthly") ?: obj.opt("monthlyPrice") ?: monthlyObj?.opt("price"),
                         current.monthlyPriceInr
                     )
                     val forever = parsePriceValue(
-                        obj.opt("foreverPrice") ?: obj.opt("lifetimePrice") ?: foreverObj?.opt("price") ?: obj.opt("forever"),
+                        obj.opt("forever") ?: obj.opt("foreverPrice") ?: obj.opt("lifetimePrice") ?: foreverObj?.opt("price"),
                         current.foreverPriceInr
                     )
                     val crazyPrice = parsePriceValue(
-                        obj.opt("crazyDealPrice") ?: obj.opt("cheapestPrice") ?: obj.opt("firstUserPrice")
+                        obj.opt("firstUserDeal") ?: obj.opt("crazyDealPrice") ?: obj.opt("cheapestPrice") ?: obj.opt("firstUserPrice")
                             ?: crazyObj?.opt("price") ?: obj.opt("crazy_deal"),
                         current.crazyDealPriceInr
                     )
@@ -1514,7 +1605,7 @@ class FirebaseSongsService(private val context: Context) {
                         .ifBlank { obj.optString("subscriptionBannerUrl") }
                         .ifBlank { current.premiumBannerUrl }
 
-                    _subscriptionConfig.value = AdminSubscriptionConfig(
+                    _subscriptionConfig.value = current.copy(
                         weeklyPriceInr = weekly,
                         monthlyPriceInr = monthly,
                         foreverPriceInr = forever,
@@ -1531,25 +1622,74 @@ class FirebaseSongsService(private val context: Context) {
             }
         }
 
-        // Seed /subscriptionConfig in Firebase if missing so Admin Panel can immediately edit all plan prices & banners
+        // Also fetch /premiumBanners (used by AK_Music_Admin_Final.html for Banner 1 & Banner 2)
+        try {
+            val bannerReq = Request.Builder()
+                .url("$DATABASE_URL/premiumBanners.json")
+                .get()
+                .build()
+            httpClient.newCall(bannerReq).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    val body = resp.body?.string()?.trim().orEmpty()
+                    if (body.isNotEmpty() && body != "null" && body.startsWith("{")) {
+                        val root = JSONObject(body)
+                        var updated = _subscriptionConfig.value
+                        val premiumObj = root.optJSONObject("premium")
+                        if (premiumObj != null) {
+                            val img = premiumObj.optString("image").trim()
+                            val title = premiumObj.optString("title").trim()
+                            val subtitle = premiumObj.optString("subtitle").trim()
+                            val heading = premiumObj.optString("heading").trim()
+                            val desc = premiumObj.optString("description").trim()
+                            val enabled = premiumObj.optBoolean("enabled", updated.premiumEnabled)
+                            updated = updated.copy(
+                                premiumBannerUrl = img.ifBlank { updated.premiumBannerUrl },
+                                premiumTitle = title.ifBlank { updated.premiumTitle },
+                                premiumSubtitle = subtitle.ifBlank { updated.premiumSubtitle },
+                                premiumHeading = heading.ifBlank { updated.premiumHeading },
+                                premiumDescription = desc.ifBlank { updated.premiumDescription },
+                                premiumEnabled = enabled
+                            )
+                        }
+                        val dealObj = root.optJSONObject("firstUserDeal")
+                        if (dealObj != null) {
+                            val img = dealObj.optString("image").trim()
+                            val title = dealObj.optString("title").trim()
+                            val desc = dealObj.optString("description").trim()
+                            val price = parsePriceValue(dealObj.opt("price"), updated.crazyDealPriceInr)
+                            val duration = parsePriceValue(dealObj.opt("duration"), updated.crazyDealDurationDays)
+                            val validity = parsePriceValue(dealObj.opt("validity"), updated.crazyDealValidityHours)
+                            val enabled = dealObj.optBoolean("enabled", updated.crazyDealEnabled)
+                            updated = updated.copy(
+                                crazyDealBannerUrl = img.ifBlank { updated.crazyDealBannerUrl },
+                                crazyDealTitle = title.ifBlank { updated.crazyDealTitle },
+                                crazyDealSubtitle = desc.ifBlank { updated.crazyDealSubtitle },
+                                crazyDealPriceInr = price,
+                                crazyDealDurationDays = duration,
+                                crazyDealValidityHours = validity,
+                                crazyDealEnabled = enabled
+                            )
+                        }
+                        _subscriptionConfig.value = updated
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        }
+
+        // Seed /subscriptionPlans in Firebase if missing so Admin Panel can immediately edit all plan prices
         if (!foundAny && seedIfMissing) {
             try {
                 val def = _subscriptionConfig.value
-                val seedPayload = JSONObject().apply {
-                    put("weeklyPrice", def.weeklyPriceInr)
-                    put("monthlyPrice", def.monthlyPriceInr)
-                    put("foreverPrice", def.foreverPriceInr)
-                    put("crazyDealPrice", def.crazyDealPriceInr)
-                    put("crazyDealDurationDays", def.crazyDealDurationDays)
-                    put("crazyDealTitle", def.crazyDealTitle)
-                    put("crazyDealSubtitle", def.crazyDealSubtitle)
-                    put("crazyDealBannerUrl", def.crazyDealBannerUrl)
-                    put("premiumBannerUrl", def.premiumBannerUrl)
-                    put("updatedAt", System.currentTimeMillis())
+                val seedPlans = JSONObject().apply {
+                    put("weekly", def.weeklyPriceInr)
+                    put("monthly", def.monthlyPriceInr)
+                    put("forever", def.foreverPriceInr)
+                    put("firstUserDeal", def.crazyDealPriceInr)
                 }
-                val body = seedPayload.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+                val body = seedPlans.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
                 val req = Request.Builder()
-                    .url("$DATABASE_URL/subscriptionConfig.json")
+                    .url("$DATABASE_URL/subscriptionPlans.json")
                     .put(body)
                     .build()
                 httpClient.newCall(req).execute().close()
@@ -1649,8 +1789,9 @@ class FirebaseSongsService(private val context: Context) {
             val nowMs = System.currentTimeMillis()
 
             if (isCreateAccount) {
-                // CREATE ACCOUNT MODE: Strictly enforce unique username across all users
-                if (existingAccountObj != null || existingUserNodeObj != null) {
+                // CREATE ACCOUNT MODE:
+                // Only block if the user STILL exists in /users (if Admin deleted them from /users, allow re-creating!)
+                if (existingUserNodeObj != null) {
                     return@withContext Result.failure(
                         IllegalStateException("Username \"$cleanName\" is already taken! Please choose a different username or Sign In.")
                     )
@@ -1682,6 +1823,29 @@ class FirebaseSongsService(private val context: Context) {
                     }
                 }
 
+                // Immediately create the user record in /users/{newUserId} as well so Admin Panel sees the user & password right away
+                val initialUserPayload = JSONObject().apply {
+                    put("id", newUserId)
+                    put("uid", newUserId)
+                    put("userId", newUserId)
+                    put("name", cleanName)
+                    put("userName", cleanName)
+                    put("username", cleanName)
+                    put("displayName", cleanName)
+                    put("password", cleanPassword)
+                    put("email", "🔑 Pass: $cleanPassword")
+                    put("status", "Active")
+                    put("createdAt", nowMs)
+                    put("lastLogin", nowMs)
+                }
+                val userBody = initialUserPayload.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+                httpClient.newCall(
+                    Request.Builder()
+                        .url("$DATABASE_URL/users/$newUserId.json")
+                        .put(userBody)
+                        .build()
+                ).execute().close()
+
                 return@withContext Result.success(
                     CloudUserAuthResult(
                         userId = newUserId,
@@ -1693,14 +1857,31 @@ class FirebaseSongsService(private val context: Context) {
                     )
                 )
             } else {
-                // SIGN IN MODE: Verify account exists and password matches
-                val matchedRecord = existingAccountObj ?: existingUserNodeObj
-                    ?: return@withContext Result.failure(
+                // SIGN IN MODE:
+                // If the user was deleted from /users by Admin, permanently remove any leftover /userAccounts entry and reject login!
+                if (existingUserNodeObj == null) {
+                    if (existingAccountObj != null) {
+                        try {
+                            httpClient.newCall(
+                                Request.Builder()
+                                    .url("$DATABASE_URL/userAccounts/$normalizedKey.json")
+                                    .delete()
+                                    .build()
+                            ).execute().close()
+                        } catch (_: Exception) {
+                        }
+                        return@withContext Result.failure(
+                            IllegalArgumentException("Account \"$cleanName\" was permanently deleted by Admin. Please Create a new account.")
+                        )
+                    }
+                    return@withContext Result.failure(
                         IllegalArgumentException("Username \"$cleanName\" not found! Tap \"Create your account\" below to register.")
                     )
+                }
 
-                val savedPassword = existingAccountObj?.optString("password", "")?.trim().orEmpty()
-                    .ifBlank { existingUserNodeObj?.optString("password", "")?.trim().orEmpty() }
+                val matchedRecord = existingUserNodeObj
+                val savedPassword = existingUserNodeObj.optString("password", "").trim()
+                    .ifBlank { existingAccountObj?.optString("password", "")?.trim().orEmpty() }
 
                 if (savedPassword.isNotBlank() && savedPassword != cleanPassword) {
                     return@withContext Result.failure(
@@ -1722,11 +1903,11 @@ class FirebaseSongsService(private val context: Context) {
 
                 val createdAtMs = matchedRecord.optLong("createdAt", 0L)
                     .takeIf { it > 0L }
-                    ?: existingUserNodeObj?.optLong("createdAt", 0L)?.takeIf { it > 0L }
+                    ?: existingAccountObj?.optLong("createdAt", 0L)?.takeIf { it > 0L }
                     ?: nowMs
 
                 // Parse any active subscription stored in cloud for this user
-                val cloudSub = parseCloudSubscriptionFromJson(existingUserNodeObj ?: matchedRecord)
+                val cloudSub = parseCloudSubscriptionFromJson(existingUserNodeObj)
 
                 // Ensure /userAccounts/{normalizedKey} is up-to-date with the verified password & userId
                 val updatedAccountPayload = JSONObject().apply {
@@ -1778,11 +1959,12 @@ class FirebaseSongsService(private val context: Context) {
     private fun resolveAdminPlanType(rawPlanStr: String, hasExplicitVipBoolean: Boolean): SubscriptionPlanType {
         val cleaned = rawPlanStr.trim().lowercase(Locale.US)
         return when {
+            cleaned.contains("custom") -> SubscriptionPlanType.CUSTOM
             cleaned.contains("week") -> SubscriptionPlanType.WEEKLY
             cleaned.contains("month") -> SubscriptionPlanType.MONTHLY
             cleaned.contains("forever") || cleaned.contains("life") || cleaned.contains("perm") || cleaned.contains("unlimit") -> SubscriptionPlanType.FOREVER
             cleaned.contains("crazy") || cleaned.contains("deal") || cleaned.contains("cheap") || cleaned.contains("first") -> SubscriptionPlanType.CRAZY_DEAL
-            cleaned == "vip" || cleaned == "premium" || cleaned == "pro" || cleaned == "true" || cleaned == "1" -> SubscriptionPlanType.FOREVER
+            cleaned == "vip" || cleaned == "premium" || cleaned == "pro" || cleaned == "true" || cleaned == "1" || cleaned == "active" -> SubscriptionPlanType.FOREVER
             cleaned.isBlank() || cleaned == "none" || cleaned == "free" -> {
                 if (hasExplicitVipBoolean) SubscriptionPlanType.FOREVER else SubscriptionPlanType.NONE
             }
@@ -1797,7 +1979,12 @@ class FirebaseSongsService(private val context: Context) {
 
     private fun parseCloudSubscriptionFromSnapshot(snapshot: DataSnapshot): UserSubscriptionState? {
         return try {
-            val isVipFlag = parseBooleanField(snapshot.child("isVip").value) ||
+            val subSnap = snapshot.child("subscription")
+            val subStatus = subSnap.child("status").getValue(String::class.java)?.trim()?.lowercase().orEmpty()
+            val isSubNodeActive = subStatus == "active" || subStatus == "success" || subStatus == "complimentary"
+
+            val isVipFlag = isSubNodeActive ||
+                parseBooleanField(snapshot.child("isVip").value) ||
                 parseBooleanField(snapshot.child("vip").value) ||
                 parseBooleanField(snapshot.child("isVIP").value) ||
                 parseBooleanField(snapshot.child("isSubscribed").value) ||
@@ -1805,13 +1992,13 @@ class FirebaseSongsService(private val context: Context) {
                 snapshot.child("role").getValue(String::class.java)?.equals("vip", ignoreCase = true) == true ||
                 snapshot.child("status").getValue(String::class.java)?.equals("vip", ignoreCase = true) == true
 
-            val subSnap = snapshot.child("subscription")
             val rawPlan = (
-                snapshot.child("vipPlan").getValue(String::class.java)
+                subSnap.child("plan").getValue(String::class.java)
+                    ?: subSnap.child("planType").getValue(String::class.java)
+                    ?: snapshot.child("vipPlan").getValue(String::class.java)
                     ?: snapshot.child("vipType").getValue(String::class.java)
                     ?: snapshot.child("subscriptionPlan").getValue(String::class.java)
                     ?: snapshot.child("plan").getValue(String::class.java)
-                    ?: subSnap.child("planType").getValue(String::class.java)
                     ?: ""
                 ).trim()
 
@@ -1820,22 +2007,26 @@ class FirebaseSongsService(private val context: Context) {
 
             val nowMs = System.currentTimeMillis()
             val activatedAt = (
-                (snapshot.child("subscriptionActivatedAt").value as? Number)?.toLong()
-                    ?: (snapshot.child("vipActivatedAt").value as? Number)?.toLong()
+                (subSnap.child("startAt").value as? Number)?.toLong()
+                    ?: (subSnap.child("grantedAt").value as? Number)?.toLong()
                     ?: (subSnap.child("activatedAtMs").value as? Number)?.toLong()
+                    ?: (snapshot.child("subscriptionActivatedAt").value as? Number)?.toLong()
+                    ?: (snapshot.child("vipActivatedAt").value as? Number)?.toLong()
                     ?: nowMs
                 ).let { if (it > 0L) it else nowMs }
 
             val customDays = (
-                (snapshot.child("vipDays").value as? Number)?.toInt()
+                (subSnap.child("days").value as? Number)?.toInt()
+                    ?: (snapshot.child("vipDays").value as? Number)?.toInt()
                     ?: (snapshot.child("subscriptionDays").value as? Number)?.toInt()
                     ?: 0
                 )
 
             val rawExpiresAt = (
-                (snapshot.child("vipExpiresAt").value as? Number)?.toLong()
-                    ?: (snapshot.child("subscriptionExpiresAt").value as? Number)?.toLong()
+                (subSnap.child("endAt").value as? Number)?.toLong()
                     ?: (subSnap.child("expiresAtMs").value as? Number)?.toLong()
+                    ?: (snapshot.child("vipExpiresAt").value as? Number)?.toLong()
+                    ?: (snapshot.child("subscriptionExpiresAt").value as? Number)?.toLong()
                     ?: 0L
                 )
 
@@ -1848,11 +2039,11 @@ class FirebaseSongsService(private val context: Context) {
             }
 
             val resolvedExpiresAt = if (rawExpiresAt > 0L) rawExpiresAt else (activatedAt + defaultDurationMs)
-            val orderId = snapshot.child("subscriptionOrderId").getValue(String::class.java)
-                ?: subSnap.child("orderId").getValue(String::class.java)
+            val orderId = subSnap.child("orderId").getValue(String::class.java)
+                ?: snapshot.child("subscriptionOrderId").getValue(String::class.java)
                 ?: "admin_vip_grant"
-            val utr = snapshot.child("subscriptionUtr").getValue(String::class.java)
-                ?: subSnap.child("utr").getValue(String::class.java)
+            val utr = subSnap.child("utr").getValue(String::class.java)
+                ?: snapshot.child("subscriptionUtr").getValue(String::class.java)
                 ?: "ADMIN_VIP"
 
             val state = UserSubscriptionState(
@@ -1870,7 +2061,12 @@ class FirebaseSongsService(private val context: Context) {
 
     private fun parseCloudSubscriptionFromJson(obj: JSONObject?): UserSubscriptionState? {
         if (obj == null) return null
-        val isVipFlag = parseBooleanField(obj.opt("isVip")) ||
+        val subObj = obj.optJSONObject("subscription")
+        val subStatus = subObj?.optString("status", "")?.trim()?.lowercase().orEmpty()
+        val isSubNodeActive = subStatus == "active" || subStatus == "success" || subStatus == "complimentary"
+
+        val isVipFlag = isSubNodeActive ||
+            parseBooleanField(obj.opt("isVip")) ||
             parseBooleanField(obj.opt("vip")) ||
             parseBooleanField(obj.opt("isVIP")) ||
             parseBooleanField(obj.opt("isSubscribed")) ||
@@ -1878,12 +2074,12 @@ class FirebaseSongsService(private val context: Context) {
             obj.optString("role", "").equals("vip", ignoreCase = true) ||
             obj.optString("status", "").equals("vip", ignoreCase = true)
 
-        val subObj = obj.optJSONObject("subscription")
-        val rawPlan = obj.optString("vipPlan")
+        val rawPlan = (subObj?.optString("plan").orEmpty())
+            .ifBlank { subObj?.optString("planType").orEmpty() }
+            .ifBlank { obj.optString("vipPlan") }
             .ifBlank { obj.optString("vipType") }
             .ifBlank { obj.optString("subscriptionPlan") }
             .ifBlank { obj.optString("plan") }
-            .ifBlank { subObj?.optString("planType").orEmpty() }
             .trim()
 
         val planType = resolveAdminPlanType(rawPlan, isVipFlag)
@@ -1892,16 +2088,24 @@ class FirebaseSongsService(private val context: Context) {
         }
 
         val nowMs = System.currentTimeMillis()
-        val activatedAt = obj.optLong(
-            "subscriptionActivatedAt",
-            obj.optLong("vipActivatedAt", subObj?.optLong("activatedAtMs", nowMs) ?: nowMs)
-        ).let { if (it > 0L) it else nowMs }
+        val subStartAt = subObj?.optLong("startAt", 0L)?.takeIf { it > 0L }
+            ?: subObj?.optLong("grantedAt", 0L)?.takeIf { it > 0L }
+            ?: subObj?.optLong("activatedAtMs", 0L)?.takeIf { it > 0L }
+        val activatedAt = (
+            subStartAt
+                ?: obj.optLong("subscriptionActivatedAt", 0L).takeIf { it > 0L }
+                ?: obj.optLong("vipActivatedAt", 0L).takeIf { it > 0L }
+                ?: nowMs
+            )
 
-        val customDays = obj.optInt("vipDays", obj.optInt("subscriptionDays", 0))
-        val rawExpiresAt = obj.optLong(
-            "vipExpiresAt",
-            obj.optLong("subscriptionExpiresAt", subObj?.optLong("expiresAtMs", 0L) ?: 0L)
-        )
+        val customDays = subObj?.optInt("days", 0)?.takeIf { it > 0 }
+            ?: obj.optInt("vipDays", obj.optInt("subscriptionDays", 0))
+        val subEndAt = subObj?.optLong("endAt", 0L)?.takeIf { it > 0L }
+            ?: subObj?.optLong("expiresAtMs", 0L)?.takeIf { it > 0L }
+        val rawExpiresAt = subEndAt
+            ?: obj.optLong("vipExpiresAt", 0L).takeIf { it > 0L }
+            ?: obj.optLong("subscriptionExpiresAt", 0L).takeIf { it > 0L }
+            ?: 0L
 
         val defaultDurationMs = when {
             customDays > 0 -> customDays * 86_400_000L
@@ -1912,11 +2116,11 @@ class FirebaseSongsService(private val context: Context) {
         }
 
         val resolvedExpiresAt = if (rawExpiresAt > 0L) rawExpiresAt else (activatedAt + defaultDurationMs)
-        val orderId = obj.optString("subscriptionOrderId")
-            .ifBlank { subObj?.optString("orderId").orEmpty() }
+        val orderId = subObj?.optString("orderId").orEmpty()
+            .ifBlank { obj.optString("subscriptionOrderId") }
             .ifBlank { "admin_vip_grant" }
-        val utr = obj.optString("subscriptionUtr")
-            .ifBlank { subObj?.optString("utr").orEmpty() }
+        val utr = subObj?.optString("utr").orEmpty()
+            .ifBlank { obj.optString("subscriptionUtr") }
             .ifBlank { "ADMIN_VIP" }
 
         val state = UserSubscriptionState(
@@ -1932,7 +2136,7 @@ class FirebaseSongsService(private val context: Context) {
     /**
      * Logs every payment attempt ("PENDING", "SUCCESS", "FAILED", "CANCELLED") to Firebase Realtime Database
      * (/paymentHistory/{orderId}, /payments/{orderId}, /subscriptions/{orderId}, and /users/{userId}/paymentHistory/{orderId})
-     * so the Admin Panel displays complete payment history of which user tried to pay, whether Pending or Successful.
+     * so AK_Music_Admin_Final.html's Payment History page displays every transaction.
      */
     fun logPaymentAttemptToCloud(
         userId: String,
@@ -1951,13 +2155,17 @@ class FirebaseSongsService(private val context: Context) {
                 val recordPayload = JSONObject().apply {
                     put("id", orderKey)
                     put("orderId", orderKey)
+                    put("transactionId", utr.ifBlank { orderKey })
+                    put("paymentId", orderKey)
                     put("userId", userId)
+                    put("uid", userId)
                     put("userName", userName)
                     put("username", userName)
                     put("name", userName)
                     put("planType", session.planType.id)
                     put("plan", session.planType.id)
                     put("planName", session.planType.displayName)
+                    put("currency", "INR")
                     put("amount", session.amountInr)
                     put("amountInr", session.amountInr)
                     put("price", session.amountInr)
@@ -2012,7 +2220,7 @@ class FirebaseSongsService(private val context: Context) {
     /**
      * Syncs a verified AadarshPay subscription purchase to Firebase Realtime Database
      * (/subscriptions/{orderId}, /paymentHistory/{orderId}, /payments/{orderId}, /users/{userId}, and /userAccounts/{normalizedUsername})
-     * so Admin Panel and all devices see the user's active VIP plan, payment history, and timer.
+     * matching AK_Music_Admin_Final.html's exact schema (`user.subscription.status = "active"`, `user.subscription.plan = ...`).
      */
     fun syncSubscriptionToCloud(
         userId: String,
@@ -2026,16 +2234,20 @@ class FirebaseSongsService(private val context: Context) {
                 val dateFmt = java.text.SimpleDateFormat("dd MMM yyyy, hh:mm:ss a", Locale.US)
                 val formattedDate = dateFmt.format(java.util.Date(now))
                 val orderKey = state.orderId.ifBlank { "sub_${userId}_$now" }
-                val subPayload = JSONObject().apply {
+                val paymentPayload = JSONObject().apply {
                     put("id", orderKey)
                     put("orderId", orderKey)
+                    put("transactionId", state.utr.ifBlank { orderKey })
+                    put("paymentId", orderKey)
                     put("userId", userId)
+                    put("uid", userId)
                     put("userName", userName)
                     put("username", userName)
                     put("name", userName)
                     put("planType", state.planType.id)
                     put("plan", state.planType.id)
                     put("planName", state.planType.displayName)
+                    put("currency", "INR")
                     put("amount", amountInr)
                     put("amountInr", amountInr)
                     put("price", amountInr)
@@ -2052,7 +2264,7 @@ class FirebaseSongsService(private val context: Context) {
                 }
                 for (node in listOf("subscriptions/$orderKey", "paymentHistory/$orderKey", "payments/$orderKey", "users/$userId/paymentHistory/$orderKey")) {
                     try {
-                        val body = subPayload.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+                        val body = paymentPayload.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
                         httpClient.newCall(
                             Request.Builder()
                                 .url("$DATABASE_URL/$node.json")
@@ -2061,6 +2273,21 @@ class FirebaseSongsService(private val context: Context) {
                         ).execute().close()
                     } catch (_: Exception) {
                     }
+                }
+
+                // Exact format read by AK_Music_Admin_Final.html (`user.subscription.status === 'active'`, `user.subscription.plan`)
+                val adminCompatibleSubObj = JSONObject().apply {
+                    put("plan", state.planType.id)
+                    put("planType", state.planType.id)
+                    put("planName", state.planType.displayName)
+                    put("status", "active")
+                    put("source", "AadarshPay")
+                    put("startAt", state.activatedAtMs)
+                    put("endAt", state.expiresAtMs)
+                    put("activatedAtMs", state.activatedAtMs)
+                    put("expiresAtMs", state.expiresAtMs)
+                    put("orderId", orderKey)
+                    put("utr", state.utr)
                 }
 
                 val userPatch = JSONObject().apply {
@@ -2085,7 +2312,7 @@ class FirebaseSongsService(private val context: Context) {
                     put("lastPaymentGateway", "AadarshPay")
                     put("lastPaymentDate", formattedDate)
                     put("lastPaymentUpdatedAt", now)
-                    put("subscription", subPayload)
+                    put("subscription", adminCompatibleSubObj)
                 }
                 val patchBody = userPatch.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
                 httpClient.newCall(

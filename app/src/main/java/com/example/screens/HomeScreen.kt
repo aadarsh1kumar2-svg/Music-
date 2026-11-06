@@ -134,41 +134,62 @@ fun HomeScreen(
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    val remainingFreeSeconds = (3600 - dailyListenedSeconds).coerceAtLeast(0)
+                    val remMins = remainingFreeSeconds / 60
+                    val remSecs = remainingFreeSeconds % 60
+                    val isLowTime = !isUserSubscribed && remainingFreeSeconds <= 300
+
                     Surface(
                         color = SpotifyDarkGreenPill,
-                        shape = RoundedCornerShape(20.dp),
+                        shape = RoundedCornerShape(50),
                         modifier = Modifier
-                            .border(1.dp, SpotifyGreenBorder, RoundedCornerShape(20.dp))
+                            .border(
+                                width = 1.dp,
+                                color = if (isLowTime) ErrorRed else SpotifyGreenBorder,
+                                shape = RoundedCornerShape(50)
+                            )
                             .clickable { onOpenSubscriptionModal() }
                             .testTag("home_top_vip_button")
                     ) {
                         Row(
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Icon(
-                                imageVector = Icons.Default.WorkspacePremium,
-                                contentDescription = "VIP",
-                                tint = SpotifyVibrantGreen,
-                                modifier = Modifier.size(16.dp)
+                                imageVector = if (isUserSubscribed) Icons.Default.Verified else Icons.Default.AccessTime,
+                                contentDescription = "Timer & VIP",
+                                tint = if (isLowTime) ErrorRed else SpotifyVibrantGreen,
+                                modifier = Modifier.size(13.dp)
                             )
                             Spacer(modifier = Modifier.width(5.dp))
+                            val compactBadgeText = if (isUserSubscribed) {
+                                val t = if (activeSubscriptionRemainingSeconds > 365L * 86_400L) {
+                                    "Forever"
+                                } else {
+                                    formatCountdownTimer(activeSubscriptionRemainingSeconds)
+                                }
+                                "👑 VIP • $t"
+                            } else {
+                                String.format("Free: %02dm %02ds • 👑 VIP", remMins, remSecs)
+                            }
                             Text(
-                                text = if (isUserSubscribed) "👑 VIP Active" else "👑 Get VIP",
-                                style = MaterialTheme.typography.labelMedium.copy(
-                                    color = SpotifyVibrantGreen,
-                                    fontWeight = FontWeight.ExtraBold
+                                text = compactBadgeText,
+                                maxLines = 1,
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    color = if (isLowTime) ErrorRed else SpotifyVibrantGreen,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 11.sp
                                 )
                             )
                         }
                     }
 
-                    Spacer(modifier = Modifier.width(6.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
 
                     IconButton(
                         onClick = onRefreshCatalog,
                         modifier = Modifier
-                            .size(48.dp)
+                            .size(44.dp)
                             .testTag("home_sync_button")
                     ) {
                         Icon(
@@ -188,7 +209,7 @@ fun HomeScreen(
                     .fillMaxWidth()
                     .clickable { onEditUserName() }
                     .padding(horizontal = 20.dp)
-                    .padding(top = 4.dp, bottom = 14.dp)
+                    .padding(top = 4.dp, bottom = 18.dp)
                     .testTag("home_greeting_header")
             ) {
                 Text(
@@ -210,157 +231,6 @@ fun HomeScreen(
                     )
                 )
             }
-        }
-
-        // 1-Hour Daily Free Listening Timer OR Active VIP Status Banner on Home Screen
-        item {
-            if (isUserSubscribed) {
-                Surface(
-                    color = SpotifyDarkGreenPill,
-                    shape = RoundedCornerShape(16.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp)
-                        .border(1.dp, SpotifyVibrantGreen.copy(alpha = 0.7f), RoundedCornerShape(16.dp))
-                        .clickable { onOpenSubscriptionModal() }
-                        .testTag("home_vip_active_banner")
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 12.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Verified,
-                                contentDescription = null,
-                                tint = SpotifyVibrantGreen,
-                                modifier = Modifier.size(24.dp)
-                            )
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Column {
-                                Text(
-                                    text = "👑 VIP Active • ${subscriptionPlanName.ifBlank { "Premium" }}",
-                                    style = MaterialTheme.typography.titleSmall.copy(
-                                        color = PrimaryWhite,
-                                        fontWeight = FontWeight.ExtraBold
-                                    )
-                                )
-                                val timerSub = if (activeSubscriptionRemainingSeconds > 365L * 86_400L) {
-                                    "Lifetime Forever VIP ♾️ • Unlimited Music, Playlists & Favorites"
-                                } else {
-                                    "Remaining: ${formatCountdownTimer(activeSubscriptionRemainingSeconds)} • Unlimited Music & Playlists"
-                                }
-                                Text(
-                                    text = timerSub,
-                                    style = MaterialTheme.typography.labelSmall.copy(
-                                        color = SpotifyVibrantGreen,
-                                        fontWeight = FontWeight.SemiBold
-                                    )
-                                )
-                            }
-                        }
-                    }
-                }
-            } else {
-                val remainingFreeSeconds = (3600 - dailyListenedSeconds).coerceAtLeast(0)
-                val remainingMins = remainingFreeSeconds / 60
-                val remainingSecs = remainingFreeSeconds % 60
-                val progressFraction = (remainingFreeSeconds / 3600f).coerceIn(0f, 1f)
-                val isLowTime = remainingFreeSeconds <= 300
-
-                Surface(
-                    color = DeepCharcoal,
-                    shape = RoundedCornerShape(16.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp)
-                        .border(
-                            width = 1.dp,
-                            color = if (isLowTime) ErrorRed.copy(alpha = 0.75f) else SpotifyGreenBorder,
-                            shape = RoundedCornerShape(16.dp)
-                        )
-                        .clickable { onOpenSubscriptionModal() }
-                        .testTag("home_daily_free_timer_card")
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 12.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(
-                                    imageVector = Icons.Default.AccessTime,
-                                    contentDescription = "1 Hour Free Timer",
-                                    tint = if (isLowTime) ErrorRed else SpotifyVibrantGreen,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "Daily Free Music Timer (1 Hr)",
-                                    style = MaterialTheme.typography.labelLarge.copy(
-                                        color = PrimaryWhite,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                )
-                            }
-                            Text(
-                                text = String.format("%02dm %02ds / 60m left", remainingMins, remainingSecs),
-                                style = MaterialTheme.typography.labelLarge.copy(
-                                    color = if (isLowTime) ErrorRed else SpotifyVibrantGreen,
-                                    fontWeight = FontWeight.ExtraBold
-                                )
-                            )
-                        }
-
-                        Spacer(modifier = Modifier.height(8.dp))
-
-                        LinearProgressIndicator(
-                            progress = { progressFraction },
-                            color = if (isLowTime) ErrorRed else SpotifyVibrantGreen,
-                            trackColor = SurfaceDarkCard,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(6.dp)
-                                .clip(RoundedCornerShape(3.dp))
-                        )
-
-                        Spacer(modifier = Modifier.height(6.dp))
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "Listen to any songs for 1 hr/day • Tap for Unlimited VIP",
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    color = MutedGray,
-                                    fontSize = 11.sp
-                                )
-                            )
-                            Text(
-                                text = "👑 Upgrade",
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    color = SpotifyVibrantGreen,
-                                    fontWeight = FontWeight.ExtraBold
-                                )
-                            )
-                        }
-                    }
-                }
-            }
-            Spacer(modifier = Modifier.height(14.dp))
         }
 
         // Home Search Bar — Specifically searches the user's Last Session played songs!

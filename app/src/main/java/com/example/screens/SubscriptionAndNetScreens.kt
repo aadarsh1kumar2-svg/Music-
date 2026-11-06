@@ -701,7 +701,7 @@ fun SubscriptionPlansDialog(
                         Spacer(modifier = Modifier.width(10.dp))
                         Column {
                             Text(
-                                text = "AADIFY Premium",
+                                text = config.premiumTitle,
                                 style = MaterialTheme.typography.headlineMedium.copy(
                                     color = PrimaryWhite,
                                     fontWeight = FontWeight.ExtraBold,
@@ -709,7 +709,7 @@ fun SubscriptionPlansDialog(
                                 )
                             )
                             Text(
-                                text = "Unlimited music, Playlists & Repeat mode",
+                                text = config.premiumSubtitle,
                                 style = MaterialTheme.typography.bodySmall.copy(color = MutedGray)
                             )
                         }
@@ -726,54 +726,56 @@ fun SubscriptionPlansDialog(
 
                 Spacer(modifier = Modifier.height(14.dp))
 
-                // Banner
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(125.dp)
-                        .clip(RoundedCornerShape(16.dp))
-                        .background(SurfaceDarkCard)
-                ) {
-                    AsyncImage(
-                        model = config.premiumBannerUrl,
-                        contentDescription = "AADIFY Premium Banner",
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize()
-                    )
+                // Banner (only shown if enabled by Admin in /premiumBanners/premium)
+                if (config.premiumEnabled) {
                     Box(
                         modifier = Modifier
-                            .fillMaxSize()
-                            .background(
-                                Brush.verticalGradient(
-                                    colors = listOf(
-                                        Color.Transparent,
-                                        PureBlack.copy(alpha = 0.85f)
+                            .fillMaxWidth()
+                            .height(125.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(SurfaceDarkCard)
+                    ) {
+                        AsyncImage(
+                            model = config.premiumBannerUrl,
+                            contentDescription = config.premiumTitle,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(
+                                    Brush.verticalGradient(
+                                        colors = listOf(
+                                            Color.Transparent,
+                                            PureBlack.copy(alpha = 0.85f)
+                                        )
                                     )
                                 )
-                            )
-                    )
-                    Column(
-                        modifier = Modifier
-                            .align(Alignment.BottomStart)
-                            .padding(14.dp)
-                    ) {
-                        Text(
-                            text = "Unlock Non-Stop Listening",
-                            style = MaterialTheme.typography.titleMedium.copy(
-                                color = PrimaryWhite,
-                                fontWeight = FontWeight.ExtraBold
-                            )
                         )
-                        Text(
-                            text = "No 1-hour daily limit • Create Unlimited Playlists • Repeat Songs",
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                color = SpotifyVibrantGreen
+                        Column(
+                            modifier = Modifier
+                                .align(Alignment.BottomStart)
+                                .padding(14.dp)
+                        ) {
+                            Text(
+                                text = config.premiumHeading,
+                                style = MaterialTheme.typography.titleMedium.copy(
+                                    color = PrimaryWhite,
+                                    fontWeight = FontWeight.ExtraBold
+                                )
                             )
-                        )
+                            Text(
+                                text = config.premiumDescription,
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    color = SpotifyVibrantGreen
+                                )
+                            )
+                        }
                     }
-                }
 
-                Spacer(modifier = Modifier.height(14.dp))
+                    Spacer(modifier = Modifier.height(14.dp))
+                }
 
                 // Active Subscription Status OR Free Daily Limit Status
                 if (isCurrentlySubscribed) {
