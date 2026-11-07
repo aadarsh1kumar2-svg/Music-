@@ -13,12 +13,12 @@ android {
   compileSdk { version = release(36) { minorApiLevel = 1 } }
 
   defaultConfig {
-    applicationId = "New.app.man.aadarsh.com"
+    applicationId = "com.aadarsh.aadify.app"
     minSdk = 24
-    targetSdk = 35
-    val ciRunNumber = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 50
-    versionCode = 100 + ciRunNumber
-    versionName = "3.$ciRunNumber"
+    targetSdk = 34
+    val buildNumber = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 60
+    versionCode = (System.currentTimeMillis() / 10000L).toInt()
+    versionName = "4.$buildNumber"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }

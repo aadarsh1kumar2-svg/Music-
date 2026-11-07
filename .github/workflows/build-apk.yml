@@ -117,6 +117,21 @@ jobs:
             echo "::error::Selected APK path does not match app/build/outputs/apk/debug/app-debug.apk"
             exit 1
           fi
+          if [ -n "${ANDROID_HOME:-}" ] && [ -d "${ANDROID_HOME}/build-tools" ]; then
+            APKSIGNER_BIN="$(find "${ANDROID_HOME}/build-tools" -name apksigner -type f | sort -V | tail -n 1 || true)"
+            if [ -n "$APKSIGNER_BIN" ] && [ -x "$APKSIGNER_BIN" ]; then
+              "$APKSIGNER_BIN" sign \
+                --ks ./debug.keystore \
+                --ks-pass pass:android \
+                --ks-key-alias androiddebugkey \
+                --key-pass pass:android \
+                --v1-signing-enabled true \
+                --v2-signing-enabled true \
+                --v3-signing-enabled true \
+                "$EXPECTED_APK"
+              "$APKSIGNER_BIN" verify -v "$EXPECTED_APK"
+            fi
+          fi
           echo "Verified debug APK at $EXPECTED_APK"
 
       - name: Upload debug APK artifact
