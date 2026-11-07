@@ -1963,6 +1963,65 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         return SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
     }
 
+    private fun utcTodayDateKey(): String {
+        val fmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
+        fmt.timeZone = java.util.TimeZone.getTimeZone("UTC")
+        return fmt.format(Date())
+    }
+
+    private fun currentHourSlot1To24(): Int {
+        val cal = java.util.Calendar.getInstance()
+        return cal.get(java.util.Calendar.HOUR_OF_DAY) + 1
+    }
+
+    private fun loadTodayHourlySecondsMap(): MutableMap<Int, Int> {
+        val map = mutableMapOf<Int, Int>()
+        try {
+            val raw = prefs.getString("daily_hourly_seconds_json", null)
+            if (!raw.isNullOrBlank() && raw.startsWith("{")) {
+                val obj = JSONObject(raw)
+                val keys = obj.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    val hr = k.toIntOrNull() ?: continue
+                    val secs = obj.optInt(k, 0)
+                    if (hr in 1..24 && secs > 0) {
+                        map[hr] = secs
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        }
+        return map
+    }
+
+    private fun saveTodayHourlySecondsMap(map: Map<Int, Int>) {
+        try {
+            val obj = JSONObject()
+            for ((k, v) in map) {
+                if (v > 0) obj.put(k.toString(), v)
+            }
+            prefs.edit().putString("daily_hourly_seconds_json", obj.toString()).apply()
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun syncCurrentUserTimeUsageToAdminCloud() {
+        val currentName = _userName.value.trim()
+        if (currentName.isEmpty()) return
+        val userId = getOrCreateCloudUserId(currentName)
+        val totalSecs = _dailyListenedSeconds.value.coerceAtLeast(0)
+        val hourlyMap = loadTodayHourlySecondsMap()
+        firebaseService.syncUserTimeUsageToCloud(
+            userId = userId,
+            userName = currentName,
+            utcDateKey = utcTodayDateKey(),
+            localDateKey = todayDateKey(),
+            totalSeconds = totalSecs,
+            hourlySecondsMap = hourlyMap
+        )
+    }
+
     private fun loadTodayListenedSeconds(): Int {
         val today = todayDateKey()
         val savedDay = prefs.getString("daily_limit_date_key", "") ?: ""
@@ -1972,6 +2031,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             prefs.edit()
                 .putString("daily_limit_date_key", today)
                 .putInt("daily_listened_seconds", 0)
+                .remove("daily_hourly_seconds_json")
                 .apply()
             0
         }
@@ -1984,9 +2044,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             prefs.edit()
                 .putString("daily_limit_date_key", today)
                 .putInt("daily_listened_seconds", 0)
+                .remove("daily_hourly_seconds_json")
                 .apply()
             _dailyListenedSeconds.value = 0
             _isDailyLimitReachedModalOpen.value = false
+            syncCurrentUserTimeUsageToAdminCloud()
         }
     }
 
@@ -2040,7 +2102,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         val createdAtMs = prefs.getLong("user_created_at_ms", 0L)
         if (cfg.crazyDealEnabled && createdAtMs > 0L) {
             val validityWindowMs = cfg.crazyDealValidityHours.coerceAtLeast(1) * 3600_000L
-            val endWindowMs = createdAtMs + validityWindowMs
+            // Window starts from whichever is newer: user account creation OR the latest Crazy Deal published by Admin
+            val baseWindowStartMs = maxOf(createdAtMs, cfg.crazyDealUpdatedAt)
+            val endWindowMs = baseWindowStartMs + validityWindowMs
             val remSec = ((endWindowMs - nowMs) / 1000L).coerceAtLeast(0L)
             _crazyDealRemainingSeconds.value = remSec
         } else {
@@ -2051,6 +2115,10 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private fun startSubscriptionAndDailyLimitMonitor() {
         updateSubscriptionAndCrazyDealTimers()
         viewModelScope.launch {
+            // Initial sync of user's daily time usage to /userTimeUsage for Admin Panel
+            if (_userName.value.isNotBlank()) {
+                syncCurrentUserTimeUsageToAdminCloud()
+            }
             while (isActive) {
                 delay(1000L)
                 _isInternetAvailable.value = checkNetworkConnected()
@@ -2065,11 +2133,20 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 if (_isPlaying.value && !_isBuffering.value && !_subscriptionState.value.isActive()) {
                     val nextSec = _dailyListenedSeconds.value + 1
                     _dailyListenedSeconds.value = nextSec
+
+                    val hourlyMap = loadTodayHourlySecondsMap()
+                    val hrSlot = currentHourSlot1To24()
+                    hourlyMap[hrSlot] = (hourlyMap[hrSlot] ?: 0) + 1
+                    saveTodayHourlySecondsMap(hourlyMap)
+
                     if (nextSec % 5 == 0 || nextSec >= limitSecs) {
                         prefs.edit()
                             .putString("daily_limit_date_key", todayDateKey())
                             .putInt("daily_listened_seconds", nextSec)
                             .apply()
+                    }
+                    if (nextSec % 15 == 0 || nextSec == 1 || nextSec >= limitSecs) {
+                        syncCurrentUserTimeUsageToAdminCloud()
                     }
                     if (nextSec >= limitSecs) {
                         pausePlaybackForDailyLimit()
@@ -2092,29 +2169,42 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         _isPlaying.value = false
         _isBuffering.value = false
         _isDailyLimitReachedModalOpen.value = true
+        syncCurrentUserTimeUsageToAdminCloud()
         val limitMins = (currentFreeDailyLimitSeconds() / 60).coerceAtLeast(1)
         emitSnackbar("Your daily ${limitMins}m free limit has been reached! Buy a subscription or wait for next day.")
     }
 
     /**
      * Called when the user enters the Home screen after onboarding/splash.
-     * Shows the Crazy Deals popup ONLY once for new users (within the Admin-configured validity window)
-     * and only if `Show First User Deal Popup` is enabled in the Admin Panel.
+     * Waits until the Admin Panel configuration (/subscriptionPlans & /premiumBanners) is loaded from Firebase
+     * before showing the Crazy Deals popup so it NEVER flashes default values!
      */
     fun onHomeScreenEntered() {
-        val currentName = _userName.value.trim()
-        if (currentName.isEmpty()) return
-        if (_subscriptionState.value.isActive()) return
-        if (!subscriptionConfig.value.crazyDealEnabled) return
-        updateSubscriptionAndCrazyDealTimers()
-        if (_crazyDealRemainingSeconds.value <= 0L) return
+        viewModelScope.launch {
+            val currentName = _userName.value.trim()
+            if (currentName.isEmpty()) return@launch
+            if (_subscriptionState.value.isActive()) return@launch
 
-        val userId = getOrCreateCloudUserId(currentName)
-        val seenKey = "crazy_deal_popup_seen_$userId"
-        val alreadySeen = prefs.getBoolean(seenKey, false)
-        if (!alreadySeen) {
-            prefs.edit().putBoolean(seenKey, true).apply()
-            _isCrazyDealsPopupOpen.value = true
+            // Wait up to 2.5s for Firebase Admin config to finish loading on cold start
+            var waitedMs = 0L
+            while (!firebaseService.isSubscriptionConfigLoaded.value && waitedMs < 2500L) {
+                delay(100L)
+                waitedMs += 100L
+            }
+
+            if (_subscriptionState.value.isActive()) return@launch
+            val cfg = subscriptionConfig.value
+            if (!cfg.crazyDealEnabled) return@launch
+            updateSubscriptionAndCrazyDealTimers()
+            if (_crazyDealRemainingSeconds.value <= 0L) return@launch
+
+            val userId = getOrCreateCloudUserId(currentName)
+            val seenKey = "crazy_deal_popup_seen_${userId}_${cfg.crazyDealUpdatedAt}"
+            val alreadySeen = prefs.getBoolean(seenKey, false)
+            if (!alreadySeen) {
+                prefs.edit().putBoolean(seenKey, true).apply()
+                _isCrazyDealsPopupOpen.value = true
+            }
         }
     }
 

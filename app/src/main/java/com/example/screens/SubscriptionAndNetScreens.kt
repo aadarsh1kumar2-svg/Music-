@@ -873,13 +873,13 @@ fun SubscriptionPlansDialog(
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                // If user is within 3-day new-user window, show Crazy Deal card at top
-                if (crazyDealRemainingSeconds > 0L) {
+                // If user is within new-user window and deal is enabled by Admin, show Crazy Deal card at top
+                if (crazyDealRemainingSeconds > 0L && config.crazyDealEnabled) {
                     PlanOptionCard(
-                        title = "🔥 Crazy Deal (First User Cheapest)",
+                        title = "🔥 ${config.crazyDealTitle}",
                         subtitle = "${config.crazyDealDurationDays} Days Full Access • Ends in ${formatCountdownTimer(crazyDealRemainingSeconds)}",
                         priceInr = config.crazyDealPriceInr,
-                        badgeText = "CHEAPEST OFFER",
+                        badgeText = "SPECIAL OFFER",
                         highlightColor = Color(0xFFFF9100),
                         isCurrentPlan = isCurrentlySubscribed && subscriptionState.planType == SubscriptionPlanType.CRAZY_DEAL,
                         onClick = { onSelectPlanToBuy(SubscriptionPlanType.CRAZY_DEAL) }

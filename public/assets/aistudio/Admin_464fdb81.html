@@ -1,0 +1,1886 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>AK Music — Admin</title>
+  <style>
+    :root {
+      --bg: #0a0a0c;
+      --surface: #16161a;
+      --surface-2: #1e1e24;
+      --surface-3: #26262e;
+      --border: #2c2c34;
+      --accent: #1DB954;
+      --accent-soft: rgba(29, 185, 84, 0.12);
+      --accent-border: rgba(29, 185, 84, 0.35);
+      --danger: #ff4d5e;
+      --danger-soft: rgba(255, 77, 94, 0.12);
+      --text: #f5f5f7;
+      --text-2: #a0a0aa;
+      --text-3: #6b6b75;
+      --radius: 16px;
+      --radius-sm: 12px;
+      --radius-xs: 9px;
+      --safe: env(safe-area-inset-bottom, 0px);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    html, body {
+      height: 100%;
+      overflow-x: hidden;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      padding: 0 0 calc(28px + var(--safe));
+      display: flex;
+      justify-content: center;
+      min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
+      font-size: 15px;
+      line-height: 1.4;
+    }
+
+    .app {
+      width: 100%;
+      max-width: 640px;
+      padding: 0 16px;
+      position: relative;
+    }
+
+    /* ═══════ TOP BAR ═══════ */
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 0 14px;
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      background: linear-gradient(to bottom, var(--bg) 75%, transparent);
+      backdrop-filter: blur(2px);
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      min-width: 0;
+    }
+    .brand-logo {
+      width: 34px;
+      height: 34px;
+      border-radius: 10px;
+      background: var(--accent);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      box-shadow: 0 0 20px rgba(29, 185, 84, 0.35);
+    }
+    .brand-logo svg { width: 18px; height: 18px; fill: #000; }
+    .brand-text { min-width: 0; }
+    .brand-text .name {
+      font-size: 16px;
+      font-weight: 700;
+      letter-spacing: -0.2px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .brand-text .sub {
+      font-size: 11px;
+      color: var(--text-3);
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .menu-btn {
+      width: 40px;
+      height: 40px;
+      border-radius: 12px;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: background 0.15s;
+    }
+    .menu-btn:active { background: var(--surface-3); }
+    .menu-btn span {
+      display: block;
+      width: 18px;
+      height: 2px;
+      background: var(--text);
+      border-radius: 2px;
+    }
+
+    /* ═══════ SIDE MENU ═══════ */
+    .menu-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.6);
+      backdrop-filter: blur(3px);
+      z-index: 90;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.25s;
+    }
+    .menu-overlay.open {
+      opacity: 1;
+      pointer-events: auto;
+    }
+    .side-menu {
+      position: fixed;
+      top: 0;
+      right: 0;
+      bottom: 0;
+      width: min(280px, 78vw);
+      background: var(--surface);
+      border-left: 1px solid var(--border);
+      z-index: 100;
+      transform: translateX(100%);
+      transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+      display: flex;
+      flex-direction: column;
+      padding: 24px 18px calc(24px + var(--safe));
+      box-shadow: -10px 0 40px rgba(0, 0, 0, 0.5);
+    }
+    .side-menu.open { transform: translateX(0); }
+    .side-menu .menu-title {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--text-3);
+      margin-bottom: 14px;
+      padding-left: 4px;
+    }
+    .menu-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 13px 14px;
+      border-radius: var(--radius-xs);
+      color: var(--text-2);
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+      margin-bottom: 4px;
+    }
+    .menu-item:active, .menu-item.active {
+      background: var(--accent-soft);
+      color: var(--accent);
+    }
+    .menu-item svg { width: 20px; height: 20px; flex-shrink: 0; }
+    .menu-item .icon-bg {
+      width: 20px;
+      height: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .menu-item .count-pill {
+      margin-left: auto;
+      font-size: 11px;
+      font-weight: 700;
+      background: var(--surface-3);
+      color: var(--text-2);
+      padding: 2px 8px;
+      border-radius: 10px;
+    }
+    .menu-item.active .count-pill {
+      background: var(--accent);
+      color: #000;
+    }
+
+    /* ═══════ PAGES ═══════ */
+    .page { display: none; animation: fadeIn 0.25s ease; }
+    .page.active { display: block; }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    /* ═══════ HOME / ADD SONG ═══════ */
+    .hero {
+      background: linear-gradient(135deg, var(--surface-2), var(--surface));
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 22px 18px;
+      margin-bottom: 18px;
+      position: relative;
+      overflow: hidden;
+    }
+    .hero::before {
+      content: '';
+      position: absolute;
+      top: -40%;
+      right: -20%;
+      width: 180px;
+      height: 180px;
+      background: radial-gradient(circle, rgba(29, 185, 84, 0.18), transparent 70%);
+      pointer-events: none;
+    }
+    .hero h2 {
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: -0.3px;
+      margin-bottom: 4px;
+      position: relative;
+    }
+    .hero p {
+      font-size: 13px;
+      color: var(--text-2);
+      position: relative;
+    }
+
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px 16px;
+      margin-bottom: 16px;
+    }
+    .panel-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
+      gap: 10px;
+    }
+    .panel-header h3 {
+      font-size: 13px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.7px;
+      color: var(--text-2);
+    }
+    .badge {
+      font-size: 11px;
+      font-weight: 700;
+      background: var(--accent-soft);
+      color: var(--accent);
+      padding: 4px 11px;
+      border-radius: 20px;
+      border: 1px solid var(--accent-border);
+      white-space: nowrap;
+    }
+
+    .field { margin-bottom: 15px; }
+    .field:last-of-type { margin-bottom: 0; }
+    label {
+      display: block;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      color: var(--text-2);
+      margin-bottom: 7px;
+    }
+    input[type="text"],
+    input[type="number"],
+    textarea {
+      width: 100%;
+      padding: 13px 15px;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-xs);
+      color: var(--text);
+      font-size: 15px;
+      outline: none;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    textarea { min-height: 110px; resize: vertical; line-height: 1.45; }
+    textarea:focus { border-color: var(--accent); background: var(--surface-3); }
+    input:focus {
+      border-color: var(--accent);
+      background: var(--surface-3);
+    }
+    input::placeholder { color: var(--text-3); font-size: 14px; }
+
+    .row2 {
+      display: flex;
+      gap: 10px;
+    }
+    .row2 .field { flex: 1; min-width: 0; }
+
+    /* preview */
+    .preview {
+      display: none;
+      align-items: center;
+      gap: 12px;
+      background: var(--surface-2);
+      border: 1px solid var(--accent-border);
+      border-radius: var(--radius-xs);
+      padding: 11px 12px;
+      margin-bottom: 15px;
+      min-width: 0;
+    }
+    .preview img {
+      width: 46px;
+      height: 46px;
+      border-radius: 8px;
+      object-fit: cover;
+      flex-shrink: 0;
+    }
+    .preview-info { min-width: 0; flex: 1; }
+    .preview-info .name {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .preview-info .status {
+      font-size: 11px;
+      color: var(--accent);
+      margin-top: 2px;
+      font-weight: 600;
+    }
+
+    /* toggle */
+    .switch-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-xs);
+      padding: 13px 14px;
+      margin-bottom: 16px;
+    }
+    .switch-text { min-width: 0; }
+    .switch-text .title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text);
+    }
+    .switch-text .sub {
+      font-size: 11px;
+      color: var(--text-3);
+      margin-top: 2px;
+      line-height: 1.3;
+    }
+    .toggle {
+      position: relative;
+      width: 46px;
+      height: 26px;
+      flex-shrink: 0;
+    }
+    .toggle input { opacity: 0; width: 0; height: 0; }
+    .toggle .track {
+      position: absolute;
+      inset: 0;
+      background: #3a3a44;
+      border-radius: 26px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .toggle .track::before {
+      content: '';
+      position: absolute;
+      width: 20px;
+      height: 20px;
+      left: 3px;
+      top: 3px;
+      background: #fff;
+      border-radius: 50%;
+      transition: transform 0.2s;
+    }
+    .toggle input:checked + .track { background: var(--accent); }
+    .toggle input:checked + .track::before { transform: translateX(20px); }
+
+    /* buttons */
+    .btn {
+      border: none;
+      border-radius: var(--radius-xs);
+      font-size: 14px;
+      font-weight: 700;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      transition: opacity 0.15s, background 0.15s, transform 0.1s;
+      white-space: nowrap;
+      padding: 13px 18px;
+    }
+    .btn:active { transform: scale(0.98); }
+    .btn-primary {
+      width: 100%;
+      background: var(--accent);
+      color: #000;
+      padding: 15px;
+      font-size: 15px;
+      box-shadow: 0 4px 20px rgba(29, 185, 84, 0.25);
+    }
+    .btn-primary:active { opacity: 0.9; }
+
+    .btn-sm {
+      padding: 8px 12px;
+      font-size: 12px;
+      font-weight: 600;
+      border-radius: var(--radius-xs);
+    }
+    .btn-ghost {
+      background: var(--surface-2);
+      color: var(--text-2);
+      border: 1px solid var(--border);
+    }
+    .btn-ghost:active { background: var(--surface-3); }
+
+    .btn-edit {
+      background: var(--accent-soft);
+      color: var(--accent);
+      border: 1px solid var(--accent-border);
+    }
+    .btn-edit:active { background: rgba(29, 185, 84, 0.22); }
+
+    .btn-danger {
+      background: var(--danger-soft);
+      color: var(--danger);
+      border: 1px solid rgba(255, 77, 94, 0.3);
+    }
+    .btn-danger:active { background: var(--danger); color: #fff; }
+
+    .btn-icon {
+      width: 34px;
+      height: 34px;
+      padding: 0;
+      background: var(--surface-2);
+      color: var(--text-2);
+      border: 1px solid var(--border);
+      font-size: 13px;
+      border-radius: var(--radius-xs);
+      flex-shrink: 0;
+    }
+    .btn-icon:active { background: var(--surface-3); color: var(--text); }
+
+    /* ═══════ HISTORY LIST ═══════ */
+    .song-card {
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 11px 12px;
+      margin-bottom: 9px;
+      min-width: 0;
+    }
+    .song-rank {
+      width: 30px;
+      height: 30px;
+      border-radius: 8px;
+      background: var(--surface-3);
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 800;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .song-thumb {
+      width: 46px;
+      height: 46px;
+      border-radius: 8px;
+      object-fit: cover;
+      flex-shrink: 0;
+      background: var(--surface-3);
+    }
+    .song-meta {
+      flex: 1;
+      min-width: 0;
+    }
+    .song-meta .title {
+      font-size: 13.5px;
+      font-weight: 600;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      line-height: 1.3;
+    }
+    .song-meta .artist {
+      font-size: 11.5px;
+      color: var(--text-2);
+      margin-top: 3px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .song-actions {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      flex-shrink: 0;
+    }
+
+    .dl-pill {
+      font-size: 10px;
+      font-weight: 800;
+      padding: 5px 9px;
+      border-radius: 7px;
+      cursor: pointer;
+      user-select: none;
+      white-space: nowrap;
+      transition: opacity 0.15s;
+    }
+    .dl-pill:active { opacity: 0.7; }
+    .dl-on {
+      background: var(--accent-soft);
+      color: var(--accent);
+      border: 1px solid var(--accent-border);
+    }
+    .dl-off {
+      background: rgba(255, 255, 255, 0.05);
+      color: var(--text-3);
+      border: 1px solid var(--border);
+    }
+
+    /* mobile actions wrap */
+    .song-actions-wrap {
+      display: flex;
+      gap: 6px;
+      margin-top: 9px;
+      padding-top: 9px;
+      border-top: 1px solid var(--border);
+      width: 100%;
+    }
+    .song-actions-wrap .btn { flex: 1; }
+
+    .empty-state {
+      text-align: center;
+      color: var(--text-3);
+      font-size: 13px;
+      padding: 36px 16px;
+      line-height: 1.6;
+    }
+    .empty-state .big { font-size: 32px; display: block; margin-bottom: 10px; opacity: 0.5; }
+
+    /* ═══════ ANALYSE STATS ═══════ */
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    .stat-card {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 16px 14px;
+      position: relative;
+      overflow: hidden;
+      min-width: 0;
+    }
+    .stat-card::before {
+      content: '';
+      position: absolute;
+      top: -30%;
+      right: -20%;
+      width: 90px;
+      height: 90px;
+      background: radial-gradient(circle, rgba(29, 185, 84, 0.15), transparent 70%);
+      pointer-events: none;
+    }
+    .stat-card .icon {
+      width: 32px;
+      height: 32px;
+      border-radius: 9px;
+      background: var(--accent-soft);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 12px;
+    }
+    .stat-card .icon svg { width: 17px; height: 17px; fill: var(--accent); }
+    .stat-card .value {
+      font-size: 26px;
+      font-weight: 800;
+      letter-spacing: -0.5px;
+      line-height: 1;
+      color: var(--text);
+      margin-bottom: 4px;
+    }
+    .stat-card .label {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      color: var(--text-3);
+    }
+
+    .stat-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .stat-row:last-child { border-bottom: none; }
+    .stat-row .lbl {
+      font-size: 13px;
+      color: var(--text-2);
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .stat-row .val {
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--text);
+      flex-shrink: 0;
+    }
+    .stat-row .val.accent { color: var(--accent); }
+    .stat-row .val.danger { color: var(--danger); }
+
+    .mini-list .mini-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 10px 0;
+      border-bottom: 1px solid var(--border);
+      min-width: 0;
+    }
+    .mini-list .mini-item:last-child { border-bottom: none; }
+    .mini-list .mini-name {
+      font-size: 13px;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      min-width: 0;
+      flex: 1;
+    }
+    .mini-list .mini-count {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--accent);
+      background: var(--accent-soft);
+      padding: 3px 9px;
+      border-radius: 10px;
+      flex-shrink: 0;
+    }
+
+    /* ═══════ MODAL ═══════ */
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.75);
+      backdrop-filter: blur(4px);
+      display: none;
+      align-items: flex-end;
+      justify-content: center;
+      z-index: 1000;
+      padding: 0;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius) var(--radius) 0 0;
+      width: 100%;
+      max-width: 640px;
+      padding: 20px 18px calc(24px + var(--safe));
+      max-height: 92vh;
+      overflow-y: auto;
+      animation: slideUp 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    @keyframes slideUp {
+      from { transform: translateY(100%); }
+      to { transform: translateY(0); }
+    }
+    .modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 18px;
+    }
+    .modal-header h3 {
+      font-size: 17px;
+      font-weight: 700;
+      color: var(--text);
+    }
+    .modal-close {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      color: var(--text-2);
+      width: 34px;
+      height: 34px;
+      border-radius: 10px;
+      font-size: 16px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .modal-close:active { background: var(--surface-3); }
+
+    .modal-footer {
+      display: flex;
+      gap: 10px;
+      margin-top: 20px;
+    }
+    .modal-footer .btn-primary { flex: 1; }
+    .modal-footer .btn-ghost { padding: 15px 20px; }
+
+    /* ═══════ TOAST ═══════ */
+    .toast {
+      position: fixed;
+      bottom: calc(24px + var(--safe));
+      left: 50%;
+      transform: translateX(-50%) translateY(30px);
+      background: var(--accent);
+      color: #000;
+      font-size: 13px;
+      font-weight: 700;
+      padding: 11px 24px;
+      border-radius: 24px;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.25s, transform 0.25s;
+      z-index: 2000;
+      white-space: nowrap;
+      max-width: 90vw;
+      box-shadow: 0 6px 24px rgba(29, 185, 84, 0.4);
+    }
+    .toast.show {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+
+
+    .plans-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+    .plan-box{background:var(--surface-2);border:1px solid var(--border);border-radius:12px;padding:14px}
+    .plan-box h4{font-size:14px;margin-bottom:10px}
+    .sub-line{font-size:11px;color:var(--text-2);margin-top:5px;overflow-wrap:anywhere}
+    .banner-preview{width:100%;max-height:150px;object-fit:cover;border-radius:10px;background:var(--surface-3);margin-top:8px}
+    .status-pill{display:inline-block;padding:3px 8px;border-radius:20px;background:var(--accent-soft);color:var(--accent);font-size:10px;font-weight:700}
+    .payment-row{display:block;background:var(--surface-2);border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:9px}
+    .payment-row .artist{white-space:normal;overflow-wrap:anywhere}
+    @media(max-width:380px){.plans-grid{grid-template-columns:1fr}}
+
+    /* ═══════ RESPONSIVE TWEAKS ═══════ */
+    @media (min-width: 560px) {
+      .song-actions-wrap {
+        width: auto;
+        margin-top: 0;
+        padding-top: 0;
+        border-top: none;
+      }
+      .song-actions-wrap .btn { flex: none; }
+      .song-card { flex-wrap: nowrap; }
+    }
+    @media (max-width: 380px) {
+      .stat-grid { grid-template-columns: 1fr; }
+      .row2 { flex-direction: column; gap: 0; }
+      .row2 .field { width: 100%; }
+      .brand-text .name { font-size: 15px; }
+      .song-actions .btn-icon { display: none; }
+    }
+  </style>
+
+  <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-database-compat.js"></script>
+</head>
+<body>
+
+<div class="app">
+
+  <!-- ═══════ TOP BAR ═══════ -->
+  <div class="topbar">
+    <div class="brand">
+      <div class="brand-logo">
+        <svg viewBox="0 0 24 24"><path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"/></svg>
+      </div>
+      <div class="brand-text">
+        <div class="name">AK Music</div>
+        <div class="sub">Admin Console</div>
+      </div>
+    </div>
+    <div class="menu-btn" onclick="toggleMenu()" aria-label="Menu">
+      <span></span><span></span><span></span>
+    </div>
+  </div>
+
+  <!-- ═══════ SIDE MENU ═══════ -->
+  <div class="menu-overlay" id="menuOverlay" onclick="toggleMenu()"></div>
+  <aside class="side-menu" id="sideMenu">
+    <div class="menu-title">Navigation</div>
+    <div class="menu-item active" data-page="home" onclick="goPage('home')">
+      <span class="icon-bg">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+      </span>
+      Add Song
+    </div>
+    <div class="menu-item" data-page="history" onclick="goPage('history')">
+      <span class="icon-bg">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+      </span>
+      Song History
+      <span class="count-pill" id="menuHistCount">0</span>
+    </div>
+    <div class="menu-item" data-page="notifications" onclick="goPage('notifications')">
+      <span class="icon-bg">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"/><path d="M10 21h4"/></svg>
+      </span>
+      Send Notification
+    </div>
+    <div class="menu-item" data-page="users" onclick="goPage('users')">
+      <span class="icon-bg">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+      </span>
+      Users
+      <span class="count-pill" id="menuUserCount">0</span>
+    </div>
+    <div class="menu-item" data-page="plans" onclick="goPage('plans')">
+      <span class="icon-bg">💎</span>
+      Plans &amp; Banners
+    </div>
+    <div class="menu-item" data-page="payments" onclick="goPage('payments')">
+      <span class="icon-bg">💳</span>
+      Payment History
+    </div>
+    <div class="menu-item" data-page="userTime" onclick="goPage('userTime')">
+      <span class="icon-bg">⏱️</span>
+      User Time
+    </div>
+    <div class="menu-item" data-page="analyse" onclick="goPage('analyse')">
+      <span class="icon-bg">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+      </span>
+      Analyse
+    </div>
+  </aside>
+
+  <!-- ═══════ PAGE: HOME (ADD SONG) ═══════ -->
+  <div class="page active" id="page-home">
+    <div class="hero">
+      <h2>Add a new track 🎵</h2>
+      <p>Paste a YouTube link and it goes live instantly</p>
+    </div>
+
+    <div class="panel">
+      <div class="field">
+        <label>YouTube Link</label>
+        <input type="text" id="ytUrl" placeholder="https://youtu.be/... or video ID" oninput="handleUrlInput()">
+      </div>
+
+      <div class="preview" id="previewBox">
+        <img id="previewImg" src="" alt="">
+        <div class="preview-info">
+          <div class="name" id="previewName">Detecting…</div>
+          <div class="status">✓ Ready to upload</div>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>Song Title</label>
+        <input type="text" id="title" placeholder="Auto-fills from YouTube">
+      </div>
+
+      <div class="row2">
+        <div class="field">
+          <label>Artist</label>
+          <input type="text" id="artist" placeholder="e.g. Banjaare">
+        </div>
+        <div class="field">
+          <label>Chart Rank</label>
+          <input type="number" id="rank" value="1" min="1" placeholder="1">
+        </div>
+      </div>
+
+      <div class="field">
+        <label>Banner URL <span style="text-transform:none;font-weight:400;">(optional)</span></label>
+        <input type="text" id="banner" placeholder="Leave empty for YouTube thumbnail">
+      </div>
+
+      <div class="switch-row">
+        <div class="switch-text">
+          <div class="title">Allow Offline Download</div>
+          <div class="sub">Users can download this track</div>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="allowDownload" checked>
+          <span class="track"></span>
+        </label>
+      </div>
+
+      <button class="btn btn-primary" onclick="uploadSong()">Save &amp; Set Live</button>
+    </div>
+  </div>
+
+  <!-- ═══════ PAGE: HISTORY ═══════ -->
+  <div class="page" id="page-history">
+    <div class="panel" style="padding-top:16px;">
+      <div class="panel-header">
+        <h3>Song History</h3>
+        <span class="badge" id="histCount">0 songs</span>
+      </div>
+      <div id="songsContainer">
+        <div class="empty-state">Loading…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════ PAGE: SEND NOTIFICATION ═══════ -->
+  <div class="page" id="page-notifications">
+    <div class="hero">
+      <h2>Send Notification 🔔</h2>
+      <p>Publish a message for the user panel</p>
+    </div>
+    <div class="panel">
+      <div class="field">
+        <label for="notificationTitle">Title</label>
+        <input type="text" id="notificationTitle" maxlength="120" placeholder="Notification title" required>
+      </div>
+      <div class="field">
+        <label for="notificationBody">Body</label>
+        <textarea id="notificationBody" maxlength="2000" placeholder="Write your notification message" required></textarea>
+      </div>
+      <div class="field">
+        <label for="notificationImage">Image URL <span style="text-transform:none;font-weight:400;">(optional)</span></label>
+        <input type="text" id="notificationImage" placeholder="https://example.com/image.jpg">
+      </div>
+      <button class="btn btn-primary" id="sendNotificationBtn" onclick="sendNotification()">Send Notification</button>
+      <p style="color:var(--text-3);font-size:12px;margin-top:12px;line-height:1.5;">This publishes to Firebase Realtime Database at <code>/notifications</code>. The user panel must read this path to display notifications. Browser-based database writes do not send native push notifications by themselves.</p>
+    </div>
+    <div class="panel">
+      <div class="panel-header"><h3>Recent Notifications</h3></div>
+      <div id="notificationsHistory"><div class="empty-state">Loading…</div></div>
+    </div>
+  </div>
+
+  <!-- ═══════ PAGE: USERS ═══════ -->
+  <div class="page" id="page-users">
+    <div class="hero">
+      <h2>Registered Users 👥</h2>
+      <p>Live list of user records stored in Firebase</p>
+    </div>
+    <div class="panel">
+      <div class="panel-header">
+        <h3>All Users</h3>
+        <span class="badge" id="usersCount">0 users</span>
+      </div>
+      <div class="field">
+        <input type="text" id="userSearch" placeholder="Search by name or user ID" oninput="renderUsers()" aria-label="Search users">
+      </div>
+      <div id="usersContainer"><div class="empty-state">Loading users…</div></div>
+      <p style="color:var(--text-3);font-size:12px;margin-top:12px;line-height:1.5;">Delete removes the selected record from Realtime Database at /users. It does not delete the person's Firebase Authentication account or other records.</p>
+    </div>
+  </div>
+
+
+  <!-- ═══════ PAGE: PLANS & BANNERS ═══════ -->
+  <div class="page" id="page-plans">
+    <div class="hero"><h2>Premium Plans & Banners 💎</h2><p>Update plan prices and both premium popups</p></div>
+    <div class="panel">
+      <div class="panel-header"><h3>Subscription Plan Prices</h3><span class="badge">Editable</span></div>
+      <div class="plans-grid">
+        <div class="plan-box"><h4>Weekly (7 days)</h4><div class="field"><label>Price (₹)</label><input type="number" id="priceWeekly" min="0" step="1" placeholder="29"></div></div>
+        <div class="plan-box"><h4>Monthly (30 days)</h4><div class="field"><label>Price (₹)</label><input type="number" id="priceMonthly" min="0" step="1" placeholder="79"></div></div>
+        <div class="plan-box"><h4>Forever</h4><div class="field"><label>Price (₹)</label><input type="number" id="priceForever" min="0" step="1" placeholder="499"></div></div>
+        <div class="plan-box"><h4>First User Deal</h4><div class="field"><label>Price (₹)</label><input type="number" id="priceDeal" min="0" step="1" placeholder="9"></div></div>
+      </div>
+      <button class="btn btn-primary" onclick="savePlanPrices()">Save Plan Prices</button>
+      <p class="sub-line">Firebase path: /subscriptionPlans. App-side pricing display must read this path too.</p>
+    </div>
+    <div class="panel">
+      <div class="panel-header"><h3>Banner 1 — Premium Popup</h3><span class="badge">Popup</span></div>
+      <div class="field"><label>Banner Image URL</label><input id="premiumImage" type="text" placeholder="https://..."></div>
+      <div class="field"><label>Title</label><input id="premiumTitle" type="text" placeholder="AADIFY Premium"></div>
+      <div class="field"><label>Subtitle</label><input id="premiumSubtitle" type="text" placeholder="Unlimited music, Playlists & Repeat mode"></div>
+      <div class="field"><label>Banner Heading</label><input id="premiumHeading" type="text" placeholder="Unlock Non-Stop Listening"></div>
+      <div class="field"><label>Banner Description</label><textarea id="premiumDescription" placeholder="No 1-hour daily limit • Create Unlimited Playlists • Repeat Songs"></textarea></div>
+      <div class="switch-row"><div class="switch-text"><div class="title">Show Premium Popup</div></div><label class="toggle"><input type="checkbox" id="premiumEnabled" checked><span class="track"></span></label></div>
+      <img id="premiumPreview" class="banner-preview" alt="Premium banner preview" style="display:none">
+      <button class="btn btn-primary" onclick="saveBanner('premium')">Save Premium Banner</button>
+    </div>
+    <div class="panel">
+      <div class="panel-header"><h3>Banner 2 — First User Crazy Deal</h3><span class="badge">New users</span></div>
+      <div class="field"><label>Banner Image URL</label><input id="dealImage" type="text" placeholder="https://..."></div>
+      <div class="field"><label>Offer Heading</label><input id="dealTitle" type="text" placeholder="CRAZY DEALS • FIRST USER SPECIAL 🔥"></div>
+      <div class="field"><label>Offer Description</label><textarea id="dealDescription" placeholder="Unlock full Premium at our cheapest price ever — exclusive for new users!"></textarea></div>
+      <div class="row2">
+        <div class="field"><label>Price (₹)</label><input id="dealBannerPrice" type="number" min="0" step="1" placeholder="9"></div>
+        <div class="field"><label>Access Duration (days)</label><input id="dealDuration" type="number" min="1" step="1" placeholder="7"></div>
+      </div>
+      <div class="field"><label>Offer Validity (hours)</label><input id="dealValidity" type="number" min="1" step="1" placeholder="72"></div>
+      <div class="switch-row"><div class="switch-text"><div class="title">Show First User Deal Popup</div></div><label class="toggle"><input type="checkbox" id="dealEnabled" checked><span class="track"></span></label></div>
+      <img id="dealPreview" class="banner-preview" alt="First user deal banner preview" style="display:none">
+      <button class="btn btn-primary" onclick="saveBanner('firstUserDeal')">Save First User Deal</button>
+      <p class="sub-line">Firebase paths: /premiumBanners/premium and /premiumBanners/firstUserDeal. User app must read these paths to show the updated popups.</p>
+    </div>
+  </div>
+
+  <!-- ═══════ PAGE: PAYMENT HISTORY ═══════ -->
+  <div class="page" id="page-payments">
+    <div class="hero"><h2>Payment History 💳</h2><p>Transactions recorded by your payment integration</p></div>
+    <div class="panel">
+      <div class="panel-header"><h3>Payments</h3><span class="badge" id="paymentCount">0 records</span></div>
+      <div id="paymentsContainer"><div class="empty-state">Loading payment records…</div></div>
+      <p class="sub-line">Reads /payments and /paymentHistory. This page does not process payments; your payment gateway/backend must write verified transaction records here.</p>
+    </div>
+  </div>
+
+  <!-- ═══════ PAGE: USER TIME LIMIT ═══════ -->
+  <div class="page" id="page-userTime">
+    <div class="hero">
+      <h2>Free User Time ⏱️</h2>
+      <p>Monitor daily listening usage and free-plan limits</p>
+    </div>
+    <div class="panel">
+      <div class="panel-header"><h3>Daily Free Limit</h3><span class="badge">Default: 60 min</span></div>
+      <div class="field">
+        <label>Free user daily listening limit (minutes)</label>
+        <input type="number" id="freeTimeLimitInput" min="1" max="1440" step="1" value="60">
+      </div>
+      <button class="btn btn-primary" onclick="saveFreeTimeLimit()">Save Time Limit</button>
+      <p class="sub-line">Firebase path: /freeUserTimeLimitMinutes. The user app must read this setting and enforce the limit itself.</p>
+    </div>
+    <div class="panel">
+      <div class="panel-header">
+        <h3>Free User Usage</h3>
+        <span class="badge" id="freeTimeCount">0 users</span>
+      </div>
+      <div class="field">
+        <input type="text" id="timeUserSearch" placeholder="Search free user by name or ID" oninput="renderUserTime()" aria-label="Search free users">
+      </div>
+      <div id="userTimeContainer"><div class="empty-state">Waiting for usage data…</div></div>
+      <p class="sub-line">Reads /userTimeUsage. The app must write each user's daily total and hourly usage here. Existing usage will not appear until the app sends this data.</p>
+    </div>
+  </div>
+
+  <!-- ═══════ PAGE: ANALYSE ═══════ -->
+  <div class="page" id="page-analyse">
+    <div class="panel" style="padding-top:16px;">
+      <div class="panel-header">
+        <h3>Live Analytics</h3>
+        <span class="badge" id="analyseLiveBadge">● Live</span>
+      </div>
+
+      <div class="stat-grid">
+        <div class="stat-card">
+          <div class="icon">
+            <svg viewBox="0 0 24 24"><path d="M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z"/></svg>
+          </div>
+          <div class="value" id="statSongs">0</div>
+          <div class="label">Total Songs</div>
+        </div>
+        <div class="stat-card">
+          <div class="icon">
+            <svg viewBox="0 0 24 24"><path d="M12 12c2.7 0 4.9-2.2 4.9-4.9S14.7 2.2 12 2.2 7.1 4.4 7.1 7.1 9.3 12 12 12zm0 2.4c-3.3 0-9.8 1.6-9.8 4.9v2.4h19.6v-2.4c0-3.3-6.5-4.9-9.8-4.9z"/></svg>
+          </div>
+          <div class="value" id="statUsers">0</div>
+          <div class="label">Registered Users</div>
+        </div>
+        <div class="stat-card">
+          <div class="icon">
+            <svg viewBox="0 0 24 24"><path d="M9 16.2L4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4z"/></svg>
+          </div>
+          <div class="value" id="statDownloads">0</div>
+          <div class="label">Downloadable</div>
+        </div>
+        <div class="stat-card">
+          <div class="icon">
+            <svg viewBox="0 0 24 24"><path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zm3.3 13.8L11 12V7h1.5v4.2l3.7 2.2-.9 1.4z"/></svg>
+          </div>
+          <div class="value" id="statAvgRank">—</div>
+          <div class="label">Avg. Rank</div>
+        </div>
+      </div>
+
+      <div class="panel-header" style="margin-top:8px;">
+        <h3>Top Artists</h3>
+      </div>
+      <div class="mini-list" id="topArtists">
+        <div class="empty-state" style="padding:20px 0;">No data yet</div>
+      </div>
+
+      <div class="panel-header" style="margin-top:18px;">
+        <h3>Download Status</h3>
+      </div>
+      <div class="stat-row">
+        <span class="lbl">Download enabled</span>
+        <span class="val accent" id="dlOnCount">0</span>
+      </div>
+      <div class="stat-row">
+        <span class="lbl">Download disabled</span>
+        <span class="val danger" id="dlOffCount">0</span>
+      </div>
+      <div class="stat-row">
+        <span class="lbl">Total songs in catalogue</span>
+        <span class="val" id="totalCatalog">0</span>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ═══════ EDIT MODAL ═══════ -->
+<div class="modal-overlay" id="editModal">
+  <div class="modal">
+    <div class="modal-header">
+      <h3>Edit Song</h3>
+      <button class="modal-close" onclick="closeEditModal()">✕</button>
+    </div>
+
+    <input type="hidden" id="editSongId">
+
+    <div class="field">
+      <label>Song Title</label>
+      <input type="text" id="editTitle">
+    </div>
+
+    <div class="row2">
+      <div class="field">
+        <label>Artist</label>
+        <input type="text" id="editArtist">
+      </div>
+      <div class="field">
+        <label>Chart Rank</label>
+        <input type="number" id="editRank" min="1">
+      </div>
+    </div>
+
+    <div class="field">
+      <label>YouTube Link or Video ID</label>
+      <input type="text" id="editYtUrl">
+    </div>
+
+    <div class="field">
+      <label>Banner URL <span style="text-transform:none;font-weight:400;">(optional)</span></label>
+      <input type="text" id="editBanner">
+    </div>
+
+    <div class="switch-row">
+      <div class="switch-text">
+        <div class="title">Allow Offline Download</div>
+        <div class="sub">Enable download button for this track</div>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="editAllowDownload">
+        <span class="track"></span>
+      </label>
+    </div>
+
+    <div class="modal-footer">
+      <button class="btn btn-primary" onclick="saveSongEdit()">Update Song</button>
+      <button class="btn btn-ghost" onclick="closeEditModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+
+<div class="modal-overlay" id="grantModal">
+  <div class="modal">
+    <div class="modal-header"><h3>Give Subscription</h3><button class="modal-close" onclick="closeGrantModal()">✕</button></div>
+    <input type="hidden" id="grantUserId">
+    <div class="field"><label>Plan</label><select id="grantPlan" style="width:100%;padding:13px;background:var(--surface-2);border:1px solid var(--border);border-radius:9px;color:var(--text);font-size:15px"><option value="weekly">Weekly — 7 days</option><option value="monthly">Monthly — 30 days</option><option value="forever">Forever</option><option value="custom">Custom days</option></select></div>
+    <div class="field" id="customDaysWrap" style="display:none"><label>Custom Duration (days)</label><input id="customDays" type="number" min="1" step="1" placeholder="Enter days"></div>
+    <div class="modal-footer"><button class="btn btn-primary" onclick="grantSubscription()">Grant Plan</button><button class="btn btn-ghost" onclick="closeGrantModal()">Cancel</button></div>
+  </div>
+</div>
+<div class="toast" id="toast">Saved</div>
+
+<script>
+  /* ═══════════════════════════════════════════
+     FIREBASE SETUP
+  ═══════════════════════════════════════════ */
+  const firebaseConfig = {
+    apiKey: "AIzaSyDFYXjGLUHYu9whP7cawDwsunYR2f1elaE",
+    databaseURL: "https://file-66f59-default-rtdb.firebaseio.com",
+    projectId: "file-66f59",
+    storageBucket: "file-66f59.firebasestorage.app"
+  };
+
+  firebase.initializeApp(firebaseConfig);
+  const songsRef = firebase.database().ref('songs');
+  const usersRef = firebase.database().ref('users');
+  const notificationsRef = firebase.database().ref('notifications');
+  const plansRef = firebase.database().ref('subscriptionPlans');
+  const bannersRef = firebase.database().ref('premiumBanners');
+  const paymentsRef = firebase.database().ref('payments');
+  const paymentHistoryRef = firebase.database().ref('paymentHistory');
+  const grantsRef = firebase.database().ref('subscriptionGrants');
+  const userTimeUsageRef = firebase.database().ref('userTimeUsage');
+  const freeTimeLimitRef = firebase.database().ref('freeUserTimeLimitMinutes');
+  let userTimeUsage = {};
+  let freeTimeLimitMinutes = 60;
+
+  let paymentRecords = [];
+
+  let songsList = [];
+  let allUsers = [];
+  let detectedVideoId = null;
+
+  /* ═══════════════════════════════════════════
+     NAVIGATION
+  ═══════════════════════════════════════════ */
+  function toggleMenu() {
+    const menu = document.getElementById('sideMenu');
+    const overlay = document.getElementById('menuOverlay');
+    menu.classList.toggle('open');
+    overlay.classList.toggle('open');
+  }
+
+  function goPage(page) {
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+    document.getElementById('page-' + page).classList.add('active');
+
+    document.querySelectorAll('.menu-item').forEach(m => {
+      m.classList.toggle('active', m.dataset.page === page);
+    });
+
+    toggleMenu();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  /* ═══════════════════════════════════════════
+     HELPERS
+  ═══════════════════════════════════════════ */
+  function showToast(msg) {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    clearTimeout(t._timer);
+    t._timer = setTimeout(() => t.classList.remove('show'), 2200);
+  }
+
+  function escapeHtml(str) {
+    return String(str == null ? '' : str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function extractVideoId(url) {
+    if (!url) return null;
+    const clean = url.trim();
+    if (clean.length === 11 && !clean.includes('/') && !clean.includes('.')) return clean;
+    const m = clean.match(/^.*(youtu\.be\/|v\/|u\/\w\/|embed\/|watch\?v=|&v=)([^#&?]*).*/);
+    return (m && m[2].length === 11) ? m[2] : null;
+  }
+
+  /* ═══════════════════════════════════════════
+     URL PREVIEW
+  ═══════════════════════════════════════════ */
+  function handleUrlInput() {
+    const url = document.getElementById('ytUrl').value.trim();
+    detectedVideoId = extractVideoId(url);
+    const box = document.getElementById('previewBox');
+
+    if (!detectedVideoId) {
+      box.style.display = 'none';
+      return;
+    }
+
+    document.getElementById('previewImg').src =
+      `https://img.youtube.com/vi/${detectedVideoId}/hqdefault.jpg`;
+    box.style.display = 'flex';
+
+    fetch(`https://noembed.com/embed?url=https://www.youtube.com/watch?v=${detectedVideoId}`)
+      .then(r => r.json())
+      .then(d => {
+        if (d.title) {
+          document.getElementById('title').value = d.title;
+          document.getElementById('previewName').textContent = d.title;
+        }
+      })
+      .catch(() => {
+        document.getElementById('previewName').textContent = 'Preview unavailable';
+      });
+  }
+
+  /* ═══════════════════════════════════════════
+     UPLOAD
+  ═══════════════════════════════════════════ */
+  function uploadSong() {
+    const videoId = detectedVideoId || extractVideoId(document.getElementById('ytUrl').value);
+    const title = document.getElementById('title').value.trim();
+    const artist = document.getElementById('artist').value.trim() || 'AK Music';
+    const rank = parseInt(document.getElementById('rank').value) || (songsList.length + 1);
+    const allowDownload = document.getElementById('allowDownload').checked;
+    const banner = document.getElementById('banner').value.trim() ||
+      `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`;
+
+    if (!videoId || !title) {
+      alert('YouTube link and title are required.');
+      return;
+    }
+
+    const newRef = songsRef.push();
+    newRef.set({
+      id: newRef.key,
+      title, artist, videoId,
+      bannerUrl: banner,
+      rank, allowDownload,
+      timestamp: Date.now()
+    }).then(() => {
+      showToast('Track uploaded ✓');
+      document.getElementById('ytUrl').value = '';
+      document.getElementById('title').value = '';
+      document.getElementById('artist').value = '';
+      document.getElementById('banner').value = '';
+      document.getElementById('previewBox').style.display = 'none';
+      document.getElementById('allowDownload').checked = true;
+      detectedVideoId = null;
+    }).catch(err => {
+      console.error(err);
+      showToast('Upload failed');
+    });
+  }
+
+  /* ═══════════════════════════════════════════
+     NOTIFICATIONS
+  ═══════════════════════════════════════════ */
+  function sendNotification() {
+    const title = document.getElementById('notificationTitle').value.trim();
+    const body = document.getElementById('notificationBody').value.trim();
+    const imageUrl = document.getElementById('notificationImage').value.trim();
+    if (!title || !body) {
+      alert('Please enter both a title and message body.');
+      return;
+    }
+    if (imageUrl) {
+      try {
+        const parsed = new URL(imageUrl);
+        if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') throw new Error('Invalid protocol');
+      } catch (_) {
+        alert('Please enter a valid image URL starting with https:// or http://.');
+        return;
+      }
+    }
+    const btn = document.getElementById('sendNotificationBtn');
+    btn.disabled = true;
+    btn.textContent = 'Sending…';
+    const ref = notificationsRef.push();
+    ref.set({
+      id: ref.key,
+      title,
+      body,
+      imageUrl: imageUrl || '',
+      timestamp: Date.now()
+    }).then(() => {
+      document.getElementById('notificationTitle').value = '';
+      document.getElementById('notificationBody').value = '';
+      document.getElementById('notificationImage').value = '';
+      showToast('Notification published ✓');
+    }).catch(err => {
+      console.error('Notification publish failed:', err);
+      showToast('Send failed — check Firebase rules');
+    }).finally(() => {
+      btn.disabled = false;
+      btn.textContent = 'Send Notification';
+    });
+  }
+
+
+  /* ═══════ SUBSCRIPTIONS, BANNERS & PAYMENTS ═══════ */
+  function savePlanPrices() {
+    const prices = {
+      weekly: Number(document.getElementById('priceWeekly').value),
+      monthly: Number(document.getElementById('priceMonthly').value),
+      forever: Number(document.getElementById('priceForever').value),
+      firstUserDeal: Number(document.getElementById('priceDeal').value)
+    };
+    if (Object.values(prices).some(v => !Number.isFinite(v) || v < 0)) { alert('Enter valid prices (zero or more).'); return; }
+    plansRef.update(prices).then(() => showToast('Plan prices saved ✓')).catch(e => { console.error(e); showToast('Save failed — check Firebase rules'); });
+  }
+
+  function loadPlanPrices(data) {
+    if (!data) return;
+    if (data.weekly != null) document.getElementById('priceWeekly').value = data.weekly;
+    if (data.monthly != null) document.getElementById('priceMonthly').value = data.monthly;
+    if (data.forever != null) document.getElementById('priceForever').value = data.forever;
+    if (data.firstUserDeal != null) document.getElementById('priceDeal').value = data.firstUserDeal;
+  }
+
+  const bannerFields = {
+    premium: {image:'premiumImage', title:'premiumTitle', subtitle:'premiumSubtitle', heading:'premiumHeading', description:'premiumDescription', enabled:'premiumEnabled', preview:'premiumPreview'},
+    firstUserDeal: {image:'dealImage', title:'dealTitle', description:'dealDescription', price:'dealBannerPrice', duration:'dealDuration', validity:'dealValidity', enabled:'dealEnabled', preview:'dealPreview'}
+  };
+  function saveBanner(kind) {
+    const f = bannerFields[kind]; if (!f) return;
+    const data = {};
+    Object.entries(f).forEach(([key,id]) => {
+      if (key === 'preview') return;
+      const el = document.getElementById(id);
+      data[key] = el.type === 'checkbox' ? el.checked : (el.type === 'number' ? Number(el.value || 0) : el.value.trim());
+    });
+    if (data.image && !/^https?:\/\//i.test(data.image)) { alert('Banner image URL must start with http:// or https://'); return; }
+    bannersRef.child(kind).update({...data, updatedAt:Date.now()})
+      .then(() => showToast('Banner settings saved ✓'))
+      .catch(e => { console.error(e); showToast('Save failed — check Firebase rules'); });
+  }
+  function loadBanner(kind, data) {
+    const f = bannerFields[kind]; if (!f || !data) return;
+    Object.entries(f).forEach(([key,id]) => {
+      if (key === 'preview' || data[key] == null) return;
+      const el = document.getElementById(id);
+      if (el.type === 'checkbox') el.checked = !!data[key]; else el.value = data[key];
+    });
+    const img = document.getElementById(f.preview);
+    if (data.image) { img.src = data.image; img.style.display = 'block'; } else img.style.display = 'none';
+  }
+  ['premiumImage','dealImage'].forEach(id => document.getElementById(id).addEventListener('input', () => {
+    const img = document.getElementById(id === 'premiumImage' ? 'premiumPreview' : 'dealPreview');
+    const url = document.getElementById(id).value.trim();
+    if (url && /^https?:\/\//i.test(url)) { img.src = url; img.style.display = 'block'; } else img.style.display = 'none';
+  }));
+
+  function openGrantModal(encodedId) {
+    const id = decodeURIComponent(encodedId);
+    document.getElementById('grantUserId').value = id;
+    document.getElementById('grantPlan').value = 'weekly';
+    document.getElementById('customDaysWrap').style.display = 'none';
+    document.getElementById('grantModal').classList.add('open');
+  }
+  function closeGrantModal() { document.getElementById('grantModal').classList.remove('open'); }
+  document.getElementById('grantPlan').addEventListener('change', e => {
+    document.getElementById('customDaysWrap').style.display = e.target.value === 'custom' ? 'block' : 'none';
+  });
+  function grantSubscription() {
+    const uid = document.getElementById('grantUserId').value;
+    const plan = document.getElementById('grantPlan').value;
+    const days = plan === 'weekly' ? 7 : plan === 'monthly' ? 30 : plan === 'forever' ? null : Number(document.getElementById('customDays').value);
+    if (plan === 'custom' && (!Number.isInteger(days) || days < 1)) { alert('Enter a valid number of days.'); return; }
+    const now = Date.now(), endAt = days == null ? null : now + days * 86400000;
+    const subscription = {plan, status:'active', source:'admin', startAt:now, endAt, grantedAt:now};
+    const updates = {};
+    updates[`users/${uid}/subscription`] = subscription;
+    const grantKey = firebase.database().ref('subscriptionGrants').push().key;
+    updates[`subscriptionGrants/${grantKey}`] = {userId:uid, plan, status:'complimentary', amount:0, source:'admin', timestamp:now, endAt};
+    firebase.database().ref().update(updates).then(() => {
+      closeGrantModal(); showToast('Subscription granted ✓');
+    }).catch(err => { console.error(err); showToast('Grant failed — check Firebase rules'); });
+  }
+
+
+  function isPremiumUser(user) {
+    const sub = user && user.subscription;
+    return !!(sub && sub.status === 'active' &&
+      (!sub.endAt || Number(sub.endAt) > Date.now() || String(sub.plan || '').toLowerCase() === 'forever'));
+  }
+
+  function getTodayUsage(record) {
+    if (!record || typeof record !== 'object') return { seconds: 0, hourly: {} };
+    const today = new Date().toISOString().slice(0, 10);
+    const dayRecord = (record.daily && record.daily[today]) ||
+      (record.days && record.days[today]) ||
+      (record[today] && typeof record[today] === 'object' ? record[today] : null) || record;
+    const seconds = Number(
+      dayRecord.totalSeconds ?? dayRecord.usedSeconds ?? dayRecord.listeningSeconds ??
+      dayRecord.usageSeconds ?? (Number(dayRecord.totalMinutes ?? dayRecord.usedMinutes ?? 0) * 60) ?? 0
+    ) || 0;
+    const hourly = dayRecord.hourly || dayRecord.hours || {};
+    return { seconds: Math.max(0, seconds), hourly };
+  }
+
+  function formatListeningTime(seconds) {
+    const mins = Math.floor(Math.max(0, seconds) / 60);
+    const hrs = Math.floor(mins / 60);
+    const rem = mins % 60;
+    return hrs ? `${hrs}h ${rem}m` : `${rem}m`;
+  }
+
+  function saveFreeTimeLimit() {
+    const value = Math.floor(Number(document.getElementById('freeTimeLimitInput').value));
+    if (!Number.isFinite(value) || value < 1 || value > 1440) {
+      showToast('Enter a limit from 1 to 1440 minutes');
+      return;
+    }
+    freeTimeLimitRef.set(value).then(() => {
+      freeTimeLimitMinutes = value;
+      renderUserTime();
+      showToast('Free time limit saved ✓');
+    }).catch(err => {
+      console.error('Free time limit save failed:', err);
+      showToast('Save failed — check Firebase rules');
+    });
+  }
+
+  function renderUserTime() {
+    const el = document.getElementById('userTimeContainer');
+    if (!el) return;
+    const query = (document.getElementById('timeUserSearch')?.value || '').trim().toLowerCase();
+    const freeUsers = allUsers.filter(user => !isPremiumUser(user)).filter(user => {
+      const name = String(user.name || user.displayName || user.username || user.fullName || 'Unnamed user');
+      return name.toLowerCase().includes(query) || String(user.id || '').toLowerCase().includes(query);
+    });
+    const count = document.getElementById('freeTimeCount');
+    if (count) count.textContent = `${freeUsers.length} users`;
+    if (!freeUsers.length) {
+      el.innerHTML = '<div class="empty-state">No free users found.</div>';
+      return;
+    }
+    const limitSeconds = freeTimeLimitMinutes * 60;
+    el.innerHTML = freeUsers.map(user => {
+      const record = userTimeUsage[user.id] || {};
+      const usage = getTodayUsage(record);
+      const remaining = Math.max(0, limitSeconds - usage.seconds);
+      const percent = Math.min(100, Math.round((usage.seconds / Math.max(1, limitSeconds)) * 100));
+      const hourlyEntries = Object.entries(usage.hourly || {}).sort((a,b) => Number(a[0]) - Number(b[0]));
+      const hourlyText = hourlyEntries.length
+        ? hourlyEntries.map(([hour, value]) => {
+            const secs = typeof value === 'object'
+              ? Number(value.seconds ?? value.totalSeconds ?? value.usedSeconds ?? 0)
+              : Number(value);
+            const mins = secs > 10000 ? Math.round(secs / 60) : Math.round(secs);
+            return `${escapeHtml(hour)}: ${mins}${typeof value === 'object' && value.minutes != null ? '' : ' min'}`;
+          }).join(' · ')
+        : 'Hourly breakdown not sent by app';
+      const name = user.name || user.displayName || user.username || user.fullName || 'Unnamed user';
+      const exhausted = remaining <= 0;
+      return `<div class="song-card" style="display:block;">
+        <div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start">
+          <div class="song-meta">
+            <div class="title">${escapeHtml(name)}</div>
+            <div class="artist">ID: ${escapeHtml(user.id)}</div>
+          </div>
+          <span class="status-pill">${exhausted ? 'Limit reached' : 'Free'}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;gap:8px;margin:10px 0 6px;font-size:12px">
+          <span>Used: <b>${formatListeningTime(usage.seconds)}</b></span>
+          <span>Left: <b>${formatListeningTime(remaining)}</b></span>
+        </div>
+        <div style="height:7px;background:var(--surface-3);border-radius:9px;overflow:hidden">
+          <div style="height:100%;width:${percent}%;background:${exhausted ? 'var(--danger)' : 'var(--accent)'};border-radius:9px"></div>
+        </div>
+        <div class="artist" style="white-space:normal;margin-top:8px">Hourly usage (1, 2, 3…): ${hourlyText}</div>
+      </div>`;
+    }).join('');
+  }
+
+  function renderPayments() {
+    const el = document.getElementById('paymentsContainer');
+    if (!el) return;
+    document.getElementById('paymentCount').textContent = `${paymentRecords.length} records`;
+    if (!paymentRecords.length) { el.innerHTML = '<div class="empty-state">No payment records found in /payments or /paymentHistory.</div>'; return; }
+    el.innerHTML = paymentRecords.sort((a,b) => Number(b.timestamp || b.createdAt || 0) - Number(a.timestamp || a.createdAt || 0)).map(p => {
+      const uid = p.userId || p.uid || 'Unknown user';
+      const user = allUsers.find(u => u.id === uid);
+      const userName = p.userName || (user && (user.name || user.displayName || user.username)) || uid;
+      const date = p.timestamp || p.createdAt;
+      return `<div class="payment-row"><div style="display:flex;justify-content:space-between;gap:8px"><strong>${escapeHtml(userName)}</strong><span class="status-pill">${escapeHtml(p.status || 'unknown')}</span></div>
+      <div class="artist">Plan: ${escapeHtml(p.plan || p.planName || '—')} · Amount: ${escapeHtml(p.currency || 'INR')} ${escapeHtml(p.amount == null ? '—' : p.amount)}</div>
+      <div class="artist">Transaction: ${escapeHtml(p.transactionId || p.paymentId || p.orderId || p.id || '—')}</div>
+      <div class="artist">User ID: ${escapeHtml(uid)}${date ? ' · ' + escapeHtml(new Date(Number(date)).toLocaleString()) : ''}</div></div>`;
+    }).join('');
+  }
+
+  function renderUsers() {
+    const el = document.getElementById('usersContainer');
+    const count = document.getElementById('usersCount');
+    const menuCount = document.getElementById('menuUserCount');
+    if (!el) return;
+    if (count) count.textContent = `${allUsers.length} users`;
+    if (menuCount) menuCount.textContent = allUsers.length;
+    const query = (document.getElementById('userSearch')?.value || '').trim().toLowerCase();
+    const filtered = allUsers.filter(user => {
+      const name = String(user.name || user.displayName || user.username || user.fullName || 'Unnamed user');
+      return name.toLowerCase().includes(query) || String(user.id || '').toLowerCase().includes(query);
+    }).sort((a, b) => String(a.name || a.displayName || a.username || '').localeCompare(String(b.name || b.displayName || b.username || '')));
+    if (!filtered.length) {
+      el.innerHTML = `<div class="empty-state">${allUsers.length ? 'No matching users.' : 'No user records found in /users.'}</div>`;
+      return;
+    }
+    el.innerHTML = filtered.map(user => {
+      const name = user.name || user.displayName || user.username || user.fullName || 'Unnamed user';
+      const detail = user.email || user.phone || user.mobile || '';
+      return `<div class="song-card" style="align-items:center;">
+        <div class="song-rank">👤</div>
+        <div class="song-meta">
+          <div class="title">${escapeHtml(name)}</div>
+          ${detail ? `<div class="artist">${escapeHtml(detail)}</div>` : ''}
+          <div class="artist" style="white-space:normal;overflow-wrap:anywhere;">ID: ${escapeHtml(user.id)}</div>
+          <div class="artist">Subscription: ${escapeHtml(user.subscription && user.subscription.status === 'active' ? (user.subscription.plan || 'Active') : 'Free')}</div>
+        </div>
+        <button class="btn btn-sm btn-edit" onclick="openGrantModal('${encodeURIComponent(user.id)}')">Give Plan</button>
+        <button class="btn btn-sm btn-danger" onclick="deleteUserRecord('${encodeURIComponent(user.id)}')">Delete</button>
+      </div>`;
+    }).join('');
+  }
+
+  function deleteUserRecord(encodedId) {
+    const id = decodeURIComponent(encodedId);
+    const user = allUsers.find(item => item.id === id);
+    if (!user) { showToast('User record not found'); return; }
+    const name = user.name || user.displayName || user.username || user.fullName || id;
+    if (!confirm(`Delete the database record for "${name}"? This will not delete their Firebase Authentication account.`)) return;
+    usersRef.child(id).remove().then(() => {
+      showToast('User record deleted');
+    }).catch(err => {
+      console.error('User delete failed:', err);
+      showToast('Delete failed — check Firebase rules');
+    });
+  }
+
+  function renderNotifications(data) {
+    const el = document.getElementById('notificationsHistory');
+    const items = data ? Object.values(data).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0)).slice(0, 10) : [];
+    if (!items.length) {
+      el.innerHTML = '<div class="empty-state">No notifications sent yet.</div>';
+      return;
+    }
+    el.innerHTML = items.map(n => `
+      <div class="song-card" style="align-items:flex-start;">
+        ${n.imageUrl ? `<img class="song-thumb" src="${escapeHtml(n.imageUrl)}" alt="" onerror="this.style.display='none'">` : ''}
+        <div class="song-meta">
+          <div class="title">${escapeHtml(n.title || 'Untitled')}</div>
+          <div class="artist" style="white-space:normal;">${escapeHtml(n.body || '')}</div>
+          <div class="artist">${n.timestamp ? new Date(n.timestamp).toLocaleString() : ''}</div>
+        </div>
+      </div>`).join('');
+  }
+
+  notificationsRef.limitToLast(20).on('value', snapshot => renderNotifications(snapshot.val()));
+
+  /* ═══════════════════════════════════════════
+     SONG ACTIONS
+  ═══════════════════════════════════════════ */
+  function toggleDownload(id, current) {
+    songsRef.child(id).update({ allowDownload: !current });
+  }
+
+  function adjustRank(id, newRank) {
+    if (newRank < 1) return;
+    songsRef.child(id).update({ rank: newRank });
+  }
+
+  function deleteTrack(id) {
+    if (confirm('Remove this song from the app?')) {
+      songsRef.child(id).remove();
+    }
+  }
+
+  /* ═══════════════════════════════════════════
+     EDIT MODAL
+  ═══════════════════════════════════════════ */
+  function openEditModal(id) {
+    const song = songsList.find(s => s.id === id);
+    if (!song) return;
+
+    document.getElementById('editSongId').value = song.id;
+    document.getElementById('editTitle').value = song.title || '';
+    document.getElementById('editArtist').value = song.artist || '';
+    document.getElementById('editRank').value = song.rank || 1;
+    document.getElementById('editYtUrl').value = `https://youtu.be/${song.videoId}`;
+    document.getElementById('editBanner').value = song.bannerUrl || '';
+    document.getElementById('editAllowDownload').checked = (song.allowDownload !== false);
+
+    document.getElementById('editModal').classList.add('open');
+  }
+
+  function closeEditModal() {
+    document.getElementById('editModal').classList.remove('open');
+  }
+
+  function saveSongEdit() {
+    const id = document.getElementById('editSongId').value;
+    const title = document.getElementById('editTitle').value.trim();
+    const artist = document.getElementById('editArtist').value.trim();
+    const rank = parseInt(document.getElementById('editRank').value) || 1;
+    const videoId = extractVideoId(document.getElementById('editYtUrl').value.trim());
+    const allowDownload = document.getElementById('editAllowDownload').checked;
+    const banner = document.getElementById('editBanner').value.trim() ||
+      `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`;
+
+    if (!title || !videoId) {
+      alert('Title and a valid YouTube link are required.');
+      return;
+    }
+
+    songsRef.child(id).update({
+      title, artist, rank, videoId, bannerUrl: banner, allowDownload
+    }).then(() => {
+      closeEditModal();
+      showToast('Song updated ✓');
+    });
+  }
+
+  /* ═══════════════════════════════════════════
+     RENDER SONG HISTORY
+  ═══════════════════════════════════════════ */
+  function renderSongs() {
+    const container = document.getElementById('songsContainer');
+    const histBadge = document.getElementById('histCount');
+    const menuBadge = document.getElementById('menuHistCount');
+
+    histBadge.textContent = `${songsList.length} songs`;
+    menuBadge.textContent = songsList.length;
+
+    if (!songsList.length) {
+      container.innerHTML = '<div class="empty-state"><span class="big">🎵</span>No songs yet.<br>Add your first track from the Add Song page.</div>';
+      return;
+    }
+
+    container.innerHTML = songsList.map(song => {
+      const dlOn = song.allowDownload !== false;
+      const thumb = song.bannerUrl || `https://img.youtube.com/vi/${song.videoId}/hqdefault.jpg`;
+      return `
+        <div class="song-card">
+          <div class="song-rank">#${song.rank || '–'}</div>
+          <img class="song-thumb" src="${escapeHtml(thumb)}" alt=""
+               onerror="this.src='https://img.youtube.com/vi/${song.videoId}/hqdefault.jpg'">
+          <div class="song-meta">
+            <div class="title">${escapeHtml(song.title || 'Untitled')}</div>
+            <div class="artist">${escapeHtml(song.artist || 'Unknown')}</div>
+          </div>
+          <div class="song-actions">
+            <div class="dl-pill ${dlOn ? 'dl-on' : 'dl-off'}"
+                 onclick="toggleDownload('${song.id}', ${dlOn})">
+              ${dlOn ? '⬇ ON' : '✕ OFF'}
+            </div>
+          </div>
+          <div class="song-actions-wrap">
+            <button class="btn btn-sm btn-edit" onclick="openEditModal('${song.id}')">Edit</button>
+            <button class="btn btn-sm btn-icon" onclick="adjustRank('${song.id}', ${(song.rank || 1) - 1})">▲</button>
+            <button class="btn btn-sm btn-icon" onclick="adjustRank('${song.id}', ${(song.rank || 1) + 1})">▼</button>
+            <button class="btn btn-sm btn-danger" onclick="deleteTrack('${song.id}')">Delete</button>
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  /* ═══════════════════════════════════════════
+     RENDER ANALYSE
+  ═══════════════════════════════════════════ */
+  function renderAnalyse() {
+    const total = songsList.length;
+    const dlOn = songsList.filter(s => s.allowDownload !== false).length;
+    const dlOff = total - dlOn;
+
+    document.getElementById('statSongs').textContent = total;
+    document.getElementById('statUsers').textContent = allUsers.length;
+    document.getElementById('statDownloads').textContent = dlOn;
+    document.getElementById('dlOnCount').textContent = dlOn;
+    document.getElementById('dlOffCount').textContent = dlOff;
+    document.getElementById('totalCatalog').textContent = total;
+
+    // avg rank
+    const avgRank = total
+      ? (songsList.reduce((sum, s) => sum + (s.rank || 0), 0) / total).toFixed(1)
+      : '—';
+    document.getElementById('statAvgRank').textContent = avgRank;
+
+    // top artists
+    const artistMap = {};
+    songsList.forEach(s => {
+      const a = (s.artist || 'Unknown').trim();
+      artistMap[a] = (artistMap[a] || 0) + 1;
+    });
+    const top = Object.entries(artistMap)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5);
+
+    const topEl = document.getElementById('topArtists');
+    if (!top.length) {
+      topEl.innerHTML = '<div class="empty-state" style="padding:20px 0;">No data yet</div>';
+    } else {
+      topEl.innerHTML = top.map(([name, count]) => `
+        <div class="mini-item">
+          <span class="mini-name">${escapeHtml(name)}</span>
+          <span class="mini-count">${count} song${count > 1 ? 's' : ''}</span>
+        </div>
+      `).join('');
+    }
+  }
+
+  /* ═══════════════════════════════════════════
+     REALTIME LISTENERS
+  ═══════════════════════════════════════════ */
+  songsRef.on('value', snapshot => {
+    const data = snapshot.val();
+    songsList = data
+      ? Object.values(data).sort((a, b) => (a.rank || 999) - (b.rank || 999))
+      : [];
+    document.getElementById('rank').value = songsList.length + 1;
+    renderSongs();
+    renderAnalyse();
+  });
+
+  plansRef.on('value', snapshot => loadPlanPrices(snapshot.val()));
+  bannersRef.child('premium').on('value', snapshot => loadBanner('premium', snapshot.val()));
+  bannersRef.child('firstUserDeal').on('value', snapshot => loadBanner('firstUserDeal', snapshot.val()));
+  paymentsRef.on('value', snapshot => {
+    const data = snapshot.val() || {};
+    paymentRecords = Object.entries(data).map(([id,p]) => ({id,...(p || {})}));
+    renderPayments();
+  });
+  paymentHistoryRef.on('value', snapshot => {
+    const data = snapshot.val() || {};
+    const extra = Object.entries(data).map(([id,p]) => ({id,...(p || {})}));
+    const map = new Map([...paymentRecords, ...extra].map(p => [p.id, p]));
+    paymentRecords = [...map.values()];
+    renderPayments();
+  });
+
+
+  freeTimeLimitRef.on('value', snapshot => {
+    const value = Number(snapshot.val());
+    freeTimeLimitMinutes = Number.isFinite(value) && value > 0 ? value : 60;
+    const input = document.getElementById('freeTimeLimitInput');
+    if (input) input.value = freeTimeLimitMinutes;
+    renderUserTime();
+  });
+  userTimeUsageRef.on('value', snapshot => {
+    userTimeUsage = snapshot.val() || {};
+    renderUserTime();
+  });
+
+  usersRef.on('value', snapshot => {
+    const data = snapshot.val();
+    allUsers = data ? Object.keys(data).map(k => ({ id: k, ...(typeof data[k] === 'object' ? data[k] : { name: data[k] }) })) : [];
+    renderAnalyse();
+    renderUsers();
+    renderPayments();
+  });
+
+  /* ═══════════════════════════════════════════
+     MISC
+  ═══════════════════════════════════════════ */
+  document.getElementById('grantModal').addEventListener('click', e => {
+    if (e.target === e.currentTarget) closeGrantModal();
+  });
+  document.getElementById('editModal').addEventListener('click', e => {
+    if (e.target === e.currentTarget) closeEditModal();
+  });
+
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') {
+      closeEditModal();
+      closeGrantModal();
+      const menu = document.getElementById('sideMenu');
+      if (menu.classList.contains('open')) toggleMenu();
+    }
+  });
+</script>
+</body>
+</html>

@@ -104,6 +104,10 @@ class FirebaseSongsService(private val context: Context) {
         "ak_admin_rank_tracker",
         Context.MODE_PRIVATE
     )
+    private val configCachePrefs = context.applicationContext.getSharedPreferences(
+        "ak_admin_config_cache",
+        Context.MODE_PRIVATE
+    )
     private val previousExplicitRanks = ConcurrentHashMap<String, Int>()
     private val previousResolvedRanks = ConcurrentHashMap<String, Int>()
 
@@ -117,9 +121,12 @@ class FirebaseSongsService(private val context: Context) {
     private val _connectionError = MutableStateFlow<String?>(null)
     val connectionError: StateFlow<String?> = _connectionError.asStateFlow()
 
-    // Admin-configured Subscription Plans & Crazy Deal Config (real-time synced from /subscriptionConfig and /plans)
-    private val _subscriptionConfig = MutableStateFlow(AdminSubscriptionConfig())
+    // Admin-configured Subscription Plans & Crazy Deal Config (real-time synced from /subscriptionPlans, /premiumBanners, /freeUserTimeLimitMinutes)
+    private val _subscriptionConfig = MutableStateFlow(loadCachedSubscriptionConfig())
     val subscriptionConfig: StateFlow<AdminSubscriptionConfig> = _subscriptionConfig.asStateFlow()
+
+    private val _isSubscriptionConfigLoaded = MutableStateFlow(configCachePrefs.getBoolean("has_cached_config", false))
+    val isSubscriptionConfigLoaded: StateFlow<Boolean> = _isSubscriptionConfigLoaded.asStateFlow()
 
     private var firebaseDatabase: FirebaseDatabase? = null
     private var songsRef: DatabaseReference? = null
@@ -242,7 +249,7 @@ class FirebaseSongsService(private val context: Context) {
                 override fun onDataChange(snapshot: DataSnapshot) {
                     if (snapshot.exists()) {
                         parseSubscriptionConfigSnapshot(snapshot)?.let { parsed ->
-                            _subscriptionConfig.value = parsed
+                            updateAndPersistSubscriptionConfig(parsed)
                         }
                     }
                 }
@@ -253,21 +260,23 @@ class FirebaseSongsService(private val context: Context) {
                 it.keepSynced(true)
                 it.addValueEventListener(subConfigListener)
             }
-            database.getReference("subscriptionConfig").addValueEventListener(subConfigListener)
-            database.getReference("plans").addValueEventListener(subConfigListener)
-            database.getReference("subscriptionsConfig").addValueEventListener(subConfigListener)
-            database.getReference("settings").addValueEventListener(subConfigListener)
-            database.getReference("appConfig").addValueEventListener(subConfigListener)
 
-            val freeTimerDirectListener = object : ValueEventListener {
+            // Exact path used by Admin.html for Free User Daily Limit in minutes: /freeUserTimeLimitMinutes
+            val freeTimeLimitMinutesListener = object : ValueEventListener {
                 override fun onDataChange(snapshot: DataSnapshot) {
                     if (snapshot.exists()) {
                         val current = _subscriptionConfig.value
-                        val parsedSecs = parseFreeLimitSecondsFromSnapshot(snapshot, current.freeDailyLimitSeconds)
-                        if (parsedSecs != current.freeDailyLimitSeconds) {
-                            _subscriptionConfig.value = current.copy(
-                                freeDailyLimitMinutes = (parsedSecs / 60).coerceAtLeast(1),
-                                freeDailyLimitSeconds = parsedSecs
+                        val parsedSecs = parseFreeLimitSecondsFromRawValue(
+                            snapshot.value,
+                            isExplicitSeconds = false,
+                            isExplicitMinutes = true
+                        ) ?: parseFreeLimitSecondsFromSnapshot(snapshot, current.freeDailyLimitSeconds)
+                        if (parsedSecs >= 60) {
+                            updateAndPersistSubscriptionConfig(
+                                current.copy(
+                                    freeDailyLimitMinutes = (parsedSecs / 60).coerceAtLeast(1),
+                                    freeDailyLimitSeconds = parsedSecs
+                                )
                             )
                         }
                     }
@@ -275,14 +284,16 @@ class FirebaseSongsService(private val context: Context) {
 
                 override fun onCancelled(error: DatabaseError) {}
             }
-            database.getReference("freeTimer").addValueEventListener(freeTimerDirectListener)
-            database.getReference("freeLimit").addValueEventListener(freeTimerDirectListener)
+            database.getReference("freeUserTimeLimitMinutes").also {
+                it.keepSynced(true)
+                it.addValueEventListener(freeTimeLimitMinutesListener)
+            }
 
             val bannersListener = object : ValueEventListener {
                 override fun onDataChange(snapshot: DataSnapshot) {
                     if (snapshot.exists()) {
                         parsePremiumBannersSnapshot(snapshot)?.let { updated ->
-                            _subscriptionConfig.value = updated
+                            updateAndPersistSubscriptionConfig(updated)
                         }
                     }
                 }
@@ -579,7 +590,7 @@ class FirebaseSongsService(private val context: Context) {
 
             val isTopChart = parseBooleanField(child.child("isTopChart").value)
 
-            val allowDownload = listOf(
+            val downloadFieldNames = listOf(
                 "allowDownload",
                 "canDownload",
                 "isDownloadable",
@@ -588,8 +599,14 @@ class FirebaseSongsService(private val context: Context) {
                 "downloadEnabled",
                 "allowOffline",
                 "offline"
-            ).any { fieldName ->
-                parseBooleanField(child.child(fieldName).value)
+            )
+            val presentDownloadFields = downloadFieldNames.filter { child.hasChild(it) }
+            val allowDownload = if (presentDownloadFields.isEmpty()) {
+                true // Matches Admin.html: `const dlOn = song.allowDownload !== false;`
+            } else {
+                presentDownloadFields.any { fieldName ->
+                    parseBooleanField(child.child(fieldName).value)
+                }
             }
 
             val timestampObj = child.child("timestamp").value
@@ -745,7 +762,7 @@ class FirebaseSongsService(private val context: Context) {
             obj.optLong("rankUpdatedAt", obj.optLong("lastModified", 0L))
         )
 
-        val allowDownload = listOf(
+        val downloadFieldNames = listOf(
             "allowDownload",
             "canDownload",
             "isDownloadable",
@@ -754,8 +771,14 @@ class FirebaseSongsService(private val context: Context) {
             "downloadEnabled",
             "allowOffline",
             "offline"
-        ).any { fieldName ->
-            if (!obj.has(fieldName)) false else parseBooleanField(obj.opt(fieldName))
+        )
+        val presentDownloadFields = downloadFieldNames.filter { obj.has(it) }
+        val allowDownload = if (presentDownloadFields.isEmpty()) {
+            true // Matches Admin.html: `const dlOn = song.allowDownload !== false;`
+        } else {
+            presentDownloadFields.any { fieldName ->
+                parseBooleanField(obj.opt(fieldName))
+            }
         }
 
         if (title.isBlank() && videoId.isBlank()) return null
@@ -1380,7 +1403,6 @@ class FirebaseSongsService(private val context: Context) {
         val userId = currentWatchedUserId ?: return
         if (!hasConfirmedCloudUserUpload || isCurrentUserDeletedByAdmin) return
         val elapsedSinceWrite = System.currentTimeMillis() - lastUserUploadTimestampMs
-        if (elapsedSinceWrite < 2_000L) return
 
         try {
             val primaryReq = Request.Builder()
@@ -1391,13 +1413,17 @@ class FirebaseSongsService(private val context: Context) {
                 if (!resp.isSuccessful) return
                 val body = resp.body?.string()?.trim().orEmpty()
                 if (body.isEmpty() || body == "null") {
-                    triggerAdminDeletionCleanup(userId)
+                    if (elapsedSinceWrite >= 2_000L) {
+                        triggerAdminDeletionCleanup(userId)
+                    }
                     return
                 }
                 if (body.startsWith("{")) {
                     val obj = JSONObject(body)
                     if (isMarkedDeletedInJson(obj)) {
-                        triggerAdminDeletionCleanup(userId)
+                        if (elapsedSinceWrite >= 2_000L) {
+                            triggerAdminDeletionCleanup(userId)
+                        }
                         return
                     }
                     val syncedVip = parseCloudSubscriptionFromJson(obj)
@@ -1644,6 +1670,68 @@ class FirebaseSongsService(private val context: Context) {
         return null
     }
 
+    private fun loadCachedSubscriptionConfig(): AdminSubscriptionConfig {
+        val def = AdminSubscriptionConfig()
+        if (!configCachePrefs.getBoolean("has_cached_config", false)) return def
+        return try {
+            val mins = configCachePrefs.getInt("free_limit_minutes", def.freeDailyLimitMinutes).coerceAtLeast(1)
+            val secs = configCachePrefs.getInt("free_limit_seconds", mins * 60).coerceAtLeast(60)
+            AdminSubscriptionConfig(
+                weeklyPriceInr = configCachePrefs.getInt("weekly_price", def.weeklyPriceInr),
+                monthlyPriceInr = configCachePrefs.getInt("monthly_price", def.monthlyPriceInr),
+                foreverPriceInr = configCachePrefs.getInt("forever_price", def.foreverPriceInr),
+                crazyDealPriceInr = configCachePrefs.getInt("crazy_price", def.crazyDealPriceInr),
+                crazyDealDurationDays = configCachePrefs.getInt("crazy_duration_days", def.crazyDealDurationDays),
+                crazyDealValidityHours = configCachePrefs.getInt("crazy_validity_hours", def.crazyDealValidityHours),
+                crazyDealEnabled = configCachePrefs.getBoolean("crazy_enabled", def.crazyDealEnabled),
+                crazyDealTitle = configCachePrefs.getString("crazy_title", def.crazyDealTitle) ?: def.crazyDealTitle,
+                crazyDealSubtitle = configCachePrefs.getString("crazy_subtitle", def.crazyDealSubtitle) ?: def.crazyDealSubtitle,
+                crazyDealBannerUrl = configCachePrefs.getString("crazy_banner_url", def.crazyDealBannerUrl) ?: def.crazyDealBannerUrl,
+                crazyDealUpdatedAt = configCachePrefs.getLong("crazy_updated_at", 0L),
+                premiumEnabled = configCachePrefs.getBoolean("premium_enabled", def.premiumEnabled),
+                premiumTitle = configCachePrefs.getString("premium_title", def.premiumTitle) ?: def.premiumTitle,
+                premiumSubtitle = configCachePrefs.getString("premium_subtitle", def.premiumSubtitle) ?: def.premiumSubtitle,
+                premiumHeading = configCachePrefs.getString("premium_heading", def.premiumHeading) ?: def.premiumHeading,
+                premiumDescription = configCachePrefs.getString("premium_description", def.premiumDescription) ?: def.premiumDescription,
+                premiumBannerUrl = configCachePrefs.getString("premium_banner_url", def.premiumBannerUrl) ?: def.premiumBannerUrl,
+                freeDailyLimitMinutes = mins,
+                freeDailyLimitSeconds = secs
+            )
+        } catch (_: Exception) {
+            def
+        }
+    }
+
+    private fun updateAndPersistSubscriptionConfig(newConfig: AdminSubscriptionConfig) {
+        _subscriptionConfig.value = newConfig
+        _isSubscriptionConfigLoaded.value = true
+        try {
+            configCachePrefs.edit()
+                .putBoolean("has_cached_config", true)
+                .putInt("weekly_price", newConfig.weeklyPriceInr)
+                .putInt("monthly_price", newConfig.monthlyPriceInr)
+                .putInt("forever_price", newConfig.foreverPriceInr)
+                .putInt("crazy_price", newConfig.crazyDealPriceInr)
+                .putInt("crazy_duration_days", newConfig.crazyDealDurationDays)
+                .putInt("crazy_validity_hours", newConfig.crazyDealValidityHours)
+                .putBoolean("crazy_enabled", newConfig.crazyDealEnabled)
+                .putString("crazy_title", newConfig.crazyDealTitle)
+                .putString("crazy_subtitle", newConfig.crazyDealSubtitle)
+                .putString("crazy_banner_url", newConfig.crazyDealBannerUrl)
+                .putLong("crazy_updated_at", newConfig.crazyDealUpdatedAt)
+                .putBoolean("premium_enabled", newConfig.premiumEnabled)
+                .putString("premium_title", newConfig.premiumTitle)
+                .putString("premium_subtitle", newConfig.premiumSubtitle)
+                .putString("premium_heading", newConfig.premiumHeading)
+                .putString("premium_description", newConfig.premiumDescription)
+                .putString("premium_banner_url", newConfig.premiumBannerUrl)
+                .putInt("free_limit_minutes", newConfig.freeDailyLimitMinutes)
+                .putInt("free_limit_seconds", newConfig.freeDailyLimitSeconds)
+                .apply()
+        } catch (_: Exception) {
+        }
+    }
+
     private fun parseSubscriptionConfigSnapshot(snapshot: DataSnapshot): AdminSubscriptionConfig? {
         return try {
             val current = _subscriptionConfig.value
@@ -1675,43 +1763,15 @@ class FirebaseSongsService(private val context: Context) {
                     ?: snapshot.child("crazy_deal").value,
                 current.crazyDealPriceInr
             )
-            val crazyDays = parsePriceValue(
-                snapshot.child("crazyDealDurationDays").value
-                    ?: snapshot.child("crazyDeal").child("durationDays").value,
-                current.crazyDealDurationDays
-            )
-            val crazyTitle = snapshot.child("crazyDealTitle").getValue(String::class.java)
-                ?: snapshot.child("crazyDeal").child("title").getValue(String::class.java)
-                ?: current.crazyDealTitle
-            val crazySubtitle = snapshot.child("crazyDealSubtitle").getValue(String::class.java)
-                ?: snapshot.child("crazyDeal").child("subtitle").getValue(String::class.java)
-                ?: current.crazyDealSubtitle
-            val crazyBanner = snapshot.child("crazyDealBannerUrl").getValue(String::class.java)
-                ?: snapshot.child("crazyDealBanner").getValue(String::class.java)
-                ?: snapshot.child("bannerUrl").getValue(String::class.java)
-                ?: current.crazyDealBannerUrl
-            val premiumBanner = snapshot.child("premiumBannerUrl").getValue(String::class.java)
-                ?: snapshot.child("subscriptionBannerUrl").getValue(String::class.java)
-                ?: current.premiumBannerUrl
-
-            val freeLimitSeconds = parseFreeLimitSecondsFromSnapshot(snapshot, current.freeDailyLimitSeconds)
-            val freeLimitMinutes = (freeLimitSeconds / 60).coerceAtLeast(1)
 
             current.copy(
                 weeklyPriceInr = weekly,
                 monthlyPriceInr = monthly,
                 foreverPriceInr = forever,
-                crazyDealPriceInr = crazyPrice,
-                crazyDealDurationDays = crazyDays,
-                crazyDealTitle = crazyTitle.ifBlank { current.crazyDealTitle },
-                crazyDealSubtitle = crazySubtitle.ifBlank { current.crazyDealSubtitle },
-                crazyDealBannerUrl = crazyBanner.ifBlank { current.crazyDealBannerUrl },
-                premiumBannerUrl = premiumBanner.ifBlank { current.premiumBannerUrl },
-                freeDailyLimitMinutes = freeLimitMinutes,
-                freeDailyLimitSeconds = freeLimitSeconds
+                crazyDealPriceInr = crazyPrice
             )
         } catch (e: Exception) {
-            Log.w(TAG, "Error parsing subscriptionConfig snapshot", e)
+            Log.w(TAG, "Error parsing subscriptionPlans snapshot", e)
             null
         }
     }
@@ -1719,13 +1779,6 @@ class FirebaseSongsService(private val context: Context) {
     private fun parsePremiumBannersSnapshot(snapshot: DataSnapshot): AdminSubscriptionConfig? {
         return try {
             var updated = _subscriptionConfig.value
-            val rootFreeSecs = parseFreeLimitSecondsFromSnapshot(snapshot, updated.freeDailyLimitSeconds)
-            if (rootFreeSecs != updated.freeDailyLimitSeconds) {
-                updated = updated.copy(
-                    freeDailyLimitMinutes = (rootFreeSecs / 60).coerceAtLeast(1),
-                    freeDailyLimitSeconds = rootFreeSecs
-                )
-            }
             val premiumSnap = snapshot.child("premium")
             if (premiumSnap.exists()) {
                 val img = premiumSnap.child("image").getValue(String::class.java)?.trim().orEmpty()
@@ -1734,16 +1787,13 @@ class FirebaseSongsService(private val context: Context) {
                 val heading = premiumSnap.child("heading").getValue(String::class.java)?.trim().orEmpty()
                 val desc = premiumSnap.child("description").getValue(String::class.java)?.trim().orEmpty()
                 val enabled = premiumSnap.child("enabled").getValue(Boolean::class.java) ?: updated.premiumEnabled
-                val premFreeSecs = parseFreeLimitSecondsFromSnapshot(premiumSnap, updated.freeDailyLimitSeconds)
                 updated = updated.copy(
                     premiumBannerUrl = img.ifBlank { updated.premiumBannerUrl },
                     premiumTitle = title.ifBlank { updated.premiumTitle },
                     premiumSubtitle = subtitle.ifBlank { updated.premiumSubtitle },
                     premiumHeading = heading.ifBlank { updated.premiumHeading },
                     premiumDescription = desc.ifBlank { updated.premiumDescription },
-                    premiumEnabled = enabled,
-                    freeDailyLimitMinutes = (premFreeSecs / 60).coerceAtLeast(1),
-                    freeDailyLimitSeconds = premFreeSecs
+                    premiumEnabled = enabled
                 )
             }
             val dealSnap = snapshot.child("firstUserDeal")
@@ -1755,7 +1805,7 @@ class FirebaseSongsService(private val context: Context) {
                 val duration = parsePriceValue(dealSnap.child("duration").value, updated.crazyDealDurationDays)
                 val validity = parsePriceValue(dealSnap.child("validity").value, updated.crazyDealValidityHours)
                 val enabled = dealSnap.child("enabled").getValue(Boolean::class.java) ?: updated.crazyDealEnabled
-                val dealFreeSecs = parseFreeLimitSecondsFromSnapshot(dealSnap, updated.freeDailyLimitSeconds)
+                val updatedAt = (dealSnap.child("updatedAt").value as? Number)?.toLong() ?: updated.crazyDealUpdatedAt
                 updated = updated.copy(
                     crazyDealBannerUrl = img.ifBlank { updated.crazyDealBannerUrl },
                     crazyDealTitle = title.ifBlank { updated.crazyDealTitle },
@@ -1764,8 +1814,7 @@ class FirebaseSongsService(private val context: Context) {
                     crazyDealDurationDays = duration,
                     crazyDealValidityHours = validity,
                     crazyDealEnabled = enabled,
-                    freeDailyLimitMinutes = (dealFreeSecs / 60).coerceAtLeast(1),
-                    freeDailyLimitSeconds = dealFreeSecs
+                    crazyDealUpdatedAt = updatedAt
                 )
             }
             updated
@@ -1776,113 +1825,38 @@ class FirebaseSongsService(private val context: Context) {
     }
 
     suspend fun fetchSubscriptionConfigViaRest(seedIfMissing: Boolean = false) = withContext(Dispatchers.IO) {
-        val nodes = listOf("subscriptionPlans", "subscriptionConfig", "plans", "subscriptionsConfig", "settings", "appConfig")
-        var foundAny = false
-        for (node in nodes) {
-            try {
-                val req = Request.Builder()
-                    .url("$DATABASE_URL/$node.json")
-                    .get()
-                    .build()
-                httpClient.newCall(req).execute().use { resp ->
-                    if (!resp.isSuccessful) return@use
+        var workingConfig = _subscriptionConfig.value
+        var foundPlans = false
+
+        // 1. Read /subscriptionPlans (Admin.html: weekly, monthly, forever, firstUserDeal)
+        try {
+            val req = Request.Builder()
+                .url("$DATABASE_URL/subscriptionPlans.json")
+                .get()
+                .build()
+            httpClient.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) {
                     val body = resp.body?.string()?.trim().orEmpty()
-                    if (body.isEmpty() || body == "null" || !body.startsWith("{")) return@use
-                    val obj = JSONObject(body)
-                    if (node == "subscriptionPlans") foundAny = true
-                    val current = _subscriptionConfig.value
-
-                    val weeklyObj = obj.optJSONObject("weekly")
-                    val monthlyObj = obj.optJSONObject("monthly")
-                    val foreverObj = obj.optJSONObject("forever") ?: obj.optJSONObject("lifetime")
-                    val crazyObj = obj.optJSONObject("crazyDeal") ?: obj.optJSONObject("crazy_deal")
-
-                    val weekly = parsePriceValue(
-                        obj.opt("weekly") ?: obj.opt("weeklyPrice") ?: weeklyObj?.opt("price"),
-                        current.weeklyPriceInr
-                    )
-                    val monthly = parsePriceValue(
-                        obj.opt("monthly") ?: obj.opt("monthlyPrice") ?: monthlyObj?.opt("price"),
-                        current.monthlyPriceInr
-                    )
-                    val forever = parsePriceValue(
-                        obj.opt("forever") ?: obj.opt("foreverPrice") ?: obj.opt("lifetimePrice") ?: foreverObj?.opt("price"),
-                        current.foreverPriceInr
-                    )
-                    val crazyPrice = parsePriceValue(
-                        obj.opt("firstUserDeal") ?: obj.opt("crazyDealPrice") ?: obj.opt("cheapestPrice") ?: obj.opt("firstUserPrice")
-                            ?: crazyObj?.opt("price") ?: obj.opt("crazy_deal"),
-                        current.crazyDealPriceInr
-                    )
-                    val crazyDays = parsePriceValue(
-                        obj.opt("crazyDealDurationDays") ?: crazyObj?.opt("durationDays"),
-                        current.crazyDealDurationDays
-                    )
-                    val crazyTitle = obj.optString("crazyDealTitle")
-                        .ifBlank { crazyObj?.optString("title").orEmpty() }
-                        .ifBlank { current.crazyDealTitle }
-                    val crazySubtitle = obj.optString("crazyDealSubtitle")
-                        .ifBlank { crazyObj?.optString("subtitle").orEmpty() }
-                        .ifBlank { current.crazyDealSubtitle }
-                    val crazyBanner = obj.optString("crazyDealBannerUrl")
-                        .ifBlank { obj.optString("crazyDealBanner") }
-                        .ifBlank { crazyObj?.optString("bannerUrl").orEmpty() }
-                        .ifBlank { current.crazyDealBannerUrl }
-                    val premiumBanner = obj.optString("premiumBannerUrl")
-                        .ifBlank { obj.optString("subscriptionBannerUrl") }
-                        .ifBlank { current.premiumBannerUrl }
-
-                    val freeLimitSecs = parseFreeLimitSecondsFromJson(obj, current.freeDailyLimitSeconds)
-                    val freeLimitMins = (freeLimitSecs / 60).coerceAtLeast(1)
-
-                    _subscriptionConfig.value = current.copy(
-                        weeklyPriceInr = weekly,
-                        monthlyPriceInr = monthly,
-                        foreverPriceInr = forever,
-                        crazyDealPriceInr = crazyPrice,
-                        crazyDealDurationDays = crazyDays,
-                        crazyDealTitle = crazyTitle,
-                        crazyDealSubtitle = crazySubtitle,
-                        crazyDealBannerUrl = crazyBanner,
-                        premiumBannerUrl = premiumBanner,
-                        freeDailyLimitMinutes = freeLimitMins,
-                        freeDailyLimitSeconds = freeLimitSecs
-                    )
-                }
-            } catch (_: Exception) {
-            }
-        }
-
-        // Also check dedicated /freeTimer or /freeLimit node if Admin configured it directly
-        for (timerNode in listOf("freeTimer", "freeLimit")) {
-            try {
-                val req = Request.Builder()
-                    .url("$DATABASE_URL/$timerNode.json")
-                    .get()
-                    .build()
-                httpClient.newCall(req).execute().use { resp ->
-                    if (!resp.isSuccessful) return@use
-                    val body = resp.body?.string()?.trim().orEmpty()
-                    if (body.isEmpty() || body == "null") return@use
-                    val current = _subscriptionConfig.value
-                    val parsedSecs = if (body.startsWith("{")) {
-                        parseFreeLimitSecondsFromJson(JSONObject(body), current.freeDailyLimitSeconds)
-                    } else {
-                        parseFreeLimitSecondsFromRawValue(body.trim('"'), isExplicitSeconds = false, isExplicitMinutes = false)
-                            ?: current.freeDailyLimitSeconds
-                    }
-                    if (parsedSecs != current.freeDailyLimitSeconds) {
-                        _subscriptionConfig.value = current.copy(
-                            freeDailyLimitMinutes = (parsedSecs / 60).coerceAtLeast(1),
-                            freeDailyLimitSeconds = parsedSecs
+                    if (body.isNotEmpty() && body != "null" && body.startsWith("{")) {
+                        foundPlans = true
+                        val obj = JSONObject(body)
+                        val weekly = parsePriceValue(obj.opt("weekly"), workingConfig.weeklyPriceInr)
+                        val monthly = parsePriceValue(obj.opt("monthly"), workingConfig.monthlyPriceInr)
+                        val forever = parsePriceValue(obj.opt("forever"), workingConfig.foreverPriceInr)
+                        val dealPrice = parsePriceValue(obj.opt("firstUserDeal"), workingConfig.crazyDealPriceInr)
+                        workingConfig = workingConfig.copy(
+                            weeklyPriceInr = weekly,
+                            monthlyPriceInr = monthly,
+                            foreverPriceInr = forever,
+                            crazyDealPriceInr = dealPrice
                         )
                     }
                 }
-            } catch (_: Exception) {
             }
+        } catch (_: Exception) {
         }
 
-        // Also fetch /premiumBanners (used by AK_Music_Admin_Final.html for Banner 1 & Banner 2)
+        // 2. Read /premiumBanners (Admin.html: Banner 1 /premiumBanners/premium & Banner 2 /premiumBanners/firstUserDeal)
         try {
             val bannerReq = Request.Builder()
                 .url("$DATABASE_URL/premiumBanners.json")
@@ -1893,12 +1867,6 @@ class FirebaseSongsService(private val context: Context) {
                     val body = resp.body?.string()?.trim().orEmpty()
                     if (body.isNotEmpty() && body != "null" && body.startsWith("{")) {
                         val root = JSONObject(body)
-                        var updated = _subscriptionConfig.value
-                        val rootFreeSecs = parseFreeLimitSecondsFromJson(root, updated.freeDailyLimitSeconds)
-                        updated = updated.copy(
-                            freeDailyLimitMinutes = (rootFreeSecs / 60).coerceAtLeast(1),
-                            freeDailyLimitSeconds = rootFreeSecs
-                        )
                         val premiumObj = root.optJSONObject("premium")
                         if (premiumObj != null) {
                             val img = premiumObj.optString("image").trim()
@@ -1906,17 +1874,14 @@ class FirebaseSongsService(private val context: Context) {
                             val subtitle = premiumObj.optString("subtitle").trim()
                             val heading = premiumObj.optString("heading").trim()
                             val desc = premiumObj.optString("description").trim()
-                            val enabled = premiumObj.optBoolean("enabled", updated.premiumEnabled)
-                            val premFreeSecs = parseFreeLimitSecondsFromJson(premiumObj, updated.freeDailyLimitSeconds)
-                            updated = updated.copy(
-                                premiumBannerUrl = img.ifBlank { updated.premiumBannerUrl },
-                                premiumTitle = title.ifBlank { updated.premiumTitle },
-                                premiumSubtitle = subtitle.ifBlank { updated.premiumSubtitle },
-                                premiumHeading = heading.ifBlank { updated.premiumHeading },
-                                premiumDescription = desc.ifBlank { updated.premiumDescription },
-                                premiumEnabled = enabled,
-                                freeDailyLimitMinutes = (premFreeSecs / 60).coerceAtLeast(1),
-                                freeDailyLimitSeconds = premFreeSecs
+                            val enabled = premiumObj.optBoolean("enabled", workingConfig.premiumEnabled)
+                            workingConfig = workingConfig.copy(
+                                premiumBannerUrl = img.ifBlank { workingConfig.premiumBannerUrl },
+                                premiumTitle = title.ifBlank { workingConfig.premiumTitle },
+                                premiumSubtitle = subtitle.ifBlank { workingConfig.premiumSubtitle },
+                                premiumHeading = heading.ifBlank { workingConfig.premiumHeading },
+                                premiumDescription = desc.ifBlank { workingConfig.premiumDescription },
+                                premiumEnabled = enabled
                             )
                         }
                         val dealObj = root.optJSONObject("firstUserDeal")
@@ -1924,41 +1889,67 @@ class FirebaseSongsService(private val context: Context) {
                             val img = dealObj.optString("image").trim()
                             val title = dealObj.optString("title").trim()
                             val desc = dealObj.optString("description").trim()
-                            val price = parsePriceValue(dealObj.opt("price"), updated.crazyDealPriceInr)
-                            val duration = parsePriceValue(dealObj.opt("duration"), updated.crazyDealDurationDays)
-                            val validity = parsePriceValue(dealObj.opt("validity"), updated.crazyDealValidityHours)
-                            val enabled = dealObj.optBoolean("enabled", updated.crazyDealEnabled)
-                            val dealFreeSecs = parseFreeLimitSecondsFromJson(dealObj, updated.freeDailyLimitSeconds)
-                            updated = updated.copy(
-                                crazyDealBannerUrl = img.ifBlank { updated.crazyDealBannerUrl },
-                                crazyDealTitle = title.ifBlank { updated.crazyDealTitle },
-                                crazyDealSubtitle = desc.ifBlank { updated.crazyDealSubtitle },
+                            val price = parsePriceValue(dealObj.opt("price"), workingConfig.crazyDealPriceInr)
+                            val duration = parsePriceValue(dealObj.opt("duration"), workingConfig.crazyDealDurationDays)
+                            val validity = parsePriceValue(dealObj.opt("validity"), workingConfig.crazyDealValidityHours)
+                            val enabled = dealObj.optBoolean("enabled", workingConfig.crazyDealEnabled)
+                            val updatedAt = dealObj.optLong("updatedAt", workingConfig.crazyDealUpdatedAt)
+                            workingConfig = workingConfig.copy(
+                                crazyDealBannerUrl = img.ifBlank { workingConfig.crazyDealBannerUrl },
+                                crazyDealTitle = title.ifBlank { workingConfig.crazyDealTitle },
+                                crazyDealSubtitle = desc.ifBlank { workingConfig.crazyDealSubtitle },
                                 crazyDealPriceInr = price,
                                 crazyDealDurationDays = duration,
                                 crazyDealValidityHours = validity,
                                 crazyDealEnabled = enabled,
-                                freeDailyLimitMinutes = (dealFreeSecs / 60).coerceAtLeast(1),
-                                freeDailyLimitSeconds = dealFreeSecs
+                                crazyDealUpdatedAt = updatedAt
                             )
                         }
-                        _subscriptionConfig.value = updated
                     }
                 }
             }
         } catch (_: Exception) {
         }
 
-        // Seed /subscriptionPlans in Firebase if missing so Admin Panel can immediately edit all plan prices & freeDailyLimitMinutes
-        if (!foundAny && seedIfMissing) {
+        // 3. Read /freeUserTimeLimitMinutes (Admin.html: Free user daily listening limit in minutes, 1..1440)
+        try {
+            val req = Request.Builder()
+                .url("$DATABASE_URL/freeUserTimeLimitMinutes.json")
+                .get()
+                .build()
+            httpClient.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    val body = resp.body?.string()?.trim().orEmpty()
+                    if (body.isNotEmpty() && body != "null") {
+                        val parsedSecs = if (body.startsWith("{")) {
+                            parseFreeLimitSecondsFromJson(JSONObject(body), workingConfig.freeDailyLimitSeconds)
+                        } else {
+                            parseFreeLimitSecondsFromRawValue(body.trim('"'), isExplicitSeconds = false, isExplicitMinutes = true)
+                                ?: workingConfig.freeDailyLimitSeconds
+                        }
+                        if (parsedSecs >= 60) {
+                            workingConfig = workingConfig.copy(
+                                freeDailyLimitMinutes = (parsedSecs / 60).coerceAtLeast(1),
+                                freeDailyLimitSeconds = parsedSecs
+                            )
+                        }
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        }
+
+        // Commit atomic update & persist to cache so there is zero UI flicker
+        updateAndPersistSubscriptionConfig(workingConfig)
+
+        // Seed /subscriptionPlans in Firebase only if completely missing
+        if (!foundPlans && seedIfMissing) {
             try {
-                val def = _subscriptionConfig.value
                 val seedPlans = JSONObject().apply {
-                    put("weekly", def.weeklyPriceInr)
-                    put("monthly", def.monthlyPriceInr)
-                    put("forever", def.foreverPriceInr)
-                    put("firstUserDeal", def.crazyDealPriceInr)
-                    put("freeDailyLimitMinutes", def.freeDailyLimitMinutes)
-                    put("freeLimitMinutes", def.freeDailyLimitMinutes)
+                    put("weekly", workingConfig.weeklyPriceInr)
+                    put("monthly", workingConfig.monthlyPriceInr)
+                    put("forever", workingConfig.foreverPriceInr)
+                    put("firstUserDeal", workingConfig.crazyDealPriceInr)
                 }
                 val body = seedPlans.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
                 val req = Request.Builder()
@@ -2311,7 +2302,11 @@ class FirebaseSongsService(private val context: Context) {
                 else -> 100L * 365L * 86_400_000L
             }
 
-            val resolvedExpiresAt = if (rawExpiresAt > 0L) rawExpiresAt else (activatedAt + defaultDurationMs)
+            val resolvedExpiresAt = when {
+                planType == SubscriptionPlanType.FOREVER -> activatedAt + 100L * 365L * 86_400_000L
+                rawExpiresAt > 0L -> rawExpiresAt
+                else -> activatedAt + defaultDurationMs
+            }
             val orderId = subSnap.child("orderId").getValue(String::class.java)
                 ?: snapshot.child("subscriptionOrderId").getValue(String::class.java)
                 ?: "admin_vip_grant"
@@ -2388,7 +2383,11 @@ class FirebaseSongsService(private val context: Context) {
             else -> 100L * 365L * 86_400_000L
         }
 
-        val resolvedExpiresAt = if (rawExpiresAt > 0L) rawExpiresAt else (activatedAt + defaultDurationMs)
+        val resolvedExpiresAt = when {
+            planType == SubscriptionPlanType.FOREVER -> activatedAt + 100L * 365L * 86_400_000L
+            rawExpiresAt > 0L -> rawExpiresAt
+            else -> activatedAt + defaultDurationMs
+        }
         val orderId = subObj?.optString("orderId").orEmpty()
             .ifBlank { obj.optString("subscriptionOrderId") }
             .ifBlank { "admin_vip_grant" }
@@ -2404,6 +2403,75 @@ class FirebaseSongsService(private val context: Context) {
             utr = utr
         )
         return if (state.isActive(nowMs)) state else null
+    }
+
+    /**
+     * Syncs the user's daily and hourly listening time usage to `/userTimeUsage/{userId}`
+     * in the exact structure read by Admin.html (`getTodayUsage` and `renderUserTime`).
+     */
+    fun syncUserTimeUsageToCloud(
+        userId: String,
+        userName: String,
+        utcDateKey: String,
+        localDateKey: String,
+        totalSeconds: Int,
+        hourlySecondsMap: Map<Int, Int>
+    ) {
+        val cleanId = userId.trim()
+        if (cleanId.isEmpty() || isCurrentUserDeletedByAdmin) return
+        scope.launch {
+            try {
+                val now = System.currentTimeMillis()
+                val hourlyObj = JSONObject()
+                for ((hourKey, secs) in hourlySecondsMap.toSortedMap()) {
+                    if (secs > 0) {
+                        // Admin.html renders `mins = secs > 10000 ? Math.round(secs / 60) : Math.round(secs)` + " min"
+                        val mins = ((secs + 59) / 60).coerceAtLeast(1)
+                        hourlyObj.put(hourKey.toString(), mins)
+                    }
+                }
+                if (hourlyObj.length() == 0 && totalSeconds > 0) {
+                    val mins = ((totalSeconds + 59) / 60).coerceAtLeast(1)
+                    hourlyObj.put("1", mins)
+                }
+
+                val dayEntry = JSONObject().apply {
+                    put("totalSeconds", totalSeconds)
+                    put("usedSeconds", totalSeconds)
+                    put("listeningSeconds", totalSeconds)
+                    put("totalMinutes", totalSeconds / 60)
+                    put("hourly", hourlyObj)
+                    put("updatedAt", now)
+                }
+
+                val dailyMap = JSONObject().apply {
+                    put(utcDateKey, dayEntry)
+                    if (localDateKey != utcDateKey) {
+                        put(localDateKey, dayEntry)
+                    }
+                }
+
+                val payload = JSONObject().apply {
+                    put("userId", cleanId)
+                    put("userName", userName)
+                    put("totalSeconds", totalSeconds)
+                    put("usedSeconds", totalSeconds)
+                    put("listeningSeconds", totalSeconds)
+                    put("hourly", hourlyObj)
+                    put("daily", dailyMap)
+                    put("updatedAt", now)
+                }
+
+                val body = payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+                httpClient.newCall(
+                    Request.Builder()
+                        .url("$DATABASE_URL/userTimeUsage/$cleanId.json")
+                        .patch(body)
+                        .build()
+                ).execute().close()
+            } catch (_: Exception) {
+            }
+        }
     }
 
     /**
