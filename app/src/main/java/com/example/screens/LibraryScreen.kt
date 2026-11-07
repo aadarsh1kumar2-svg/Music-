@@ -450,28 +450,6 @@ private fun LibraryMenuCardRow(
                     fontSize = 19.sp
                 )
             )
-            if (showVipBadge) {
-                Spacer(modifier = Modifier.width(10.dp))
-                Surface(
-                    color = SpotifyDarkGreenPill,
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier.border(
-                        width = 1.dp,
-                        color = SpotifyVibrantGreen,
-                        shape = RoundedCornerShape(8.dp)
-                    )
-                ) {
-                    Text(
-                        text = "👑 VIP",
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            color = SpotifyVibrantGreen,
-                            fontWeight = FontWeight.ExtraBold,
-                            fontSize = 11.sp
-                        ),
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                    )
-                }
-            }
         }
 
         if (countBadge > 0) {

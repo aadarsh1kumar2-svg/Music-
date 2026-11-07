@@ -38,15 +38,18 @@ import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.clickable
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.automirrored.filled.TrendingUp
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.LibraryMusic
 import androidx.compose.material.icons.filled.LocalFireDepartment
+import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.WorkspacePremium
@@ -124,6 +127,8 @@ import com.example.screens.SplashScreen
 import com.example.screens.SubscriptionPlansDialog
 import com.example.screens.TopChartsScreen
 import com.example.screens.formatCountdownTimer
+import com.example.ui.theme.AppThemeController
+import com.example.ui.theme.AppThemePreset
 import com.example.ui.theme.DeepCharcoal
 import com.example.ui.theme.DividerDark
 import com.example.ui.theme.MutedGray
@@ -271,6 +276,7 @@ fun AKMusicAppRoot(
     val sleepTimerRemainingSeconds by musicViewModel.sleepTimerRemainingSeconds.collectAsStateWithLifecycle()
     val isUpNextSheetOpen by musicViewModel.isUpNextSheetOpen.collectAsStateWithLifecycle()
     val isLyricsOverlayOpen by musicViewModel.isLyricsOverlayOpen.collectAsStateWithLifecycle()
+    var isThemeDialogOpen by rememberSaveable { mutableStateOf(false) }
 
     // Launch flow:
     // - New User (userName is blank): ENTER_NAME -> LOADING -> DEVELOPER_INTRO -> MAIN_APP
@@ -440,28 +446,55 @@ fun AKMusicAppRoot(
                                     )
                                 )
                                 Spacer(modifier = Modifier.height(4.dp))
-                                Text(
-                                    text = "Hi There, $userName",
-                                    style = MaterialTheme.typography.bodyMedium.copy(
-                                        color = SpotifyVibrantGreen,
-                                        fontWeight = FontWeight.SemiBold,
-                                        fontSize = 14.sp
+                                if (subscriptionState.isActive()) {
+                                    val drawerNameBrush = androidx.compose.ui.graphics.Brush.linearGradient(
+                                        colors = listOf(
+                                            Color(0xFFFFD700),
+                                            SpotifyVibrantGreen,
+                                            Color(0xFF00E5FF)
+                                        )
                                     )
-                                )
-                                val planBadgeText = if (subscriptionState.isActive()) {
-                                    "👑 ${subscriptionState.planType.displayName} Active"
+                                    Text(
+                                        text = "Hi There, ✦ $userName ✦",
+                                        style = MaterialTheme.typography.bodyMedium.copy(
+                                            brush = drawerNameBrush,
+                                            fontWeight = FontWeight.Black,
+                                            fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                                            fontSize = 15.sp,
+                                            letterSpacing = 1.sp
+                                        )
+                                    )
+                                    val remainingText = if (subscriptionState.planType == SubscriptionPlanType.FOREVER || activeSubscriptionRemainingSeconds > 365L * 86_400L) {
+                                        "Forever Plan Active ♾️"
+                                    } else {
+                                        "${subscriptionState.planType.displayName} • ${formatCountdownTimer(activeSubscriptionRemainingSeconds)}"
+                                    }
+                                    Text(
+                                        text = "✨ $remainingText",
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            color = SpotifyVibrantGreen,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    )
                                 } else {
+                                    Text(
+                                        text = "Hi There, $userName",
+                                        style = MaterialTheme.typography.bodyMedium.copy(
+                                            color = SpotifyVibrantGreen,
+                                            fontWeight = FontWeight.SemiBold,
+                                            fontSize = 14.sp
+                                        )
+                                    )
                                     val totalLimitMins = (freeDailyLimitSeconds.coerceAtLeast(60)) / 60
                                     val remMins = ((freeDailyLimitSeconds.coerceAtLeast(60) - dailyListenedSeconds).coerceAtLeast(0)) / 60
-                                    "Free Plan • ${remMins}m / ${totalLimitMins}m left today"
-                                }
-                                Text(
-                                    text = planBadgeText,
-                                    style = MaterialTheme.typography.labelSmall.copy(
-                                        color = if (subscriptionState.isActive()) SpotifyVibrantGreen else MutedGray,
-                                        fontWeight = FontWeight.SemiBold
+                                    Text(
+                                        text = "Free Plan • ${remMins}m / ${totalLimitMins}m left today",
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            color = MutedGray,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
                                     )
-                                )
+                                }
                             }
 
                             HorizontalDivider(color = DividerDark)
@@ -544,103 +577,129 @@ fun AKMusicAppRoot(
                                 modifier = Modifier.padding(vertical = 12.dp)
                             )
 
-                            // 3-Day New User "Crazy Deal" Tab (with live 3-day countdown timer).
-                            // Automatically disappears after 3 days and transitions to Premium Subscription tab!
-                            if (crazyDealRemainingSeconds > 0L) {
-                                NavigationDrawerItem(
-                                    label = {
-                                        Column {
-                                            Text(
-                                                text = "🔥 Crazy Deal (₹${subscriptionConfig.crazyDealPriceInr})",
-                                                style = MaterialTheme.typography.bodyMedium.copy(
-                                                    color = Color(0xFFFFAB40),
-                                                    fontWeight = FontWeight.ExtraBold
+                            // Show ONLY Crazy Deal for new users (within Crazy Deal window), OR Premium Subscription after it expires.
+                            // Once the user has purchased Premium, hide both buttons completely!
+                            if (!subscriptionState.isActive()) {
+                                if (crazyDealRemainingSeconds > 0L && subscriptionConfig.crazyDealEnabled) {
+                                    NavigationDrawerItem(
+                                        label = {
+                                            Column {
+                                                Text(
+                                                    text = "🔥 Crazy Deal (₹${subscriptionConfig.crazyDealPriceInr})",
+                                                    style = MaterialTheme.typography.bodyMedium.copy(
+                                                        color = Color(0xFFFFAB40),
+                                                        fontWeight = FontWeight.ExtraBold
+                                                    )
                                                 )
-                                            )
-                                            Text(
-                                                text = "Ends in ${formatCountdownTimer(crazyDealRemainingSeconds)}",
-                                                style = MaterialTheme.typography.labelSmall.copy(
-                                                    color = SpotifyVibrantGreen,
-                                                    fontWeight = FontWeight.Bold
+                                                Text(
+                                                    text = "Ends in ${formatCountdownTimer(crazyDealRemainingSeconds)}",
+                                                    style = MaterialTheme.typography.labelSmall.copy(
+                                                        color = SpotifyVibrantGreen,
+                                                        fontWeight = FontWeight.Bold
+                                                    )
                                                 )
+                                            }
+                                        },
+                                        icon = {
+                                            Icon(
+                                                imageVector = Icons.Default.LocalFireDepartment,
+                                                contentDescription = "Crazy Deal",
+                                                tint = Color(0xFFFF9100)
                                             )
-                                        }
-                                    },
-                                    icon = {
-                                        Icon(
-                                            imageVector = Icons.Default.LocalFireDepartment,
-                                            contentDescription = "Crazy Deal",
-                                            tint = Color(0xFFFF9100)
-                                        )
-                                    },
-                                    selected = isCrazyDealsPopupOpen,
-                                    onClick = {
-                                        coroutineScope.launch { drawerState.close() }
-                                        musicViewModel.setCrazyDealsPopupOpen(true)
-                                    },
-                                    colors = NavigationDrawerItemDefaults.colors(
-                                        selectedContainerColor = SpotifyDarkGreenPill,
-                                        unselectedContainerColor = Color(0xFFFF6D00).copy(alpha = 0.12f),
-                                        selectedIconColor = Color(0xFFFF9100),
-                                        selectedTextColor = Color(0xFFFFAB40),
-                                        unselectedIconColor = Color(0xFFFF9100),
-                                        unselectedTextColor = PrimaryWhite
-                                    ),
-                                    modifier = Modifier
-                                        .padding(horizontal = 12.dp, vertical = 4.dp)
-                                        .testTag("drawer_crazy_deal_item")
-                                )
+                                        },
+                                        selected = isCrazyDealsPopupOpen,
+                                        onClick = {
+                                            coroutineScope.launch { drawerState.close() }
+                                            musicViewModel.setCrazyDealsPopupOpen(true)
+                                        },
+                                        colors = NavigationDrawerItemDefaults.colors(
+                                            selectedContainerColor = SpotifyDarkGreenPill,
+                                            unselectedContainerColor = Color(0xFFFF6D00).copy(alpha = 0.12f),
+                                            selectedIconColor = Color(0xFFFF9100),
+                                            selectedTextColor = Color(0xFFFFAB40),
+                                            unselectedIconColor = Color(0xFFFF9100),
+                                            unselectedTextColor = PrimaryWhite
+                                        ),
+                                        modifier = Modifier
+                                            .padding(horizontal = 12.dp, vertical = 4.dp)
+                                            .testTag("drawer_crazy_deal_item")
+                                    )
+                                } else {
+                                    NavigationDrawerItem(
+                                        label = {
+                                            Column {
+                                                Text(
+                                                    text = "👑 Premium Subscription",
+                                                    style = MaterialTheme.typography.bodyMedium.copy(
+                                                        color = PrimaryWhite,
+                                                        fontWeight = FontWeight.Bold
+                                                    )
+                                                )
+                                                Text(
+                                                    text = "Weekly • Monthly • Forever",
+                                                    style = MaterialTheme.typography.labelSmall.copy(
+                                                        color = MutedGray
+                                                    )
+                                                )
+                                            }
+                                        },
+                                        icon = {
+                                            Icon(
+                                                imageVector = Icons.Default.WorkspacePremium,
+                                                contentDescription = "Subscription",
+                                                tint = SpotifyVibrantGreen
+                                            )
+                                        },
+                                        selected = isSubscriptionModalOpen,
+                                        onClick = {
+                                            coroutineScope.launch { drawerState.close() }
+                                            musicViewModel.setSubscriptionModalOpen(true)
+                                        },
+                                        colors = NavigationDrawerItemDefaults.colors(
+                                            selectedContainerColor = SpotifyDarkGreenPill,
+                                            selectedIconColor = SpotifyVibrantGreen,
+                                            selectedTextColor = SpotifyVibrantGreen,
+                                            unselectedIconColor = SpotifyVibrantGreen,
+                                            unselectedTextColor = PrimaryWhite
+                                        ),
+                                        modifier = Modifier
+                                            .padding(horizontal = 12.dp, vertical = 2.dp)
+                                            .testTag("drawer_subscription_item")
+                                    )
+                                }
                             }
 
-                            // Subscription / Premium Plans Tab (Weekly, Monthly, Forever)
+                            // Theme Tab (6 Different App Themes — Default Green, Crimson Red, Cyber Neon, etc.)
                             NavigationDrawerItem(
                                 label = {
                                     Column {
                                         Text(
-                                            text = if (crazyDealRemainingSeconds <= 0L) {
-                                                "👑 Premium Subscription"
-                                            } else {
-                                                "Subscription Plans"
-                                            },
+                                            text = "Theme",
                                             style = MaterialTheme.typography.bodyMedium.copy(
                                                 color = PrimaryWhite,
-                                                fontWeight = FontWeight.Bold
+                                                fontWeight = FontWeight.SemiBold
                                             )
                                         )
-                                        if (subscriptionState.isActive()) {
-                                            val subSubtext = if (subscriptionState.planType == SubscriptionPlanType.FOREVER) {
-                                                "Forever Plan Active ♾️"
-                                            } else {
-                                                "Active • ${formatCountdownTimer(activeSubscriptionRemainingSeconds)}"
-                                            }
-                                            Text(
-                                                text = subSubtext,
-                                                style = MaterialTheme.typography.labelSmall.copy(
-                                                    color = SpotifyVibrantGreen,
-                                                    fontWeight = FontWeight.SemiBold
-                                                )
+                                        Text(
+                                            text = AppThemeController.currentPreset.displayName,
+                                            style = MaterialTheme.typography.labelSmall.copy(
+                                                color = SpotifyVibrantGreen,
+                                                fontWeight = FontWeight.Medium
                                             )
-                                        } else {
-                                            Text(
-                                                text = "Weekly • Monthly • Forever",
-                                                style = MaterialTheme.typography.labelSmall.copy(
-                                                    color = MutedGray
-                                                )
-                                            )
-                                        }
+                                        )
                                     }
                                 },
                                 icon = {
                                     Icon(
-                                        imageVector = Icons.Default.WorkspacePremium,
-                                        contentDescription = "Subscription",
+                                        imageVector = Icons.Default.Palette,
+                                        contentDescription = "Theme",
                                         tint = SpotifyVibrantGreen
                                     )
                                 },
-                                selected = isSubscriptionModalOpen,
+                                selected = isThemeDialogOpen,
                                 onClick = {
                                     coroutineScope.launch { drawerState.close() }
-                                    musicViewModel.setSubscriptionModalOpen(true)
+                                    isThemeDialogOpen = true
                                 },
                                 colors = NavigationDrawerItemDefaults.colors(
                                     selectedContainerColor = SpotifyDarkGreenPill,
@@ -650,8 +709,8 @@ fun AKMusicAppRoot(
                                     unselectedTextColor = PrimaryWhite
                                 ),
                                 modifier = Modifier
-                                    .padding(horizontal = 12.dp, vertical = 2.dp)
-                                    .testTag("drawer_subscription_item")
+                                    .padding(horizontal = 12.dp)
+                                    .testTag("drawer_theme_item")
                             )
 
                             NavigationDrawerItem(
@@ -966,6 +1025,17 @@ fun AKMusicAppRoot(
         if (isDeveloperScreenOpen) {
             DeveloperProfileDialog(
                 onDismiss = { musicViewModel.setDeveloperScreenOpen(false) }
+            )
+        }
+
+        // 6-Theme Selector Dialog (opened from 3-lines drawer "Theme" tab)
+        if (isThemeDialogOpen) {
+            AppThemeSelectorDialog(
+                currentPreset = AppThemeController.currentPreset,
+                onSelectPreset = { preset ->
+                    AppThemeController.selectTheme(context, preset)
+                },
+                onDismiss = { isThemeDialogOpen = false }
             )
         }
 
@@ -1359,6 +1429,189 @@ fun DeveloperProfileDialog(
                             )
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun AppThemeSelectorDialog(
+    currentPreset: AppThemePreset,
+    onSelectPreset: (AppThemePreset) -> Unit,
+    onDismiss: () -> Unit
+) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            color = DeepCharcoal,
+            shape = RoundedCornerShape(24.dp),
+            modifier = Modifier
+                .fillMaxWidth(0.92f)
+                .border(
+                    width = 1.5.dp,
+                    color = SpotifyGreenBorder,
+                    shape = RoundedCornerShape(24.dp)
+                )
+                .testTag("theme_selector_dialog")
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(20.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.Palette,
+                            contentDescription = "Themes",
+                            tint = SpotifyVibrantGreen,
+                            modifier = Modifier.size(26.dp)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column {
+                            Text(
+                                text = "Choose App Theme",
+                                style = MaterialTheme.typography.titleLarge.copy(
+                                    color = PrimaryWhite,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    fontSize = 20.sp
+                                )
+                            )
+                            Text(
+                                text = "6 signature color themes • Instant live preview",
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    color = MutedGray
+                                )
+                            )
+                        }
+                    }
+
+                    IconButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Close",
+                            tint = MutedGray
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                AppThemePreset.entries.forEach { preset ->
+                    val isSelected = preset == currentPreset
+                    Surface(
+                        color = if (isSelected) preset.pillColor else SurfaceDarkCard,
+                        shape = RoundedCornerShape(16.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 5.dp)
+                            .border(
+                                width = if (isSelected) 1.5.dp else 1.dp,
+                                color = if (isSelected) preset.accentColor else DividerDark,
+                                shape = RoundedCornerShape(16.dp)
+                            )
+                            .clip(RoundedCornerShape(16.dp))
+                            .clickable { onSelectPreset(preset) }
+                            .testTag("theme_option_${preset.id.lowercase()}")
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 14.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .clip(CircleShape)
+                                    .background(preset.accentColor)
+                                    .border(
+                                        width = 2.dp,
+                                        color = PrimaryWhite.copy(alpha = 0.85f),
+                                        shape = CircleShape
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (isSelected) {
+                                    Icon(
+                                        imageVector = Icons.Default.Check,
+                                        contentDescription = "Selected",
+                                        tint = PureBlack,
+                                        modifier = Modifier.size(22.dp)
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.width(14.dp))
+
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = preset.displayName,
+                                    style = MaterialTheme.typography.titleMedium.copy(
+                                        color = if (isSelected) preset.accentColor else PrimaryWhite,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 16.sp
+                                    )
+                                )
+                                Text(
+                                    text = preset.subtitle,
+                                    style = MaterialTheme.typography.bodySmall.copy(
+                                        color = MutedGray
+                                    )
+                                )
+                            }
+
+                            if (isSelected) {
+                                Surface(
+                                    color = preset.accentColor,
+                                    shape = RoundedCornerShape(50)
+                                ) {
+                                    Text(
+                                        text = "ACTIVE",
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            color = PureBlack,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            fontSize = 10.sp
+                                        ),
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                Button(
+                    onClick = onDismiss,
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = SpotifyVibrantGreen,
+                        contentColor = PureBlack
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                ) {
+                    Text(
+                        text = "Done",
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            color = PureBlack,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                    )
                 }
             }
         }

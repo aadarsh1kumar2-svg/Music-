@@ -135,57 +135,49 @@ fun HomeScreen(
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    val remainingFreeSeconds = (freeDailyLimitSeconds.coerceAtLeast(60) - dailyListenedSeconds).coerceAtLeast(0)
-                    val remMins = remainingFreeSeconds / 60
-                    val remSecs = remainingFreeSeconds % 60
-                    val isLowTime = !isUserSubscribed && remainingFreeSeconds <= 300
+                    if (!isUserSubscribed) {
+                        val remainingFreeSeconds = (freeDailyLimitSeconds.coerceAtLeast(60) - dailyListenedSeconds).coerceAtLeast(0)
+                        val remMins = remainingFreeSeconds / 60
+                        val remSecs = remainingFreeSeconds % 60
+                        val isLowTime = remainingFreeSeconds <= 300
 
-                    Surface(
-                        color = SpotifyDarkGreenPill,
-                        shape = RoundedCornerShape(50),
-                        modifier = Modifier
-                            .border(
-                                width = 1.dp,
-                                color = if (isLowTime) ErrorRed else SpotifyGreenBorder,
-                                shape = RoundedCornerShape(50)
-                            )
-                            .clickable { onOpenSubscriptionModal() }
-                            .testTag("home_top_vip_button")
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                imageVector = if (isUserSubscribed) Icons.Default.Verified else Icons.Default.AccessTime,
-                                contentDescription = "Timer & VIP",
-                                tint = if (isLowTime) ErrorRed else SpotifyVibrantGreen,
-                                modifier = Modifier.size(13.dp)
-                            )
-                            Spacer(modifier = Modifier.width(5.dp))
-                            val compactBadgeText = if (isUserSubscribed) {
-                                val t = if (activeSubscriptionRemainingSeconds > 365L * 86_400L) {
-                                    "Forever"
-                                } else {
-                                    formatCountdownTimer(activeSubscriptionRemainingSeconds)
-                                }
-                                "👑 VIP • $t"
-                            } else {
-                                String.format("Free: %02dm %02ds • 👑 VIP", remMins, remSecs)
-                            }
-                            Text(
-                                text = compactBadgeText,
-                                maxLines = 1,
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    color = if (isLowTime) ErrorRed else SpotifyVibrantGreen,
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 11.sp
+                        Surface(
+                            color = SpotifyDarkGreenPill,
+                            shape = RoundedCornerShape(50),
+                            modifier = Modifier
+                                .border(
+                                    width = 1.dp,
+                                    color = if (isLowTime) ErrorRed else SpotifyGreenBorder,
+                                    shape = RoundedCornerShape(50)
                                 )
-                            )
+                                .clickable { onOpenSubscriptionModal() }
+                                .testTag("home_top_vip_button")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.AccessTime,
+                                    contentDescription = "Free Daily Timer",
+                                    tint = if (isLowTime) ErrorRed else SpotifyVibrantGreen,
+                                    modifier = Modifier.size(13.dp)
+                                )
+                                Spacer(modifier = Modifier.width(5.dp))
+                                Text(
+                                    text = String.format("Free: %02dm %02ds", remMins, remSecs),
+                                    maxLines = 1,
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        color = if (isLowTime) ErrorRed else SpotifyVibrantGreen,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 11.sp
+                                    )
+                                )
+                            }
                         }
-                    }
 
-                    Spacer(modifier = Modifier.width(4.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                    }
 
                     IconButton(
                         onClick = onRefreshCatalog,
@@ -203,8 +195,9 @@ fun HomeScreen(
             }
         }
 
-        // Greeting: "Hi There," in vibrant green + Logged-in User's Name in white
+        // Greeting: "Hi There," + Logged-in User's Name (Stylish Luxury Gradient for Premium Users)
         item {
+            val resolvedName = userName.ifBlank { stringResource(id = R.string.greeting_name) }
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -221,16 +214,62 @@ fun HomeScreen(
                         fontSize = 36.sp
                     )
                 )
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = userName.ifBlank { stringResource(id = R.string.greeting_name) },
-                    style = MaterialTheme.typography.displayMedium.copy(
-                        color = PrimaryWhite,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 26.sp,
-                        letterSpacing = 1.5.sp
+                Spacer(modifier = Modifier.height(4.dp))
+                if (isUserSubscribed) {
+                    val accent = SpotifyVibrantGreen
+                    val premiumNameBrush = androidx.compose.ui.graphics.Brush.linearGradient(
+                        colors = listOf(
+                            androidx.compose.ui.graphics.Color(0xFFFFD700),
+                            accent,
+                            androidx.compose.ui.graphics.Color(0xFF00E5FF),
+                            androidx.compose.ui.graphics.Color(0xFFFFAB40)
+                        )
                     )
-                )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "✦ $resolvedName ✦",
+                            style = MaterialTheme.typography.displayMedium.copy(
+                                brush = premiumNameBrush,
+                                fontWeight = FontWeight.Black,
+                                fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                                fontSize = 29.sp,
+                                letterSpacing = 2.2.sp,
+                                shadow = androidx.compose.ui.graphics.Shadow(
+                                    color = accent.copy(alpha = 0.65f),
+                                    offset = androidx.compose.ui.geometry.Offset(0f, 4f),
+                                    blurRadius = 18f
+                                )
+                            )
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Icon(
+                            imageVector = Icons.Default.Verified,
+                            contentDescription = "Premium Member",
+                            tint = androidx.compose.ui.graphics.Color(0xFFFFD700),
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Box(
+                        modifier = Modifier
+                            .width(140.dp)
+                            .height(3.dp)
+                            .clip(RoundedCornerShape(50))
+                            .background(premiumNameBrush)
+                    )
+                } else {
+                    Text(
+                        text = resolvedName,
+                        style = MaterialTheme.typography.displayMedium.copy(
+                            color = PrimaryWhite,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 26.sp,
+                            letterSpacing = 1.5.sp
+                        )
+                    )
+                }
             }
         }
 

@@ -6,32 +6,13 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
-
-private val AKMusicDarkColorScheme = darkColorScheme(
-    primary = SpotifyVibrantGreen,
-    onPrimary = PureBlack,
-    primaryContainer = SpotifyDarkGreenPill,
-    onPrimaryContainer = SpotifyVibrantGreen,
-    secondary = SpotifyVibrantGreen,
-    onSecondary = PureBlack,
-    secondaryContainer = SurfaceDarkCard,
-    onSecondaryContainer = PrimaryWhite,
-    tertiary = SpotifyVibrantGreen,
-    background = PureBlack,
-    onBackground = PrimaryWhite,
-    surface = DeepCharcoal,
-    onSurface = PrimaryWhite,
-    surfaceVariant = SurfaceDarkCard,
-    onSurfaceVariant = MutedGray,
-    outline = DividerDark,
-    error = ErrorRed,
-    onError = PrimaryWhite
-)
 
 val AKMusicShapes = Shapes(
     extraSmall = RoundedCornerShape(6.dp),
@@ -45,7 +26,33 @@ val AKMusicShapes = Shapes(
 fun MyApplicationTheme(
     content: @Composable () -> Unit
 ) {
-    val colorScheme = AKMusicDarkColorScheme
+    val context = LocalContext.current
+    LaunchedEffect(context) {
+        AppThemeController.initialize(context)
+    }
+
+    val preset = AppThemeController.currentPreset
+    val colorScheme = darkColorScheme(
+        primary = preset.accentColor,
+        onPrimary = PureBlack,
+        primaryContainer = preset.pillColor,
+        onPrimaryContainer = preset.accentColor,
+        secondary = preset.accentColor,
+        onSecondary = PureBlack,
+        secondaryContainer = SurfaceDarkCard,
+        onSecondaryContainer = PrimaryWhite,
+        tertiary = preset.accentColor,
+        background = PureBlack,
+        onBackground = PrimaryWhite,
+        surface = DeepCharcoal,
+        onSurface = PrimaryWhite,
+        surfaceVariant = SurfaceDarkCard,
+        onSurfaceVariant = MutedGray,
+        outline = DividerDark,
+        error = ErrorRed,
+        onError = PrimaryWhite
+    )
+
     val view = LocalView.current
     if (!view.isInEditMode) {
         SideEffect {
