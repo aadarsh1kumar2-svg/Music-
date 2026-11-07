@@ -231,6 +231,8 @@ fun AKMusicAppRoot(
     val isFamGatewayCheckoutOpen by musicViewModel.isFamGatewayCheckoutOpen.collectAsStateWithLifecycle()
     val activeCheckoutOrder by musicViewModel.activeCheckoutOrder.collectAsStateWithLifecycle()
     val isCreatingPaymentOrder by musicViewModel.isCreatingPaymentOrder.collectAsStateWithLifecycle()
+    val isUserClickedIHavePaid by musicViewModel.isUserClickedIHavePaid.collectAsStateWithLifecycle()
+    val isPaymentVerifiedSuccess by musicViewModel.isPaymentVerifiedSuccess.collectAsStateWithLifecycle()
     val paymentStatusMessage by musicViewModel.paymentStatusMessage.collectAsStateWithLifecycle()
     val paymentErrorMessage by musicViewModel.paymentErrorMessage.collectAsStateWithLifecycle()
 
@@ -1018,6 +1020,8 @@ fun AKMusicAppRoot(
             FamGatewayCheckoutDialog(
                 orderSession = activeCheckoutOrder,
                 isCreatingOrder = isCreatingPaymentOrder,
+                isUserClickedIHavePaid = isUserClickedIHavePaid,
+                isPaymentVerifiedSuccess = isPaymentVerifiedSuccess,
                 paymentStatusMessage = paymentStatusMessage,
                 errorMessage = paymentErrorMessage,
                 onVerifyNowClick = {

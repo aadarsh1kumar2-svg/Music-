@@ -1078,6 +1078,8 @@ private fun PlanOptionCard(
 fun FamGatewayCheckoutDialog(
     orderSession: FamGatewayOrderSession?,
     isCreatingOrder: Boolean,
+    isUserClickedIHavePaid: Boolean = false,
+    isPaymentVerifiedSuccess: Boolean = false,
     paymentStatusMessage: String,
     errorMessage: String?,
     onVerifyNowClick: () -> Unit,
@@ -1220,7 +1222,7 @@ fun FamGatewayCheckoutDialog(
                         Surface(
                             color = Color.White,
                             shape = RoundedCornerShape(18.dp),
-                            modifier = Modifier.size(210.dp)
+                            modifier = Modifier.size(200.dp)
                         ) {
                             AsyncImage(
                                 model = orderSession.qrUrl,
@@ -1231,13 +1233,13 @@ fun FamGatewayCheckoutDialog(
                                     .padding(12.dp)
                             )
                         }
-                        Spacer(modifier = Modifier.height(10.dp))
+                        Spacer(modifier = Modifier.height(8.dp))
                         Text(
                             text = "Scan QR with any UPI App (GPay, PhonePe, Paytm, AadarshPay)",
                             style = MaterialTheme.typography.labelMedium.copy(color = MutedGray),
                             textAlign = TextAlign.Center
                         )
-                        Spacer(modifier = Modifier.height(16.dp))
+                        Spacer(modifier = Modifier.height(14.dp))
                     }
 
                     // Pay via Installed UPI App (Intent Deep Link)
@@ -1269,7 +1271,7 @@ fun FamGatewayCheckoutDialog(
                             ),
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(50.dp)
+                                .height(48.dp)
                         ) {
                             Icon(
                                 imageVector = Icons.Default.OpenInNew,
@@ -1285,7 +1287,7 @@ fun FamGatewayCheckoutDialog(
                                 )
                             )
                         }
-                        Spacer(modifier = Modifier.height(10.dp))
+                        Spacer(modifier = Modifier.height(8.dp))
                     }
 
                     // Open Web Checkout Link fallback
@@ -1304,7 +1306,7 @@ fun FamGatewayCheckoutDialog(
                             colors = ButtonDefaults.outlinedButtonColors(contentColor = PrimaryWhite),
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(46.dp)
+                                .height(44.dp)
                         ) {
                             Text(
                                 text = "Open AadarshPay Web Checkout",
@@ -1314,41 +1316,114 @@ fun FamGatewayCheckoutDialog(
                                 )
                             )
                         }
-                        Spacer(modifier = Modifier.height(14.dp))
+                        Spacer(modifier = Modifier.height(12.dp))
                     }
 
                     HorizontalDivider(color = DividerDark)
                     Spacer(modifier = Modifier.height(12.dp))
 
-                    // Auto-polling indicator
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Center
-                    ) {
-                        CircularProgressIndicator(
-                            color = SpotifyVibrantGreen,
-                            strokeWidth = 2.dp,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Text(
-                            text = paymentStatusMessage,
-                            style = MaterialTheme.typography.bodySmall.copy(
-                                color = SpotifyVibrantGreen,
-                                fontWeight = FontWeight.SemiBold
-                            ),
-                            textAlign = TextAlign.Center
-                        )
+                    // LIVE PAYMENT STATUS BUTTON / PILL (Green when Successful, Pending/Checking while waiting)
+                    val statusBgColor = when {
+                        isPaymentVerifiedSuccess -> SpotifyVibrantGreen
+                        isUserClickedIHavePaid -> Color(0xFFFFAB00).copy(alpha = 0.16f)
+                        else -> SurfaceDarkCard
+                    }
+                    val statusBorderColor = when {
+                        isPaymentVerifiedSuccess -> SpotifyVibrantGreen
+                        isUserClickedIHavePaid -> Color(0xFFFFAB00)
+                        else -> MutedGray.copy(alpha = 0.45f)
+                    }
+                    val statusContentColor = when {
+                        isPaymentVerifiedSuccess -> PureBlack
+                        isUserClickedIHavePaid -> Color(0xFFFFAB00)
+                        else -> PrimaryWhite
+                    }
+                    val statusLabel = when {
+                        isPaymentVerifiedSuccess -> "✓ STATUS: PAYMENT SUCCESSFUL"
+                        isUserClickedIHavePaid -> "STATUS: PENDING • CHECKING PAYMENT..."
+                        else -> "STATUS: PENDING • WAITING FOR PAYMENT"
                     }
 
-                    Spacer(modifier = Modifier.height(14.dp))
+                    Surface(
+                        color = statusBgColor,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(44.dp)
+                            .border(
+                                width = 1.2.dp,
+                                color = statusBorderColor,
+                                shape = RoundedCornerShape(12.dp)
+                            )
+                            .testTag("aadarshpay_live_status_badge")
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(horizontal = 14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            if (isPaymentVerifiedSuccess) {
+                                Icon(
+                                    imageVector = Icons.Default.CheckCircle,
+                                    contentDescription = null,
+                                    tint = PureBlack,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            } else {
+                                CircularProgressIndicator(
+                                    color = if (isUserClickedIHavePaid) Color(0xFFFFAB00) else SpotifyVibrantGreen,
+                                    strokeWidth = 2.dp,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = statusLabel,
+                                style = MaterialTheme.typography.labelLarge.copy(
+                                    color = statusContentColor,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    fontSize = 13.sp
+                                ),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
 
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    Text(
+                        text = paymentStatusMessage,
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            color = if (isPaymentVerifiedSuccess) SpotifyVibrantGreen else MutedGray,
+                            fontWeight = FontWeight.Medium
+                        ),
+                        textAlign = TextAlign.Center
+                    )
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    // "I Have Paid" Button:
+                    // Once clicked ONCE, it locks into "Checking Payment... Please Wait" so the user never has to tap repeatedly!
                     Button(
-                        onClick = onVerifyNowClick,
+                        onClick = {
+                            if (!isUserClickedIHavePaid && !isPaymentVerifiedSuccess) {
+                                onVerifyNowClick()
+                            }
+                        },
+                        enabled = !isUserClickedIHavePaid && !isPaymentVerifiedSuccess,
                         shape = RoundedCornerShape(14.dp),
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = SpotifyDarkGreenPill,
-                            contentColor = PrimaryWhite
+                            containerColor = if (isPaymentVerifiedSuccess) SpotifyVibrantGreen else SpotifyDarkGreenPill,
+                            contentColor = if (isPaymentVerifiedSuccess) PureBlack else PrimaryWhite,
+                            disabledContainerColor = if (isPaymentVerifiedSuccess) {
+                                SpotifyVibrantGreen
+                            } else {
+                                SpotifyDarkGreenPill.copy(alpha = 0.75f)
+                            },
+                            disabledContentColor = if (isPaymentVerifiedSuccess) PureBlack else SpotifyVibrantGreen
                         ),
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1360,21 +1435,58 @@ fun FamGatewayCheckoutDialog(
                             )
                             .testTag("aadarshpay_verify_now_button")
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.CheckCircle,
-                            contentDescription = null,
-                            tint = SpotifyVibrantGreen,
-                            modifier = Modifier.size(20.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "I Have Paid • Verify Now",
-                            style = MaterialTheme.typography.titleMedium.copy(
-                                color = PrimaryWhite,
-                                fontWeight = FontWeight.ExtraBold,
-                                fontSize = 16.sp
-                            )
-                        )
+                        when {
+                            isPaymentVerifiedSuccess -> {
+                                Icon(
+                                    imageVector = Icons.Default.CheckCircle,
+                                    contentDescription = null,
+                                    tint = PureBlack,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "Payment Verified ✓",
+                                    style = MaterialTheme.typography.titleMedium.copy(
+                                        color = PureBlack,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        fontSize = 16.sp
+                                    )
+                                )
+                            }
+                            isUserClickedIHavePaid -> {
+                                CircularProgressIndicator(
+                                    color = SpotifyVibrantGreen,
+                                    strokeWidth = 2.2.dp,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Text(
+                                    text = "Checking Payment... Please Wait",
+                                    style = MaterialTheme.typography.titleMedium.copy(
+                                        color = SpotifyVibrantGreen,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        fontSize = 15.sp
+                                    )
+                                )
+                            }
+                            else -> {
+                                Icon(
+                                    imageVector = Icons.Default.CheckCircle,
+                                    contentDescription = null,
+                                    tint = SpotifyVibrantGreen,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "I Have Paid",
+                                    style = MaterialTheme.typography.titleMedium.copy(
+                                        color = PrimaryWhite,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        fontSize = 16.sp
+                                    )
+                                )
+                            }
+                        }
                     }
                 }
             }

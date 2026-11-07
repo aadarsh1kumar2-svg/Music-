@@ -440,6 +440,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private val _isCreatingPaymentOrder = MutableStateFlow(false)
     val isCreatingPaymentOrder: StateFlow<Boolean> = _isCreatingPaymentOrder.asStateFlow()
 
+    private val _isUserClickedIHavePaid = MutableStateFlow(false)
+    val isUserClickedIHavePaid: StateFlow<Boolean> = _isUserClickedIHavePaid.asStateFlow()
+
+    private val _isPaymentVerifiedSuccess = MutableStateFlow(false)
+    val isPaymentVerifiedSuccess: StateFlow<Boolean> = _isPaymentVerifiedSuccess.asStateFlow()
+
     private val _paymentStatusMessage = MutableStateFlow("Waiting for UPI payment...")
     val paymentStatusMessage: StateFlow<String> = _paymentStatusMessage.asStateFlow()
 
@@ -2146,6 +2152,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         _isDailyLimitReachedModalOpen.value = false
         _isFamGatewayCheckoutOpen.value = true
         _isCreatingPaymentOrder.value = true
+        _isUserClickedIHavePaid.value = false
+        _isPaymentVerifiedSuccess.value = false
         _activeCheckoutOrder.value = null
         _paymentErrorMessage.value = null
         _paymentStatusMessage.value = "Creating AadarshPay UPI order..."
@@ -2161,7 +2169,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             result.fold(
                 onSuccess = { session ->
                     _activeCheckoutOrder.value = session
-                    _paymentStatusMessage.value = "Waiting for AadarshPay confirmation (auto-checking every 3s)..."
+                    _paymentStatusMessage.value = "Pending • Waiting for UPI payment..."
                     firebaseService.logPaymentAttemptToCloud(
                         userId = userId,
                         userName = currentName,
@@ -2184,8 +2192,14 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         paymentPollingJob = viewModelScope.launch {
             val startTimeMs = System.currentTimeMillis()
             val maxPollDurationMs = 15 * 60 * 1000L // 15 minutes
-            while (isActive && _isFamGatewayCheckoutOpen.value && (System.currentTimeMillis() - startTimeMs) < maxPollDurationMs) {
-                delay(3000L)
+            while (isActive && _isFamGatewayCheckoutOpen.value && !_isPaymentVerifiedSuccess.value &&
+                (System.currentTimeMillis() - startTimeMs) < maxPollDurationMs
+            ) {
+                // Fast real-time polling: 800ms once user clicked "I Have Paid", 1400ms otherwise
+                val intervalMs = if (_isUserClickedIHavePaid.value) 800L else 1400L
+                delay(intervalMs)
+                if (!_isFamGatewayCheckoutOpen.value || _isPaymentVerifiedSuccess.value) break
+
                 val statusResult = famGatewayService.checkOrderStatus(session.orderId)
                 statusResult.onSuccess { status ->
                     when {
@@ -2197,6 +2211,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                             return@launch
                         }
                         status.isFailed -> {
+                            _isUserClickedIHavePaid.value = false
                             _paymentStatusMessage.value = "Payment failed or expired. Please try again."
                             firebaseService.logPaymentAttemptToCloud(
                                 userId = userId,
@@ -2207,7 +2222,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                             return@launch
                         }
                         else -> {
-                            _paymentStatusMessage.value = "Waiting for AadarshPay UPI approval (${status.status})..."
+                            if (_isUserClickedIHavePaid.value) {
+                                _paymentStatusMessage.value = "Checking payment with bank & AadarshPay... Please wait"
+                            } else {
+                                _paymentStatusMessage.value = "Pending • Complete payment in UPI app"
+                            }
                         }
                     }
                 }
@@ -2215,28 +2234,37 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * Triggered when the user clicks "I Have Paid" ONCE.
+     * Locks the button into continuous "Checking Payment..." mode and immediately verifies
+     * against the real AadarshPay / FamGateway server at high speed without requiring repeated clicks.
+     */
     fun triggerImmediatePaymentVerification() {
         val session = _activeCheckoutOrder.value ?: return
+        if (_isPaymentVerifiedSuccess.value) return
+        _isUserClickedIHavePaid.value = true
+        _paymentStatusMessage.value = "Checking payment with bank & AadarshPay... Please wait"
+
+        // Restart polling loop so it immediately switches to 800ms turbo interval
+        startPollingFamGatewayOrder(session)
+
         viewModelScope.launch {
-            _paymentStatusMessage.value = "Verifying payment status with AadarshPay..."
             val res = famGatewayService.verifyOrderAuthoritative(session.orderId)
-            res.fold(
-                onSuccess = { status ->
-                    if (status.isSuccess) {
-                        onFamGatewayPaymentVerified(session, status.utr)
-                    } else {
-                        _paymentStatusMessage.value = "Status: ${status.status} — Complete payment in your UPI app."
-                    }
-                },
-                onFailure = {
-                    _paymentStatusMessage.value = "Still waiting for AadarshPay UPI confirmation..."
+            res.onSuccess { status ->
+                if (status.isSuccess && !_isPaymentVerifiedSuccess.value) {
+                    onFamGatewayPaymentVerified(session, status.utr)
                 }
-            )
+            }
         }
     }
 
     private fun onFamGatewayPaymentVerified(session: FamGatewayOrderSession, utr: String) {
+        if (_isPaymentVerifiedSuccess.value) return
+        _isPaymentVerifiedSuccess.value = true
+        _isUserClickedIHavePaid.value = false
+        _paymentStatusMessage.value = "Payment Successful! VIP Plan Activated ✓"
         paymentPollingJob?.cancel()
+
         val nowMs = System.currentTimeMillis()
         val config = subscriptionConfig.value
         val durationMs = when (session.planType) {
@@ -2262,12 +2290,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             utr = utr
         )
 
+        // Immediately save VIP state locally and sync to Firebase Cloud
         saveSubscriptionStateLocally(newState)
-        _isFamGatewayCheckoutOpen.value = false
         _isDailyLimitReachedModalOpen.value = false
         _isSubscriptionModalOpen.value = false
         _isCrazyDealsPopupOpen.value = false
-        _activeCheckoutOrder.value = null
 
         val currentName = _userName.value.trim().ifBlank { "AADIFY User" }
         val userId = getOrCreateCloudUserId(currentName)
@@ -2287,12 +2314,20 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         syncCurrentUserDataToAdminCloud(isExplicitLogin = false)
 
         emitSnackbar("🎉 Payment Successful! ${session.planType.displayName} activated!")
+
+        // Show the green "Payment Successful" status button in the modal for 1.1s before auto-closing
+        viewModelScope.launch {
+            delay(1100L)
+            _isFamGatewayCheckoutOpen.value = false
+            _activeCheckoutOrder.value = null
+            _isPaymentVerifiedSuccess.value = false
+        }
     }
 
     fun closeFamGatewayCheckout() {
         paymentPollingJob?.cancel()
         val pendingSession = _activeCheckoutOrder.value
-        if (pendingSession != null) {
+        if (pendingSession != null && !_isPaymentVerifiedSuccess.value) {
             val currentName = _userName.value.trim().ifBlank { "AADIFY User" }
             val userId = getOrCreateCloudUserId(currentName)
             firebaseService.logPaymentAttemptToCloud(
@@ -2304,6 +2339,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
         _isFamGatewayCheckoutOpen.value = false
         _activeCheckoutOrder.value = null
+        _isUserClickedIHavePaid.value = false
+        _isPaymentVerifiedSuccess.value = false
         _isCreatingPaymentOrder.value = false
         _paymentErrorMessage.value = null
     }

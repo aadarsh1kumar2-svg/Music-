@@ -94,8 +94,8 @@ class FamGatewayService {
     }
 
     private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
+        .connectTimeout(8, TimeUnit.SECONDS)
+        .readTimeout(8, TimeUnit.SECONDS)
         .followRedirects(true)
         .followSslRedirects(true)
         .build()
@@ -140,6 +140,7 @@ class FamGatewayService {
                     .header("Content-Type", "application/json")
                     .header("X-Api-Key", apiKey)
                     .header("Authorization", "Bearer $apiKey")
+                    .header("Cache-Control", "no-cache, no-store, must-revalidate")
                     .post(body)
                     .build()
 
@@ -198,8 +199,9 @@ class FamGatewayService {
     }
 
     /**
-     * Checks live order status via FamGateway's public client-side polling endpoint
-     * and confirms paid orders via the authoritative verify-order endpoint.
+     * Checks live order status via BOTH FamGateway's client-side polling endpoint (`checkout-status.php`)
+     * and authoritative verification endpoint (`verify-order.php`) with cache-busting headers so real
+     * payment confirmation is detected as fast as the web checkout.
      */
     suspend fun checkOrderStatus(orderId: String): Result<FamOrderStatusResult> = withContext(Dispatchers.IO) {
         val cleanOrderId = orderId.trim()
@@ -208,81 +210,108 @@ class FamGatewayService {
         }
 
         try {
-            val pollUrl = "$BASE_URL/api/checkout-status.php?order_id=$cleanOrderId"
+            // Query verify-order.php first (authoritative real-time DB status), then checkout-status.php
+            val verifiedFirst = verifyOrderAuthoritativeInternal(cleanOrderId)
+            if (verifiedFirst != null && (verifiedFirst.isPaid || verifiedFirst.isExpired)) {
+                return@withContext Result.success(verifiedFirst)
+            }
+
+            val ts = System.currentTimeMillis()
+            val pollUrl = "$BASE_URL/api/checkout-status.php?order_id=$cleanOrderId&_t=$ts"
             val pollReq = Request.Builder()
                 .url(pollUrl)
+                .header("Cache-Control", "no-cache, no-store, must-revalidate")
+                .header("Pragma", "no-cache")
                 .get()
                 .build()
 
             httpClient.newCall(pollReq).execute().use { resp ->
                 val raw = resp.body?.string()?.trim().orEmpty()
                 if (resp.isSuccessful && raw.startsWith("{")) {
-                    val obj = JSONObject(raw)
-                    val dataObj = obj.optJSONObject("data") ?: obj
-                    val status = dataObj.optString("status", obj.optString("status", "pending")).lowercase(Locale.US)
-                    val parsed = FamOrderStatusResult(
-                        status = status,
-                        orderId = dataObj.optString("order_id", cleanOrderId),
-                        amount = dataObj.optString("amount", dataObj.optString("payable_amount", "")),
-                        transactionId = dataObj.optString("transaction_id", ""),
-                        utr = dataObj.optString("utr", ""),
-                        senderName = dataObj.optString("sender_name", "")
-                    )
+                    val parsed = parseStatusJson(raw, cleanOrderId)
                     if (parsed.isPaid) {
                         val verified = verifyOrderAuthoritativeInternal(cleanOrderId)
-                        return@withContext Result.success(verified ?: parsed)
+                        return@withContext Result.success(
+                            if (verified != null && verified.isPaid) verified else parsed
+                        )
                     }
                     return@withContext Result.success(parsed)
                 }
             }
 
-            val verified = verifyOrderAuthoritativeInternal(cleanOrderId)
-            if (verified != null) {
-                return@withContext Result.success(verified)
+            if (verifiedFirst != null) {
+                return@withContext Result.success(verifiedFirst)
             }
             Result.failure(Exception("Could not read payment status"))
         } catch (e: Exception) {
-            Result.failure(e)
+            val fallback = verifyOrderAuthoritativeInternal(cleanOrderId)
+            if (fallback != null) {
+                Result.success(fallback)
+            } else {
+                Result.failure(e)
+            }
         }
     }
 
     suspend fun verifyOrderAuthoritative(orderId: String): Result<FamOrderStatusResult> = withContext(Dispatchers.IO) {
-        val verified = verifyOrderAuthoritativeInternal(orderId.trim())
-        if (verified != null) {
-            Result.success(verified)
-        } else {
-            checkOrderStatus(orderId)
-        }
+        checkOrderStatus(orderId.trim())
     }
 
     private fun verifyOrderAuthoritativeInternal(orderId: String): FamOrderStatusResult? {
         val apiKey = resolveApiKey()
         if (apiKey.isBlank()) return null
         return try {
-            val verifyUrl = "$BASE_URL/api/verify-order.php?api_key=$apiKey&order_id=$orderId"
+            val ts = System.currentTimeMillis()
+            val verifyUrl = "$BASE_URL/api/verify-order.php?api_key=$apiKey&order_id=$orderId&_t=$ts"
             val req = Request.Builder()
                 .url(verifyUrl)
                 .header("X-Api-Key", apiKey)
+                .header("Cache-Control", "no-cache, no-store, must-revalidate")
+                .header("Pragma", "no-cache")
                 .get()
                 .build()
             httpClient.newCall(req).execute().use { resp ->
                 val raw = resp.body?.string()?.trim().orEmpty()
                 if (!resp.isSuccessful || !raw.startsWith("{")) return null
-                val obj = JSONObject(raw)
-                val dataObj = obj.optJSONObject("data") ?: obj
-                val status = dataObj.optString("status", obj.optString("status", "pending")).lowercase(Locale.US)
-                FamOrderStatusResult(
-                    status = status,
-                    orderId = dataObj.optString("order_id", orderId),
-                    amount = dataObj.optString("amount", dataObj.optString("payable_amount", "")),
-                    transactionId = dataObj.optString("transaction_id", ""),
-                    utr = dataObj.optString("utr", ""),
-                    senderName = dataObj.optString("sender_name", "")
-                )
+                parseStatusJson(raw, orderId)
             }
         } catch (_: Exception) {
             null
         }
+    }
+
+    private fun parseStatusJson(raw: String, fallbackOrderId: String): FamOrderStatusResult {
+        val obj = JSONObject(raw)
+        val dataObj = obj.optJSONObject("data") ?: obj
+        val rawStatus = dataObj.optString("payment_status")
+            .ifBlank { dataObj.optString("order_status") }
+            .ifBlank { dataObj.optString("status") }
+            .ifBlank { obj.optString("payment_status") }
+            .ifBlank { obj.optString("status", "pending") }
+            .trim()
+            .lowercase(Locale.US)
+
+        // Note: In some responses, root `status` is "success" (meaning HTTP call succeeded) while `data.status` is "pending".
+        // Make sure we check `dataObj`'s status first when `data` object exists!
+        val nestedData = obj.optJSONObject("data")
+        val resolvedStatus = if (nestedData != null) {
+            nestedData.optString("payment_status")
+                .ifBlank { nestedData.optString("order_status") }
+                .ifBlank { nestedData.optString("status", "pending") }
+                .trim()
+                .lowercase(Locale.US)
+        } else {
+            rawStatus
+        }
+
+        return FamOrderStatusResult(
+            status = resolvedStatus,
+            orderId = dataObj.optString("order_id", fallbackOrderId),
+            amount = dataObj.optString("amount", dataObj.optString("payable_amount", "")),
+            transactionId = dataObj.optString("transaction_id", ""),
+            utr = dataObj.optString("utr", ""),
+            senderName = dataObj.optString("sender_name", "")
+        )
     }
 
     /**
