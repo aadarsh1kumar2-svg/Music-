@@ -62,7 +62,7 @@ jobs:
             echo "Existing ./debug.keystore found."
           elif [ -f "./debug.keystore.base64" ] && [ -s "./debug.keystore.base64" ]; then
             echo "Restoring persistent ./debug.keystore from ./debug.keystore.base64..."
-            base64 -d ./debug.keystore.base64 > ./debug.keystore || base64 --decode ./debug.keystore.base64 > ./debug.keystore
+            tr -d ' \t\r\n' < ./debug.keystore.base64 | base64 -d > ./debug.keystore || tr -d ' \t\r\n' < ./debug.keystore.base64 | base64 --decode > ./debug.keystore
           else
             echo "Generating fallback ./debug.keystore using Java 17 keytool..."
             "${JAVA_HOME}/bin/keytool" -genkeypair -v \
