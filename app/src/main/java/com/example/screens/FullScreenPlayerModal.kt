@@ -292,38 +292,19 @@ fun FullScreenPlayerModal(
                 }
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(6.dp))
 
-            // Center: Large high-resolution square album banner OR Synced LRCLIB Lyrics Overlay
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f, fill = false)
-                    .aspectRatio(1f)
-                    .shadow(
-                        elevation = 24.dp,
-                        shape = RoundedCornerShape(18.dp),
-                        clip = false
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                // Album Banner Poster
+            // Center Area:
+            // - When Lyrics is open: Full height spacious Lyrics Card (Song Name & Artist below are hidden as requested)
+            // - When Lyrics is closed: High-resolution square Album Banner + Song Name & Artist below
+            if (isLyricsOpen) {
                 Box(
                     modifier = Modifier
-                        .fillMaxSize()
-                        .clip(RoundedCornerShape(18.dp))
-                        .background(DeepCharcoal)
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .clip(RoundedCornerShape(22.dp)),
+                    contentAlignment = Alignment.Center
                 ) {
-                    SongArtwork(
-                        imageUrl = song.highResBannerUrl,
-                        contentDescription = song.title,
-                        modifier = Modifier.fillMaxSize(),
-                        cornerRadius = 18.dp
-                    )
-                }
-
-                // Beautiful LRCLIB Synced & Plain Lyrics Overlay
-                if (isLyricsOpen) {
                     LrcLibLyricsOverlayPanel(
                         song = song,
                         lyricsState = lyricsState,
@@ -336,41 +317,70 @@ fun FullScreenPlayerModal(
                         onClose = { onSetLyricsOpen(false) }
                     )
                 }
-            }
 
-            Spacer(modifier = Modifier.height(20.dp))
-
-            // Song Details: Auto-scrolling marquee title, artist name
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Text(
-                    text = song.title,
-                    style = MaterialTheme.typography.headlineLarge.copy(
-                        color = PrimaryWhite,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 24.sp
-                    ),
-                    maxLines = 1,
+                Spacer(modifier = Modifier.height(14.dp))
+            } else {
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .basicMarquee()
-                )
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    text = song.artist,
-                    style = MaterialTheme.typography.titleMedium.copy(
-                        color = MutedGray,
-                        fontWeight = FontWeight.Normal,
-                        fontSize = 16.sp
-                    ),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
+                        .weight(1f)
+                        .aspectRatio(1f, matchHeightConstraintsFirst = true)
+                        .shadow(
+                            elevation = 24.dp,
+                            shape = RoundedCornerShape(18.dp),
+                            clip = false
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clip(RoundedCornerShape(18.dp))
+                            .background(DeepCharcoal)
+                    ) {
+                        SongArtwork(
+                            imageUrl = song.highResBannerUrl,
+                            contentDescription = song.title,
+                            modifier = Modifier.fillMaxSize(),
+                            cornerRadius = 18.dp
+                        )
+                    }
+                }
 
-            Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(18.dp))
+
+                // Song Details: Auto-scrolling marquee title, artist name (Hidden when Lyrics is open)
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = song.title,
+                        style = MaterialTheme.typography.headlineLarge.copy(
+                            color = PrimaryWhite,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 24.sp
+                        ),
+                        maxLines = 1,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .basicMarquee()
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = song.artist,
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            color = MutedGray,
+                            fontWeight = FontWeight.Normal,
+                            fontSize = 16.sp
+                        ),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+            }
 
             // Lyrics Pill Button (left) + 1.0x Speed Toggle Chip (right) above the seekbar
             Row(
@@ -646,7 +656,7 @@ fun FullScreenPlayerModal(
                 }
             }
 
-            Spacer(modifier = Modifier.weight(0.2f))
+            Spacer(modifier = Modifier.height(6.dp))
 
             // Bottom: Draggable / Tappable "Up Next" Queue Handle
             Column(
@@ -654,7 +664,7 @@ fun FullScreenPlayerModal(
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp))
                     .clickable { onSetUpNextOpen(true) }
-                    .padding(vertical = 10.dp)
+                    .padding(vertical = 8.dp)
                     .testTag("full_player_up_next_handle"),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
@@ -665,7 +675,7 @@ fun FullScreenPlayerModal(
                         .clip(RoundedCornerShape(2.dp))
                         .background(MutedGray.copy(alpha = 0.6f))
                 )
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(6.dp))
                 Text(
                     text = stringResource(id = R.string.up_next),
                     style = MaterialTheme.typography.titleMedium.copy(
@@ -737,20 +747,20 @@ private fun LrcLibLyricsOverlayPanel(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .clip(RoundedCornerShape(18.dp))
+            .clip(RoundedCornerShape(22.dp))
             .background(
                 Brush.verticalGradient(
                     colors = listOf(
-                        PureBlack.copy(alpha = 0.88f),
-                        DeepCharcoal.copy(alpha = 0.94f),
-                        PureBlack.copy(alpha = 0.96f)
+                        Color(0xFF101820),
+                        Color(0xFF0A0E12),
+                        Color(0xFF06080A)
                     )
                 )
             )
             .border(
-                width = 1.dp,
-                color = SpotifyGreenBorder.copy(alpha = 0.7f),
-                shape = RoundedCornerShape(18.dp)
+                width = 1.2.dp,
+                color = SpotifyVibrantGreen.copy(alpha = 0.55f),
+                shape = RoundedCornerShape(22.dp)
             )
             .testTag("lrclib_lyrics_panel")
     ) {
@@ -761,49 +771,47 @@ private fun LrcLibLyricsOverlayPanel(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.weight(1f)
+                Surface(
+                    color = SpotifyDarkGreenPill,
+                    shape = RoundedCornerShape(50),
+                    modifier = Modifier.border(
+                        width = 1.dp,
+                        color = SpotifyVibrantGreen.copy(alpha = 0.8f),
+                        shape = RoundedCornerShape(50)
+                    )
                 ) {
-                    Surface(
-                        color = SpotifyDarkGreenPill,
-                        shape = RoundedCornerShape(50),
-                        modifier = Modifier.border(
-                            width = 1.dp,
-                            color = SpotifyVibrantGreen.copy(alpha = 0.7f),
-                            shape = RoundedCornerShape(50)
-                        )
-                    ) {
-                        val badgeText = when (lyricsState) {
-                            is LyricsUiState.Success -> if (lyricsState.isSynced) "● SYNCED LYRICS" else "LYRICS"
-                            is LyricsUiState.Loading -> "LOADING LYRICS..."
-                            else -> "LYRICS"
-                        }
-                        Text(
-                            text = badgeText,
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                color = SpotifyVibrantGreen,
-                                fontWeight = FontWeight.ExtraBold,
-                                fontSize = 10.sp,
-                                letterSpacing = 0.8.sp
-                            ),
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-                        )
+                    val badgeText = when (lyricsState) {
+                        is LyricsUiState.Success -> if (lyricsState.isSynced) "● SYNCED LYRICS" else "● LYRICS"
+                        is LyricsUiState.Loading -> "LOADING LYRICS..."
+                        else -> "LYRICS"
                     }
+                    Text(
+                        text = badgeText,
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            color = SpotifyVibrantGreen,
+                            fontWeight = FontWeight.ExtraBold,
+                            fontSize = 11.sp,
+                            letterSpacing = 0.8.sp
+                        ),
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp)
+                    )
                 }
 
                 IconButton(
                     onClick = onClose,
-                    modifier = Modifier.size(32.dp)
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(CircleShape)
+                        .background(SurfaceDarkCard)
                 ) {
                     Icon(
                         imageVector = Icons.Default.Close,
                         contentDescription = "Close Lyrics",
-                        tint = MutedGray,
+                        tint = PrimaryWhite,
                         modifier = Modifier.size(18.dp)
                     )
                 }
@@ -815,7 +823,7 @@ private fun LrcLibLyricsOverlayPanel(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(horizontal = 12.dp),
+                    .padding(horizontal = 14.dp),
                 contentAlignment = Alignment.Center
             ) {
                 when (lyricsState) {
@@ -855,16 +863,6 @@ private fun LrcLibLyricsOverlayPanel(
                                     fontWeight = FontWeight.ExtraBold,
                                     fontSize = 19.sp
                                 ),
-                                textAlign = TextAlign.Center
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = "${song.title} • ${song.artist}",
-                                style = MaterialTheme.typography.bodySmall.copy(
-                                    color = MutedGray
-                                ),
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
                                 textAlign = TextAlign.Center
                             )
                             Spacer(modifier = Modifier.height(14.dp))
@@ -923,18 +921,20 @@ private fun SyncedLyricsListView(
 
     val activeIndex by remember(syncedLines, currentPositionMs) {
         derivedStateOf {
-            val idx = syncedLines.indexOfLast { it.timeMs <= currentPositionMs + 150L }
+            val idx = syncedLines.indexOfLast { it.timeMs <= currentPositionMs + 180L }
             if (idx < 0) 0 else idx
         }
     }
 
-    // Auto-scroll smoothly to keep the active lyric line centered
+    // Auto-scroll smoothly so the active lyric line stays right in the center of the card
     LaunchedEffect(activeIndex, syncedLines.size) {
         if (syncedLines.isNotEmpty() && activeIndex in syncedLines.indices) {
             try {
+                val viewportHeight = listState.layoutInfo.viewportSize.height
+                val centerOffset = if (viewportHeight > 0) -(viewportHeight / 3) else -130
                 listState.animateScrollToItem(
                     index = activeIndex,
-                    scrollOffset = -160
+                    scrollOffset = centerOffset
                 )
             } catch (_: Exception) {
             }
@@ -946,7 +946,7 @@ private fun SyncedLyricsListView(
         modifier = Modifier
             .fillMaxSize()
             .testTag("synced_lyrics_list"),
-        contentPadding = PaddingValues(top = 64.dp, bottom = 96.dp),
+        contentPadding = PaddingValues(top = 80.dp, bottom = 120.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         itemsIndexed(
@@ -959,52 +959,41 @@ private fun SyncedLyricsListView(
             val targetColor by animateColorAsState(
                 targetValue = when {
                     isCurrent -> SpotifyVibrantGreen
-                    isPast -> MutedGray.copy(alpha = 0.48f)
-                    else -> PrimaryWhite.copy(alpha = 0.82f)
+                    isPast -> PrimaryWhite.copy(alpha = 0.45f)
+                    else -> PrimaryWhite.copy(alpha = 0.80f)
                 },
-                animationSpec = tween(durationMillis = 260),
+                animationSpec = tween(durationMillis = 240),
                 label = "lyricColor"
             )
 
             val targetScale by animateFloatAsState(
-                targetValue = if (isCurrent) 1.05f else 0.96f,
-                animationSpec = tween(durationMillis = 260, easing = FastOutSlowInEasing),
+                targetValue = if (isCurrent) 1.04f else 0.97f,
+                animationSpec = tween(durationMillis = 240, easing = FastOutSlowInEasing),
                 label = "lyricScale"
             )
 
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(vertical = 4.dp)
+                    .padding(vertical = 5.dp)
                     .scale(targetScale)
-                    .clip(RoundedCornerShape(12.dp))
+                    .clip(RoundedCornerShape(14.dp))
                     .background(
-                        if (isCurrent) SpotifyDarkGreenPill.copy(alpha = 0.72f) else Color.Transparent
-                    )
-                    .then(
-                        if (isCurrent) {
-                            Modifier.border(
-                                width = 1.dp,
-                                color = SpotifyGreenBorder.copy(alpha = 0.85f),
-                                shape = RoundedCornerShape(12.dp)
-                            )
-                        } else {
-                            Modifier
-                        }
+                        if (isCurrent) SpotifyDarkGreenPill.copy(alpha = 0.85f) else Color.Transparent
                     )
                     .clickable {
                         onSeekTo(line.timeMs)
                     }
-                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                    .padding(horizontal = 16.dp, vertical = if (isCurrent) 12.dp else 8.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Text(
                     text = line.text,
-                    style = MaterialTheme.typography.titleMedium.copy(
+                    style = MaterialTheme.typography.titleLarge.copy(
                         color = targetColor,
                         fontWeight = if (isCurrent) FontWeight.ExtraBold else FontWeight.SemiBold,
-                        fontSize = if (isCurrent) 19.sp else 15.5.sp,
-                        lineHeight = if (isCurrent) 25.sp else 21.sp
+                        fontSize = if (isCurrent) 21.sp else 16.5.sp,
+                        lineHeight = if (isCurrent) 28.sp else 23.sp
                     ),
                     textAlign = TextAlign.Center
                 )
@@ -1021,7 +1010,7 @@ private fun PlainLyricsListView(
         modifier = Modifier
             .fillMaxSize()
             .testTag("plain_lyrics_list"),
-        contentPadding = PaddingValues(vertical = 24.dp, horizontal = 8.dp),
+        contentPadding = PaddingValues(vertical = 28.dp, horizontal = 10.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         itemsIndexed(
@@ -1030,16 +1019,16 @@ private fun PlainLyricsListView(
         ) { _, line ->
             Text(
                 text = line,
-                style = MaterialTheme.typography.bodyLarge.copy(
-                    color = PrimaryWhite.copy(alpha = 0.92f),
-                    fontWeight = FontWeight.Medium,
-                    fontSize = 16.sp,
-                    lineHeight = 24.sp
+                style = MaterialTheme.typography.titleMedium.copy(
+                    color = PrimaryWhite.copy(alpha = 0.95f),
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 18.sp,
+                    lineHeight = 27.sp
                 ),
                 textAlign = TextAlign.Center,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(vertical = 6.dp)
+                    .padding(vertical = 7.dp)
             )
         }
     }
@@ -1091,16 +1080,6 @@ private fun LyricsLoadingAnimation(songTitle: String) {
                 fontWeight = FontWeight.Bold,
                 fontSize = 16.sp
             ),
-            textAlign = TextAlign.Center
-        )
-        Spacer(modifier = Modifier.height(4.dp))
-        Text(
-            text = songTitle,
-            style = MaterialTheme.typography.bodySmall.copy(
-                color = MutedGray
-            ),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
             textAlign = TextAlign.Center
         )
     }
