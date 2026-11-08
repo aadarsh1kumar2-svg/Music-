@@ -294,6 +294,13 @@ fun AKMusicAppRoot(
         }
     }
 
+    // Free users cannot use custom themes — always enforce Default Green if not subscribed
+    LaunchedEffect(subscriptionState) {
+        if (!subscriptionState.isActive() && AppThemeController.currentPreset != AppThemePreset.DEFAULT_GREEN) {
+            AppThemeController.selectTheme(context, AppThemePreset.DEFAULT_GREEN)
+        }
+    }
+
     LaunchedEffect(launchStage) {
         if (launchStage == LaunchStage.LOADING) {
             delay(1800L)
@@ -1028,12 +1035,19 @@ fun AKMusicAppRoot(
             )
         }
 
-        // 6-Theme Selector Dialog (opened from 3-lines drawer "Theme" tab)
+        // 6-Theme Selector Dialog (opened from 3-lines drawer "Theme" tab — custom themes only for Prime users)
         if (isThemeDialogOpen) {
             AppThemeSelectorDialog(
                 currentPreset = AppThemeController.currentPreset,
+                isUserSubscribed = subscriptionState.isActive(),
                 onSelectPreset = { preset ->
-                    AppThemeController.selectTheme(context, preset)
+                    if (subscriptionState.isActive() || preset == AppThemePreset.DEFAULT_GREEN) {
+                        AppThemeController.selectTheme(context, preset)
+                    } else {
+                        isThemeDialogOpen = false
+                        musicViewModel.emitSnackbar("Theme change is only for Prime users! Buy a subscription to unlock all 6 themes.")
+                        musicViewModel.setSubscriptionModalOpen(true)
+                    }
                 },
                 onDismiss = { isThemeDialogOpen = false }
             )
@@ -1438,6 +1452,7 @@ fun DeveloperProfileDialog(
 @Composable
 fun AppThemeSelectorDialog(
     currentPreset: AppThemePreset,
+    isUserSubscribed: Boolean = false,
     onSelectPreset: (AppThemePreset) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -1486,7 +1501,11 @@ fun AppThemeSelectorDialog(
                                 )
                             )
                             Text(
-                                text = "6 signature color themes • Instant live preview",
+                                text = if (isUserSubscribed) {
+                                    "All 6 themes unlocked • Instant live preview"
+                                } else {
+                                    "Custom themes available for Prime users only"
+                                },
                                 style = MaterialTheme.typography.bodySmall.copy(
                                     color = MutedGray
                                 )
@@ -1510,6 +1529,7 @@ fun AppThemeSelectorDialog(
 
                 AppThemePreset.entries.forEach { preset ->
                     val isSelected = preset == currentPreset
+                    val isLockedForFreeUser = !isUserSubscribed && preset != AppThemePreset.DEFAULT_GREEN
                     Surface(
                         color = if (isSelected) preset.pillColor else SurfaceDarkCard,
                         shape = RoundedCornerShape(16.dp),
@@ -1582,6 +1602,26 @@ fun AppThemeSelectorDialog(
                                         style = MaterialTheme.typography.labelSmall.copy(
                                             color = PureBlack,
                                             fontWeight = FontWeight.ExtraBold,
+                                            fontSize = 10.sp
+                                        ),
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                                    )
+                                }
+                            } else if (isLockedForFreeUser) {
+                                Surface(
+                                    color = PureBlack.copy(alpha = 0.6f),
+                                    shape = RoundedCornerShape(50),
+                                    modifier = Modifier.border(
+                                        width = 1.dp,
+                                        color = DividerDark,
+                                        shape = RoundedCornerShape(50)
+                                    )
+                                ) {
+                                    Text(
+                                        text = "🔒 PRIME",
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            color = MutedGray,
+                                            fontWeight = FontWeight.Bold,
                                             fontSize = 10.sp
                                         ),
                                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
