@@ -16,10 +16,13 @@ import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.example.models.Song
+import java.io.ByteArrayInputStream
+import java.util.Locale
 
 /**
  * Custom WebView that always reports View.VISIBLE, shown, and window-focused to Chromium
@@ -277,6 +280,36 @@ class BackstageYouTubePlayerController(
                     val token = currentLoadToken
                     if (targetId.isBlank()) return
                     injectVideoBridgeScript(token, targetId)
+                }
+
+                override fun shouldInterceptRequest(
+                    view: WebView?,
+                    request: WebResourceRequest?
+                ): WebResourceResponse? {
+                    val reqUrl = request?.url?.toString()?.lowercase(Locale.US) ?: return null
+                    val isAdRequest = reqUrl.contains("doubleclick.net") ||
+                        reqUrl.contains("googlesyndication.com") ||
+                        reqUrl.contains("googleadservices.com") ||
+                        reqUrl.contains("googleads.") ||
+                        reqUrl.contains("/pagead/") ||
+                        reqUrl.contains("/api/stats/ads") ||
+                        reqUrl.contains("/api/stats/atr") ||
+                        reqUrl.contains("/ptracking") ||
+                        reqUrl.contains("/get_midroll_info") ||
+                        reqUrl.contains("ad_break") ||
+                        reqUrl.contains("adformat=") ||
+                        reqUrl.contains("&oad=")
+                    if (isAdRequest) {
+                        return WebResourceResponse(
+                            "text/plain",
+                            "UTF-8",
+                            204,
+                            "No Content",
+                            emptyMap(),
+                            ByteArrayInputStream(ByteArray(0))
+                        )
+                    }
+                    return super.shouldInterceptRequest(view, request)
                 }
 
                 override fun shouldOverrideUrlLoading(
@@ -1072,17 +1105,110 @@ class BackstageYouTubePlayerController(
                     return false;
                 }
 
+                // Strip adPlacements / playerAds / adSlots from player responses so pre-roll & mid-roll ads are prevented
+                try {
+                    if (!window.__akAdJsonHooked) {
+                        window.__akAdJsonHooked = true;
+                        var stripAdKeys = function(obj) {
+                            if (!obj || typeof obj !== 'object') return obj;
+                            try {
+                                delete obj.adPlacements;
+                                delete obj.playerAds;
+                                delete obj.adSlots;
+                                delete obj.adBreakHeartbeatParams;
+                                if (obj.playerResponse && typeof obj.playerResponse === 'object') {
+                                    delete obj.playerResponse.adPlacements;
+                                    delete obj.playerResponse.playerAds;
+                                    delete obj.playerResponse.adSlots;
+                                    delete obj.playerResponse.adBreakHeartbeatParams;
+                                }
+                            } catch (e) {}
+                            return obj;
+                        };
+                        if (window.ytInitialPlayerResponse) {
+                            stripAdKeys(window.ytInitialPlayerResponse);
+                        }
+                        var origParse = JSON.parse;
+                        JSON.parse = function() {
+                            var parsed = origParse.apply(this, arguments);
+                            return stripAdKeys(parsed);
+                        };
+                        if (window.Response && window.Response.prototype && window.Response.prototype.json) {
+                            var origResJson = window.Response.prototype.json;
+                            window.Response.prototype.json = function() {
+                                return origResJson.apply(this, arguments).then(function(data) {
+                                    return stripAdKeys(data);
+                                });
+                            };
+                        }
+                    }
+                } catch (e) {}
+
                 function isAdPlaying() {
-                    if (document.querySelector('.ad-showing, .ad-interrupting, .ytp-ad-player-overlay, .ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-skip-ad-button')) {
+                    if (document.querySelector('.ad-showing, .ad-interrupting, .ytp-ad-player-overlay, .ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-skip-ad-button, .ytp-ad-skip-button-slot, .videoAdUi')) {
                         return true;
                     }
                     try {
                         var mp = getMoviePlayer();
-                        if (mp && typeof mp.getAdState === 'function' && mp.getAdState() === 1) {
-                            return true;
+                        if (mp) {
+                            if (mp.classList && (mp.classList.contains('ad-showing') || mp.classList.contains('ad-interrupting'))) {
+                                return true;
+                            }
+                            if (typeof mp.getAdState === 'function' && mp.getAdState() === 1) {
+                                return true;
+                            }
                         }
                     } catch (e) {}
                     return false;
+                }
+
+                function skipAndMuteAdInstantly(v) {
+                    try {
+                        // 1. Immediately mute ad audio so user never hears a single frame of ad sound
+                        if (v) {
+                            v.muted = true;
+                            v.volume = 0;
+                        }
+                        var mp = getMoviePlayer();
+                        if (mp) {
+                            if (typeof mp.skipAd === 'function') {
+                                try { mp.skipAd(); } catch (e) {}
+                            }
+                            if (typeof mp.cancelPlayback === 'function' && typeof mp.playVideo === 'function') {
+                                // Only if skipAd didn't clear it
+                            }
+                        }
+                        // 2. Click any skip button variant (modern & mobile YouTube selectors)
+                        var skipSelectors = [
+                            '.ytp-ad-skip-button',
+                            '.ytp-ad-skip-button-modern',
+                            '.ytp-skip-ad-button',
+                            '.ytp-ad-skip-button-slot button',
+                            '.ytp-ad-skip-button-container button',
+                            '.videoAdUiSkipButton',
+                            'button[id^="skip-button"]'
+                        ];
+                        for (var s = 0; s < skipSelectors.length; s++) {
+                            var btns = document.querySelectorAll(skipSelectors[s]);
+                            for (var b = 0; b < btns.length; b++) {
+                                if (btns[b]) {
+                                    try { btns[b].click(); } catch (e) {}
+                                }
+                            }
+                        }
+                        // 3. Fast-forward the ad video element directly to its end
+                        if (v) {
+                            try { v.playbackRate = 16.0; } catch (e) {}
+                            var adDur = v.duration;
+                            if (adDur && isFinite(adDur) && adDur > 0 && adDur < 600) {
+                                if (v.currentTime < adDur - 0.1) {
+                                    try { v.currentTime = adDur; } catch (e) {}
+                                }
+                            } else {
+                                try { v.currentTime = (v.currentTime || 0) + 60; } catch (e) {}
+                            }
+                        }
+                    } catch (e) {}
                 }
 
                 function getTrueDuration(v) {
@@ -1349,9 +1475,16 @@ class BackstageYouTubePlayerController(
                     v.addEventListener('timeupdate', function() {
                         if (!window.AndroidBridge || window.__akTrackEndedFired) return;
                         if (isAdPlaying()) {
-                            var skipBtn = document.querySelector('.ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-skip-ad-button');
-                            if (skipBtn) { skipBtn.click(); }
+                            skipAndMuteAdInstantly(v);
                             return;
+                        }
+                        if (v.muted) {
+                            v.muted = false;
+                            v.volume = 1.0;
+                        }
+                        var desiredRate = window.__akPlaybackRate || 1.0;
+                        if (Math.abs((v.playbackRate || 1.0) - desiredRate) > 0.05) {
+                            try { v.playbackRate = desiredRate; } catch (e) {}
                         }
                         if (!isCurrentVideoMatchingTarget()) return;
 
@@ -1414,11 +1547,7 @@ class BackstageYouTubePlayerController(
                         }
 
                         if (isAdPlaying()) {
-                            var skipBtn = document.querySelector('.ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-skip-ad-button');
-                            if (skipBtn) { skipBtn.click(); }
-                            if (v.paused && !window.__akUserPaused && !window.__akExternalPaused) {
-                                try { v.play(); } catch(e) {}
-                            }
+                            skipAndMuteAdInstantly(v);
                             return;
                         }
 
