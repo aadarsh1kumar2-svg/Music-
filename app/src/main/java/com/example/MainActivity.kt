@@ -224,6 +224,10 @@ fun AKMusicAppRoot(
     val deviceLocalSongs by musicViewModel.deviceLocalSongs.collectAsStateWithLifecycle()
 
     // Subscription, Crazy Deal 3-day timer, 1-hour daily limit & FamGateway checkout states
+    val userSecretNumber by musicViewModel.userSecretNumber.collectAsStateWithLifecycle()
+    val appControlConfig by musicViewModel.appControlConfig.collectAsStateWithLifecycle()
+    val isMaintenanceModeActive by musicViewModel.isMaintenanceModeActive.collectAsStateWithLifecycle()
+    val isAppUpdatePopupActive by musicViewModel.isAppUpdatePopupActive.collectAsStateWithLifecycle()
     val subscriptionConfig by musicViewModel.subscriptionConfig.collectAsStateWithLifecycle()
     val subscriptionState by musicViewModel.subscriptionState.collectAsStateWithLifecycle()
     val activeSubscriptionRemainingSeconds by musicViewModel.activeSubscriptionRemainingSeconds.collectAsStateWithLifecycle()
@@ -500,6 +504,28 @@ fun AKMusicAppRoot(
                                             color = MutedGray,
                                             fontWeight = FontWeight.SemiBold
                                         )
+                                    )
+                                }
+
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Surface(
+                                    color = SpotifyDarkGreenPill,
+                                    shape = RoundedCornerShape(50),
+                                    modifier = Modifier.border(
+                                        width = 1.dp,
+                                        color = SpotifyGreenBorder,
+                                        shape = RoundedCornerShape(50)
+                                    )
+                                ) {
+                                    Text(
+                                        text = "Secret No: $userSecretNumber",
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            color = SpotifyVibrantGreen,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            letterSpacing = 0.8.sp,
+                                            fontSize = 11.sp
+                                        ),
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
                                     )
                                 }
                             }
@@ -1115,6 +1141,323 @@ fun AKMusicAppRoot(
                     musicViewModel.closeFamGatewayCheckout()
                 }
             )
+        }
+
+        // Admin-controlled App Update Popup (shown when Admin enables Update for this User Panel's Secret Number)
+        if (isAppUpdatePopupActive) {
+            AppUpdatePopupDialog(
+                message = appControlConfig.updateMessage.ifBlank { "A new update is available." },
+                updateLink = appControlConfig.updateLink,
+                secretNumber = userSecretNumber,
+                onExitApp = {
+                    (context as? Activity)?.finishAffinity()
+                },
+                onUpdateClick = {
+                    val rawUrl = appControlConfig.updateLink.trim()
+                    if (rawUrl.isNotBlank()) {
+                        val formattedUrl = if (
+                            rawUrl.startsWith("http://", ignoreCase = true) ||
+                            rawUrl.startsWith("https://", ignoreCase = true)
+                        ) {
+                            rawUrl
+                        } else {
+                            "https://$rawUrl"
+                        }
+                        try {
+                            val chromeIntent = Intent(Intent.ACTION_VIEW, Uri.parse(formattedUrl)).apply {
+                                setPackage("com.android.chrome")
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                            context.startActivity(chromeIntent)
+                        } catch (_: Exception) {
+                            try {
+                                val fallbackIntent = Intent(Intent.ACTION_VIEW, Uri.parse(formattedUrl)).apply {
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                                context.startActivity(fallbackIntent)
+                            } catch (_: Exception) {
+                                musicViewModel.emitSnackbar("Could not open update link.")
+                            }
+                        }
+                    } else {
+                        musicViewModel.emitSnackbar("Update link is not set by Admin yet.")
+                    }
+                }
+            )
+        }
+
+        // Admin-controlled Under Maintenance Mode (shown when Admin turns OFF User Panel for this Secret Number)
+        if (isMaintenanceModeActive) {
+            UnderMaintenanceDialog(
+                message = appControlConfig.maintenanceMessage.ifBlank {
+                    "App is under maintenance. Please try again later."
+                },
+                secretNumber = userSecretNumber,
+                onExitApp = {
+                    (context as? Activity)?.finishAffinity()
+                }
+            )
+        }
+    }
+}
+
+@Composable
+fun AppUpdatePopupDialog(
+    message: String,
+    updateLink: String,
+    secretNumber: String,
+    onExitApp: () -> Unit,
+    onUpdateClick: () -> Unit
+) {
+    Dialog(
+        onDismissRequest = { /* Mandatory Admin Update Popup */ },
+        properties = DialogProperties(
+            dismissOnBackPress = false,
+            dismissOnClickOutside = false,
+            usePlatformDefaultWidth = false
+        )
+    ) {
+        Surface(
+            color = DeepCharcoal,
+            shape = RoundedCornerShape(24.dp),
+            modifier = Modifier
+                .fillMaxWidth(0.90f)
+                .border(
+                    width = 1.5.dp,
+                    color = SpotifyVibrantGreen,
+                    shape = RoundedCornerShape(24.dp)
+                )
+                .testTag("app_update_popup_dialog")
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Image(
+                    painter = painterResource(id = R.drawable.aadify_logo),
+                    contentDescription = "AADIFY Logo",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier
+                        .size(68.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .border(1.dp, SpotifyGreenBorder, RoundedCornerShape(16.dp))
+                )
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                Surface(
+                    color = SpotifyDarkGreenPill,
+                    shape = RoundedCornerShape(50),
+                    modifier = Modifier.border(1.dp, SpotifyGreenBorder, RoundedCornerShape(50))
+                ) {
+                    Text(
+                        text = "NEW UPDATE AVAILABLE",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            color = SpotifyVibrantGreen,
+                            fontWeight = FontWeight.ExtraBold,
+                            letterSpacing = 1.sp,
+                            fontSize = 11.sp
+                        ),
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Text(
+                    text = "Update AADIFY",
+                    style = MaterialTheme.typography.headlineSmall.copy(
+                        color = PrimaryWhite,
+                        fontWeight = FontWeight.ExtraBold
+                    ),
+                    textAlign = TextAlign.Center
+                )
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Text(
+                    text = message,
+                    style = MaterialTheme.typography.bodyMedium.copy(
+                        color = MutedGray,
+                        lineHeight = 21.sp,
+                        fontSize = 14.5.sp
+                    ),
+                    textAlign = TextAlign.Center
+                )
+
+                Spacer(modifier = Modifier.height(22.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Button(
+                        onClick = onExitApp,
+                        shape = RoundedCornerShape(14.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = SurfaceDarkCard,
+                            contentColor = PrimaryWhite
+                        ),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                            .border(1.dp, DividerDark, RoundedCornerShape(14.dp))
+                            .testTag("app_update_exit_button")
+                    ) {
+                        Text(
+                            text = "Exit App",
+                            style = MaterialTheme.typography.titleSmall.copy(
+                                color = PrimaryWhite,
+                                fontWeight = FontWeight.Bold
+                            )
+                        )
+                    }
+
+                    Button(
+                        onClick = onUpdateClick,
+                        shape = RoundedCornerShape(14.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = SpotifyVibrantGreen,
+                            contentColor = PureBlack
+                        ),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                            .testTag("app_update_button")
+                    ) {
+                        Text(
+                            text = "Update",
+                            style = MaterialTheme.typography.titleSmall.copy(
+                                color = PureBlack,
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun UnderMaintenanceDialog(
+    message: String,
+    secretNumber: String,
+    onExitApp: () -> Unit
+) {
+    Dialog(
+        onDismissRequest = { /* Mandatory Under Maintenance Lock */ },
+        properties = DialogProperties(
+            dismissOnBackPress = false,
+            dismissOnClickOutside = false,
+            usePlatformDefaultWidth = false
+        )
+    ) {
+        Surface(
+            color = DeepCharcoal,
+            shape = RoundedCornerShape(24.dp),
+            modifier = Modifier
+                .fillMaxWidth(0.90f)
+                .border(
+                    width = 1.5.dp,
+                    color = Color(0xFFFFAB40),
+                    shape = RoundedCornerShape(24.dp)
+                )
+                .testTag("under_maintenance_dialog")
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Image(
+                    painter = painterResource(id = R.drawable.aadify_logo),
+                    contentDescription = "AADIFY Logo",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier
+                        .size(68.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .border(1.dp, Color(0xFFFFAB40), RoundedCornerShape(16.dp))
+                )
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                Surface(
+                    color = Color(0xFFFF6D00).copy(alpha = 0.16f),
+                    shape = RoundedCornerShape(50),
+                    modifier = Modifier.border(1.dp, Color(0xFFFFAB40), RoundedCornerShape(50))
+                ) {
+                    Text(
+                        text = "UNDER MAINTENANCE",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            color = Color(0xFFFFAB40),
+                            fontWeight = FontWeight.ExtraBold,
+                            letterSpacing = 1.sp,
+                            fontSize = 11.sp
+                        ),
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Text(
+                    text = "Maintenance Mode",
+                    style = MaterialTheme.typography.headlineSmall.copy(
+                        color = PrimaryWhite,
+                        fontWeight = FontWeight.ExtraBold
+                    ),
+                    textAlign = TextAlign.Center
+                )
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Text(
+                    text = message,
+                    style = MaterialTheme.typography.bodyMedium.copy(
+                        color = MutedGray,
+                        lineHeight = 21.sp,
+                        fontSize = 14.5.sp
+                    ),
+                    textAlign = TextAlign.Center
+                )
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Text(
+                    text = "Secret No: $secretNumber",
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        color = SpotifyVibrantGreen,
+                        fontWeight = FontWeight.Bold
+                    )
+                )
+
+                Spacer(modifier = Modifier.height(20.dp))
+
+                Button(
+                    onClick = onExitApp,
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFFFFAB40),
+                        contentColor = PureBlack
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("maintenance_exit_button")
+                ) {
+                    Text(
+                        text = "Exit App",
+                        style = MaterialTheme.typography.titleSmall.copy(
+                            color = PureBlack,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                    )
+                }
+            }
         }
     }
 }

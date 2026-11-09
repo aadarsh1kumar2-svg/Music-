@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Base64
 import android.util.Log
 import com.example.BuildConfig
+import com.example.models.AdminAppControlConfig
 import com.example.models.AdminSubscriptionConfig
 import com.example.models.Song
 import com.example.models.SubscriptionPlanType
@@ -41,7 +42,8 @@ data class CloudUserAuthResult(
     val password: String,
     val createdAtMs: Long,
     val isNewAccount: Boolean,
-    val subscriptionState: UserSubscriptionState? = null
+    val subscriptionState: UserSubscriptionState? = null,
+    val secretCode: String = ""
 )
 
 class FirebaseSongsService(private val context: Context) {
@@ -128,6 +130,10 @@ class FirebaseSongsService(private val context: Context) {
     private val _isSubscriptionConfigLoaded = MutableStateFlow(configCachePrefs.getBoolean("has_cached_config", false))
     val isSubscriptionConfigLoaded: StateFlow<Boolean> = _isSubscriptionConfigLoaded.asStateFlow()
 
+    // Admin-configured App Control (/appControl: Secret Code, Under Maintenance Mode, App Update Popup)
+    private val _appControlConfig = MutableStateFlow(loadCachedAppControlConfig())
+    val appControlConfig: StateFlow<AdminAppControlConfig> = _appControlConfig.asStateFlow()
+
     private var firebaseDatabase: FirebaseDatabase? = null
     private var songsRef: DatabaseReference? = null
     private var subscriptionConfigRef: DatabaseReference? = null
@@ -141,12 +147,17 @@ class FirebaseSongsService(private val context: Context) {
     var onUserDeletedByAdminCallback: (() -> Unit)? = null
     var onAdminVipStateSyncedCallback: ((UserSubscriptionState?) -> Unit)? = null
     var onAdminFreeLimitSyncedCallback: ((Int?) -> Unit)? = null
+    var onAdminTimeUsageResetCallback: (() -> Unit)? = null
     @Volatile
     private var currentWatchedUserId: String? = null
     private var currentUserNodeRef: DatabaseReference? = null
     private var currentUserValueListener: ValueEventListener? = null
+    private var currentUserTimeUsageRef: DatabaseReference? = null
+    private var currentUserTimeUsageListener: ValueEventListener? = null
     @Volatile
     private var hasConfirmedCloudUserUpload: Boolean = false
+    @Volatile
+    private var hasUploadedTimeUsageNonZero: Boolean = false
     @Volatile
     private var isCurrentUserDeletedByAdmin: Boolean = false
     @Volatile
@@ -305,6 +316,25 @@ class FirebaseSongsService(private val context: Context) {
                 it.addValueEventListener(bannersListener)
             }
 
+            // Admin App Settings (/appControl): Secret Code, Maintenance Mode, and App Update Popup
+            val appControlListener = object : ValueEventListener {
+                override fun onDataChange(snapshot: DataSnapshot) {
+                    if (snapshot.exists()) {
+                        parseAppControlSnapshot(snapshot)?.let { updated ->
+                            updateAndPersistAppControlConfig(updated)
+                        }
+                    } else {
+                        updateAndPersistAppControlConfig(AdminAppControlConfig())
+                    }
+                }
+
+                override fun onCancelled(error: DatabaseError) {}
+            }
+            database.getReference("appControl").also {
+                it.keepSynced(true)
+                it.addValueEventListener(appControlListener)
+            }
+
             val notifListener = object : ValueEventListener {
                 override fun onDataChange(snapshot: DataSnapshot) {
                     handleNotificationSnapshot(snapshot)
@@ -327,6 +357,7 @@ class FirebaseSongsService(private val context: Context) {
         scope.launch {
             fetchSongsViaRest()
             fetchSubscriptionConfigViaRest(seedIfMissing = true)
+            fetchAppControlViaRest()
             fetchNotificationsViaRest()
             while (true) {
                 delay(6_000L)
@@ -336,6 +367,7 @@ class FirebaseSongsService(private val context: Context) {
                 }
                 fetchSongsViaRest(silent = true)
                 fetchSubscriptionConfigViaRest(seedIfMissing = false)
+                fetchAppControlViaRest()
                 fetchNotificationsViaRest()
                 checkCurrentUserStatusInCloud()
             }
@@ -1344,6 +1376,9 @@ class FirebaseSongsService(private val context: Context) {
             currentUserValueListener?.let { oldListener ->
                 currentUserNodeRef?.removeEventListener(oldListener)
             }
+            currentUserTimeUsageListener?.let { oldTimeListener ->
+                currentUserTimeUsageRef?.removeEventListener(oldTimeListener)
+            }
         } catch (_: Exception) {
         }
 
@@ -1357,7 +1392,7 @@ class FirebaseSongsService(private val context: Context) {
                 if (!hasConfirmedCloudUserUpload || isCurrentUserDeletedByAdmin) return
                 val elapsedSinceWrite = System.currentTimeMillis() - lastUserUploadTimestampMs
                 if (elapsedSinceWrite < 1_500L) {
-                    // Still check if Admin granted a VIP plan or custom free limit even within 1.5s
+                    // Still check if Admin granted or deactivated a VIP plan or custom free limit even within 1.5s
                     if (snapshot.exists() && snapshot.value != null) {
                         val syncedVip = parseCloudSubscriptionFromSnapshot(snapshot)
                         onAdminVipStateSyncedCallback?.invoke(syncedVip)
@@ -1381,7 +1416,7 @@ class FirebaseSongsService(private val context: Context) {
                     return
                 }
 
-                // Check if Admin granted or modified VIP / Subscription or Free User Time Limit on this user node
+                // Check if Admin granted, modified, or deactivated VIP / Subscription or Free User Time Limit on this user node
                 val syncedVip = parseCloudSubscriptionFromSnapshot(snapshot)
                 onAdminVipStateSyncedCallback?.invoke(syncedVip)
                 val userFreeLimitSecs = parseUserSpecificFreeLimitFromSnapshot(snapshot)
@@ -1395,6 +1430,28 @@ class FirebaseSongsService(private val context: Context) {
         currentUserValueListener = listener
         try {
             ref.addValueEventListener(listener)
+        } catch (_: Exception) {
+        }
+
+        // Also watch /userTimeUsage/{userId} so Admin clicking "Reset today's usage" immediately resets local usage
+        val timeRef = db.getReference("userTimeUsage").child(userId)
+        currentUserTimeUsageRef = timeRef
+        val timeListener = object : ValueEventListener {
+            override fun onDataChange(snapshot: DataSnapshot) {
+                if (!hasConfirmedCloudUserUpload || isCurrentUserDeletedByAdmin) return
+                if (!snapshot.exists() || snapshot.value == null) {
+                    if (hasUploadedTimeUsageNonZero) {
+                        hasUploadedTimeUsageNonZero = false
+                        onAdminTimeUsageResetCallback?.invoke()
+                    }
+                }
+            }
+
+            override fun onCancelled(error: DatabaseError) {}
+        }
+        currentUserTimeUsageListener = timeListener
+        try {
+            timeRef.addValueEventListener(timeListener)
         } catch (_: Exception) {
         }
     }
@@ -1431,6 +1488,22 @@ class FirebaseSongsService(private val context: Context) {
                     val userFreeLimitSecs = parseUserSpecificFreeLimitFromJson(obj)
                     if (userFreeLimitSecs != null) {
                         onAdminFreeLimitSyncedCallback?.invoke(userFreeLimitSecs)
+                    }
+                }
+            }
+
+            if (hasUploadedTimeUsageNonZero) {
+                val timeReq = Request.Builder()
+                    .url("$DATABASE_URL/userTimeUsage/$userId.json")
+                    .get()
+                    .build()
+                httpClient.newCall(timeReq).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        val body = resp.body?.string()?.trim().orEmpty()
+                        if (body.isEmpty() || body == "null") {
+                            hasUploadedTimeUsageNonZero = false
+                            onAdminTimeUsageResetCallback?.invoke()
+                        }
                     }
                 }
             }
@@ -1963,6 +2036,150 @@ class FirebaseSongsService(private val context: Context) {
     }
 
     // =========================================================================
+    // ADMIN APP CONTROL (/appControl: SECRET CODE, MAINTENANCE MODE, APP UPDATE)
+    // =========================================================================
+
+    private fun loadCachedAppControlConfig(): AdminAppControlConfig {
+        val def = AdminAppControlConfig()
+        if (!configCachePrefs.getBoolean("has_cached_app_control", false)) return def
+        return try {
+            AdminAppControlConfig(
+                secretCode = configCachePrefs.getString("app_ctrl_secret_code", def.secretCode) ?: def.secretCode,
+                userPanelEnabled = configCachePrefs.getBoolean("app_ctrl_panel_enabled", def.userPanelEnabled),
+                maintenanceMessage = configCachePrefs.getString("app_ctrl_maint_msg", def.maintenanceMessage) ?: def.maintenanceMessage,
+                updateEnabled = configCachePrefs.getBoolean("app_ctrl_update_enabled", def.updateEnabled),
+                updateLink = configCachePrefs.getString("app_ctrl_update_link", def.updateLink) ?: def.updateLink,
+                updateMessage = configCachePrefs.getString("app_ctrl_update_msg", def.updateMessage) ?: def.updateMessage,
+                closeAppButtonEnabled = configCachePrefs.getBoolean("app_ctrl_close_btn", def.closeAppButtonEnabled),
+                updatedAt = configCachePrefs.getLong("app_ctrl_updated_at", def.updatedAt)
+            )
+        } catch (_: Exception) {
+            def
+        }
+    }
+
+    private fun updateAndPersistAppControlConfig(newConfig: AdminAppControlConfig) {
+        _appControlConfig.value = newConfig
+        try {
+            configCachePrefs.edit()
+                .putBoolean("has_cached_app_control", true)
+                .putString("app_ctrl_secret_code", newConfig.secretCode)
+                .putBoolean("app_ctrl_panel_enabled", newConfig.userPanelEnabled)
+                .putString("app_ctrl_maint_msg", newConfig.maintenanceMessage)
+                .putBoolean("app_ctrl_update_enabled", newConfig.updateEnabled)
+                .putString("app_ctrl_update_link", newConfig.updateLink)
+                .putString("app_ctrl_update_msg", newConfig.updateMessage)
+                .putBoolean("app_ctrl_close_btn", newConfig.closeAppButtonEnabled)
+                .putLong("app_ctrl_updated_at", newConfig.updatedAt)
+                .apply()
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun parseAppControlSnapshot(snapshot: DataSnapshot): AdminAppControlConfig? {
+        return try {
+            val def = AdminAppControlConfig()
+            val secretCode = when (val raw = snapshot.child("secretCode").value) {
+                is Number -> raw.toLong().toString()
+                is String -> raw.trim()
+                else -> ""
+            }
+            val userPanelEnabled = snapshot.child("userPanelEnabled").value?.let {
+                parseBooleanField(it)
+            } ?: true
+            val maintenanceMessage = snapshot.child("maintenanceMessage").getValue(String::class.java)?.trim()
+                .orEmpty()
+                .ifBlank { def.maintenanceMessage }
+            val updateEnabled = snapshot.child("updateEnabled").value?.let {
+                parseBooleanField(it)
+            } ?: false
+            val updateLink = snapshot.child("updateLink").getValue(String::class.java)?.trim().orEmpty()
+            val updateMessage = snapshot.child("updateMessage").getValue(String::class.java)?.trim()
+                .orEmpty()
+                .ifBlank { def.updateMessage }
+            val closeAppButtonEnabled = snapshot.child("closeAppButtonEnabled").value?.let {
+                parseBooleanField(it)
+            } ?: true
+            val updatedAt = (snapshot.child("updatedAt").value as? Number)?.toLong() ?: 0L
+
+            AdminAppControlConfig(
+                secretCode = secretCode,
+                userPanelEnabled = userPanelEnabled,
+                maintenanceMessage = maintenanceMessage,
+                updateEnabled = updateEnabled,
+                updateLink = updateLink,
+                updateMessage = updateMessage,
+                closeAppButtonEnabled = closeAppButtonEnabled,
+                updatedAt = updatedAt
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "Error parsing appControl snapshot", e)
+            null
+        }
+    }
+
+    suspend fun fetchAppControlViaRest() = withContext(Dispatchers.IO) {
+        try {
+            val req = Request.Builder()
+                .url("$DATABASE_URL/appControl.json")
+                .get()
+                .build()
+            httpClient.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    val body = resp.body?.string()?.trim().orEmpty()
+                    if (body.isEmpty() || body == "null") {
+                        updateAndPersistAppControlConfig(AdminAppControlConfig())
+                    } else if (body.startsWith("{")) {
+                        val obj = JSONObject(body)
+                        val def = AdminAppControlConfig()
+                        val rawSecret = obj.opt("secretCode")
+                        val secretCode = when (rawSecret) {
+                            is Number -> rawSecret.toLong().toString()
+                            is String -> rawSecret.trim()
+                            else -> obj.optString("secretCode", "").trim()
+                        }
+                        val userPanelEnabled = if (obj.has("userPanelEnabled")) {
+                            parseBooleanField(obj.opt("userPanelEnabled"))
+                        } else {
+                            true
+                        }
+                        val maintenanceMessage = obj.optString("maintenanceMessage", "").trim()
+                            .ifBlank { def.maintenanceMessage }
+                        val updateEnabled = if (obj.has("updateEnabled")) {
+                            parseBooleanField(obj.opt("updateEnabled"))
+                        } else {
+                            false
+                        }
+                        val updateLink = obj.optString("updateLink", "").trim()
+                        val updateMessage = obj.optString("updateMessage", "").trim()
+                            .ifBlank { def.updateMessage }
+                        val closeAppButtonEnabled = if (obj.has("closeAppButtonEnabled")) {
+                            parseBooleanField(obj.opt("closeAppButtonEnabled"))
+                        } else {
+                            true
+                        }
+                        val updatedAt = obj.optLong("updatedAt", 0L)
+
+                        updateAndPersistAppControlConfig(
+                            AdminAppControlConfig(
+                                secretCode = secretCode,
+                                userPanelEnabled = userPanelEnabled,
+                                maintenanceMessage = maintenanceMessage,
+                                updateEnabled = updateEnabled,
+                                updateLink = updateLink,
+                                updateMessage = updateMessage,
+                                closeAppButtonEnabled = closeAppButtonEnabled,
+                                updatedAt = updatedAt
+                            )
+                        )
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    // =========================================================================
     // UNIQUE USERNAME + PASSWORD AUTHENTICATION (SIGN IN & CREATE ACCOUNT)
     // =========================================================================
 
@@ -2172,6 +2389,8 @@ class FirebaseSongsService(private val context: Context) {
 
                 // Parse any active subscription stored in cloud for this user
                 val cloudSub = parseCloudSubscriptionFromJson(existingUserNodeObj)
+                val savedSecretCode = matchedRecord.optString("secretCode", "").trim()
+                    .ifBlank { existingAccountObj?.optString("secretCode", "")?.trim().orEmpty() }
 
                 // Ensure /userAccounts/{normalizedKey} is up-to-date with the verified password & userId
                 val updatedAccountPayload = JSONObject().apply {
@@ -2183,6 +2402,9 @@ class FirebaseSongsService(private val context: Context) {
                     put("createdAt", createdAtMs)
                     put("lastLogin", nowMs)
                     put("status", "Active")
+                    if (savedSecretCode.isNotBlank()) {
+                        put("secretCode", savedSecretCode)
+                    }
                     if (cloudSub != null) {
                         put("subscriptionPlan", cloudSub.planType.id)
                         put("subscriptionActivatedAt", cloudSub.activatedAtMs)
@@ -2208,7 +2430,8 @@ class FirebaseSongsService(private val context: Context) {
                         password = cleanPassword,
                         createdAtMs = createdAtMs,
                         isNewAccount = false,
-                        subscriptionState = cloudSub
+                        subscriptionState = cloudSub,
+                        secretCode = savedSecretCode
                     )
                 )
             }
@@ -2245,26 +2468,48 @@ class FirebaseSongsService(private val context: Context) {
         return try {
             val subSnap = snapshot.child("subscription")
             val subStatus = subSnap.child("status").getValue(String::class.java)?.trim()?.lowercase().orEmpty()
+            // If Admin deactivated the subscription (status == 'inactive'), immediately return null!
+            if (subSnap.exists() && (
+                    subStatus == "inactive" ||
+                        subStatus == "deactivated" ||
+                        subStatus == "cancelled" ||
+                        subStatus == "expired" ||
+                        subStatus == "none" ||
+                        subStatus == "off" ||
+                        subStatus == "false"
+                    )
+            ) {
+                return null
+            }
+
             val isSubNodeActive = subStatus == "active" || subStatus == "success" || subStatus == "complimentary"
 
             val isVipFlag = isSubNodeActive ||
-                parseBooleanField(snapshot.child("isVip").value) ||
-                parseBooleanField(snapshot.child("vip").value) ||
-                parseBooleanField(snapshot.child("isVIP").value) ||
-                parseBooleanField(snapshot.child("isSubscribed").value) ||
-                parseBooleanField(snapshot.child("isPremium").value) ||
-                snapshot.child("role").getValue(String::class.java)?.equals("vip", ignoreCase = true) == true ||
-                snapshot.child("status").getValue(String::class.java)?.equals("vip", ignoreCase = true) == true
+                (!subSnap.exists() && (
+                    parseBooleanField(snapshot.child("isVip").value) ||
+                        parseBooleanField(snapshot.child("vip").value) ||
+                        parseBooleanField(snapshot.child("isVIP").value) ||
+                        parseBooleanField(snapshot.child("isSubscribed").value) ||
+                        parseBooleanField(snapshot.child("isPremium").value) ||
+                        snapshot.child("role").getValue(String::class.java)?.equals("vip", ignoreCase = true) == true ||
+                        snapshot.child("status").getValue(String::class.java)?.equals("vip", ignoreCase = true) == true
+                    ))
 
-            val rawPlan = (
-                subSnap.child("plan").getValue(String::class.java)
-                    ?: subSnap.child("planType").getValue(String::class.java)
-                    ?: snapshot.child("vipPlan").getValue(String::class.java)
-                    ?: snapshot.child("vipType").getValue(String::class.java)
-                    ?: snapshot.child("subscriptionPlan").getValue(String::class.java)
-                    ?: snapshot.child("plan").getValue(String::class.java)
-                    ?: ""
-                ).trim()
+            val rawPlan = if (subSnap.exists()) {
+                (
+                    subSnap.child("plan").getValue(String::class.java)
+                        ?: subSnap.child("planType").getValue(String::class.java)
+                        ?: ""
+                    ).trim()
+            } else {
+                (
+                    snapshot.child("vipPlan").getValue(String::class.java)
+                        ?: snapshot.child("vipType").getValue(String::class.java)
+                        ?: snapshot.child("subscriptionPlan").getValue(String::class.java)
+                        ?: snapshot.child("plan").getValue(String::class.java)
+                        ?: ""
+                    ).trim()
+            }
 
             val planType = resolveAdminPlanType(rawPlan, isVipFlag)
             if (planType == SubscriptionPlanType.NONE) return null
@@ -2331,24 +2576,42 @@ class FirebaseSongsService(private val context: Context) {
         if (obj == null) return null
         val subObj = obj.optJSONObject("subscription")
         val subStatus = subObj?.optString("status", "")?.trim()?.lowercase().orEmpty()
+        // If Admin deactivated the subscription (status == 'inactive'), immediately return null!
+        if (subObj != null && (
+                subStatus == "inactive" ||
+                    subStatus == "deactivated" ||
+                    subStatus == "cancelled" ||
+                    subStatus == "expired" ||
+                    subStatus == "none" ||
+                    subStatus == "off" ||
+                    subStatus == "false"
+                )
+        ) {
+            return null
+        }
+
         val isSubNodeActive = subStatus == "active" || subStatus == "success" || subStatus == "complimentary"
 
         val isVipFlag = isSubNodeActive ||
-            parseBooleanField(obj.opt("isVip")) ||
-            parseBooleanField(obj.opt("vip")) ||
-            parseBooleanField(obj.opt("isVIP")) ||
-            parseBooleanField(obj.opt("isSubscribed")) ||
-            parseBooleanField(obj.opt("isPremium")) ||
-            obj.optString("role", "").equals("vip", ignoreCase = true) ||
-            obj.optString("status", "").equals("vip", ignoreCase = true)
+            (subObj == null && (
+                parseBooleanField(obj.opt("isVip")) ||
+                    parseBooleanField(obj.opt("vip")) ||
+                    parseBooleanField(obj.opt("isVIP")) ||
+                    parseBooleanField(obj.opt("isSubscribed")) ||
+                    parseBooleanField(obj.opt("isPremium")) ||
+                    obj.optString("role", "").equals("vip", ignoreCase = true) ||
+                    obj.optString("status", "").equals("vip", ignoreCase = true)
+                ))
 
-        val rawPlan = (subObj?.optString("plan").orEmpty())
-            .ifBlank { subObj?.optString("planType").orEmpty() }
-            .ifBlank { obj.optString("vipPlan") }
-            .ifBlank { obj.optString("vipType") }
-            .ifBlank { obj.optString("subscriptionPlan") }
-            .ifBlank { obj.optString("plan") }
-            .trim()
+        val rawPlan = if (subObj != null) {
+            subObj.optString("plan").ifBlank { subObj.optString("planType") }.trim()
+        } else {
+            obj.optString("vipPlan")
+                .ifBlank { obj.optString("vipType") }
+                .ifBlank { obj.optString("subscriptionPlan") }
+                .ifBlank { obj.optString("plan") }
+                .trim()
+        }
 
         val planType = resolveAdminPlanType(rawPlan, isVipFlag)
         if (planType == SubscriptionPlanType.NONE) {
@@ -2406,6 +2669,76 @@ class FirebaseSongsService(private val context: Context) {
     }
 
     /**
+     * Clears legacy top-level VIP flags in `/users/{userId}` and `/userAccounts/{normalizedKey}`
+     * when Admin deactivates the user's plan (`subscription.status = "inactive"`).
+     */
+    fun clearDeactivatedSubscriptionFlagsInCloud(userId: String, userName: String) {
+        val cleanId = userId.trim()
+        if (cleanId.isEmpty() || isCurrentUserDeletedByAdmin) return
+        scope.launch {
+            try {
+                val clearPatch = JSONObject().apply {
+                    put("isVip", false)
+                    put("vip", false)
+                    put("isVIP", false)
+                    put("isSubscribed", false)
+                    put("isPremium", false)
+                    put("role", "User")
+                    put("vipPlan", "none")
+                    put("subscriptionPlan", "none")
+                    put("subscriptionPlanName", "Free")
+                }
+                val body = clearPatch.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+                httpClient.newCall(
+                    Request.Builder()
+                        .url("$DATABASE_URL/users/$cleanId.json")
+                        .patch(body)
+                        .build()
+                ).execute().close()
+
+                val normKey = normalizeUsernameKey(userName)
+                if (normKey.isNotBlank()) {
+                    val accBody = clearPatch.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+                    httpClient.newCall(
+                        Request.Builder()
+                            .url("$DATABASE_URL/userAccounts/$normKey.json")
+                            .patch(accBody)
+                            .build()
+                    ).execute().close()
+                }
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    /**
+     * Syncs the user's played song history to `/songHistory/{userId}` so Admin Panel's
+     * "Played songs" and "Analyse -> Top Played Songs" stay 100% synced.
+     */
+    fun syncSongHistoryToCloud(userId: String, historyArray: JSONArray) {
+        val cleanId = userId.trim()
+        if (cleanId.isEmpty() || isCurrentUserDeletedByAdmin) return
+        scope.launch {
+            try {
+                val mapObj = JSONObject()
+                for (i in 0 until historyArray.length()) {
+                    val item = historyArray.optJSONObject(i) ?: continue
+                    val key = "song_${i}_${item.optString("songId").replace(Regex("[^a-zA-Z0-9_-]"), "_")}"
+                    mapObj.put(key, item)
+                }
+                val body = mapObj.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+                httpClient.newCall(
+                    Request.Builder()
+                        .url("$DATABASE_URL/songHistory/$cleanId.json")
+                        .put(body)
+                        .build()
+                ).execute().close()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    /**
      * Syncs the user's daily and hourly listening time usage to `/userTimeUsage/{userId}`
      * in the exact structure read by Admin.html (`getTodayUsage` and `renderUserTime`).
      */
@@ -2419,6 +2752,9 @@ class FirebaseSongsService(private val context: Context) {
     ) {
         val cleanId = userId.trim()
         if (cleanId.isEmpty() || isCurrentUserDeletedByAdmin) return
+        if (totalSeconds > 0) {
+            hasUploadedTimeUsageNonZero = true
+        }
         scope.launch {
             try {
                 val now = System.currentTimeMillis()

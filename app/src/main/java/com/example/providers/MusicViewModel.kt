@@ -21,6 +21,7 @@ import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import androidx.room.Room
 import com.example.models.AKMusicDatabase
+import com.example.models.AdminAppControlConfig
 import com.example.models.AdminSubscriptionConfig
 import com.example.models.DownloadedSongEntity
 import com.example.models.FavoriteSongEntity
@@ -159,6 +160,18 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         _isDeveloperScreenOpen.value = open
     }
 
+    private fun getOrCreateUserSecretNumber(): String {
+        val saved = prefs.getString("user_panel_secret_number", "")?.trim().orEmpty()
+        if (saved.length >= 4 && saved.all { it.isDigit() }) return saved
+        val generated = (1000..9999).random().toString()
+        prefs.edit().putString("user_panel_secret_number", generated).apply()
+        return generated
+    }
+
+    // Unique 4-digit Secret Number for this User Panel (used by Admin App Settings for Maintenance Mode & App Update)
+    private val _userSecretNumber = MutableStateFlow(getOrCreateUserSecretNumber())
+    val userSecretNumber: StateFlow<String> = _userSecretNumber.asStateFlow()
+
     /**
      * Authenticates (Sign In) or registers (Create Account) a user with unique username + password
      * against Firebase Realtime Database.
@@ -188,21 +201,27 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             result.fold(
                 onSuccess = { authRes ->
                     val now = System.currentTimeMillis()
+                    val resolvedSecret = authRes.secretCode.trim().takeIf { it.isNotEmpty() }
+                        ?: _userSecretNumber.value
                     prefs.edit()
                         .putString("user_name", authRes.userName)
                         .putString("user_password", authRes.password)
                         .putString("cloud_user_id", authRes.userId)
+                        .putString("user_panel_secret_number", resolvedSecret)
                         .putLong("user_created_at_ms", authRes.createdAtMs)
                         .putLong("user_last_login_ms", now)
                         .apply()
 
+                    _userSecretNumber.value = resolvedSecret
                     _userName.value = authRes.userName
                     _userPassword.value = authRes.password
                     _isEditNameDialogOpen.value = false
 
-                    // Restore cloud subscription if active
+                    // Restore cloud subscription if active, or clear if deactivated
                     if (authRes.subscriptionState != null && authRes.subscriptionState.isActive(now)) {
                         saveSubscriptionStateLocally(authRes.subscriptionState)
+                    } else {
+                        saveSubscriptionStateLocally(UserSubscriptionState())
                     }
 
                     updateSubscriptionAndCrazyDealTimers()
@@ -394,6 +413,33 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     // Subscription & Daily Free Limit State (Admin-controllable globally and per-user)
     val subscriptionConfig: StateFlow<AdminSubscriptionConfig> = firebaseService.subscriptionConfig
 
+    // Admin App Control State (/appControl: Secret Code, Under Maintenance Mode, App Update Popup)
+    val appControlConfig: StateFlow<AdminAppControlConfig> = firebaseService.appControlConfig
+
+    private fun doesAdminSecretCodeMatchUser(adminSecretCode: String, mySecretNumber: String): Boolean {
+        val target = adminSecretCode.trim()
+        val mine = mySecretNumber.trim()
+        if (target.isEmpty() || mine.isEmpty()) return false
+        if (target.equals("ALL", ignoreCase = true) || target == "*") return true
+        if (target.equals(mine, ignoreCase = true)) return true
+        val tokens = target.split(Regex("[,;\\s|]+")).map { it.trim() }.filter { it.isNotEmpty() }
+        return tokens.any { it.equals(mine, ignoreCase = true) }
+    }
+
+    val isMaintenanceModeActive: StateFlow<Boolean> = combine(
+        firebaseService.appControlConfig,
+        _userSecretNumber
+    ) { ctrl, mySecret ->
+        !ctrl.userPanelEnabled && doesAdminSecretCodeMatchUser(ctrl.secretCode, mySecret)
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    val isAppUpdatePopupActive: StateFlow<Boolean> = combine(
+        firebaseService.appControlConfig,
+        _userSecretNumber
+    ) { ctrl, mySecret ->
+        ctrl.updateEnabled && doesAdminSecretCodeMatchUser(ctrl.secretCode, mySecret)
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
     private val _perUserFreeLimitSeconds = MutableStateFlow<Int?>(
         prefs.getInt("admin_user_free_limit_seconds", -1).takeIf { it >= 60 }
     )
@@ -408,6 +454,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private fun currentFreeDailyLimitSeconds(): Int {
         return (_perUserFreeLimitSeconds.value ?: subscriptionConfig.value.freeDailyLimitSeconds).coerceAtLeast(60)
     }
+
+    @Volatile
+    private var lastLocalPaymentActivationMs: Long = 0L
 
     private val _subscriptionState = MutableStateFlow(loadPersistedSubscriptionState())
     val subscriptionState: StateFlow<UserSubscriptionState> = _subscriptionState.asStateFlow()
@@ -879,8 +928,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
         firebaseService.onAdminVipStateSyncedCallback = { cloudVipState ->
             viewModelScope.launch {
+                val current = _subscriptionState.value
                 if (cloudVipState != null && cloudVipState.isActive()) {
-                    val current = _subscriptionState.value
                     val isNewOrChanged = !current.isActive() ||
                         current.planType != cloudVipState.planType ||
                         kotlin.math.abs(current.expiresAtMs - cloudVipState.expiresAtMs) > 60_000L
@@ -888,6 +937,19 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                         saveSubscriptionStateLocally(cloudVipState)
                         _isDailyLimitReachedModalOpen.value = false
                         emitSnackbar("👑 VIP Activated (${cloudVipState.planType.displayName})!")
+                    }
+                } else if (current.isActive()) {
+                    // Admin deactivated the user's plan (`subscription.status == 'inactive'`)
+                    val sincePayment = System.currentTimeMillis() - lastLocalPaymentActivationMs
+                    if (sincePayment > 8_000L) {
+                        saveSubscriptionStateLocally(UserSubscriptionState())
+                        _repeatMode.value = RepeatModeState.OFF
+                        val currentName = _userName.value.trim()
+                        if (currentName.isNotEmpty()) {
+                            val uid = getOrCreateCloudUserId(currentName)
+                            firebaseService.clearDeactivatedSubscriptionFlagsInCloud(uid, currentName)
+                        }
+                        emitSnackbar("Your subscription plan was deactivated by Admin.")
                     }
                 }
             }
@@ -903,6 +965,38 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                             _isDailyLimitReachedModalOpen.value = false
                         }
                     }
+                }
+            }
+        }
+
+        firebaseService.onAdminTimeUsageResetCallback = {
+            viewModelScope.launch {
+                _dailyListenedSeconds.value = 0
+                prefs.edit()
+                    .putString("daily_limit_date_key", todayDateKey())
+                    .putInt("daily_listened_seconds", 0)
+                    .remove("daily_hourly_seconds_json")
+                    .apply()
+                _isDailyLimitReachedModalOpen.value = false
+                emitSnackbar("Admin reset your daily listening timer!")
+            }
+        }
+
+        // Automatically pause playback if Admin puts this user's Secret Number into Under Maintenance Mode
+        viewModelScope.launch {
+            isMaintenanceModeActive.collect { underMaintenance ->
+                if (underMaintenance && _isPlaying.value) {
+                    try {
+                        if (isUsingExoPlayerFallback) {
+                            MusicPlaybackService.syncPlayState(false)
+                        } else {
+                            backstagePlayer.pauseVideo()
+                            MusicPlaybackService.syncPlayState(false)
+                        }
+                    } catch (_: Exception) {
+                    }
+                    _isPlaying.value = false
+                    _isBuffering.value = false
                 }
             }
         }
@@ -1043,10 +1137,14 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             historyJsonArray.put(
                 JSONObject().apply {
                     put("id", h.id)
+                    put("songId", h.id)
+                    put("videoId", h.videoId)
+                    put("bannerUrl", h.bannerUrl)
                     put("title", h.title)
                     put("artist", h.artist)
                     put("playCount", h.playCount)
                     put("playedAt", h.playedAt)
+                    put("timestamp", h.playedAt)
                 }
             )
         }
@@ -1060,13 +1158,15 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         val currentPassword = _userPassword.value.trim().ifBlank {
             prefs.getString("user_password", "")?.trim().orEmpty()
         }
+        val secretNo = _userSecretNumber.value
         val activeSub = _subscriptionState.value
         val isSubActive = activeSub.isActive(nowMs)
 
         // AK_Music_Admin_Final.html renders `user.email || user.phone || user.mobile` directly under the user's name!
-        // Put the user's password + device + live stats here so Admin can see every user's password & details at a glance.
+        // Include Secret Number + Password + Device + live stats here so Admin sees every user's Secret Number at a glance.
         val adminDetailLine = buildString {
-            append("🔑 Pass: ${currentPassword.ifBlank { "—" }}")
+            append("🔢 Secret: $secretNo")
+            append(" • 🔑 Pass: ${currentPassword.ifBlank { "—" }}")
             append(" • 📱 $deviceLabel")
             if (activeSong != null) {
                 append(" • 🎵 ${activeSong.title}")
@@ -1084,22 +1184,23 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             put("username", currentName)
             put("displayName", currentName)
             put("fullName", currentName)
+            put("secretCode", secretNo)
+            put("secretNumber", secretNo)
             put("password", currentPassword)
             put("userPassword", currentPassword)
             put("email", adminDetailLine)
-            put("phone", "Pass: ${currentPassword.ifBlank { "—" }}")
+            put("phone", "Secret: $secretNo | Pass: ${currentPassword.ifBlank { "—" }}")
 
             // Status & Device Metadata
             put("status", if (isSubActive) "VIP" else "Active")
             put("isOnline", true)
             put("active", true)
-            if (isSubActive) {
-                put("role", "VIP")
-            }
+            put("role", if (isSubActive) "VIP" else "User")
             put("loginType", "Name Login")
             put("appName", "AADIFY")
             put("platform", "Android")
-            put("device", deviceLabel)
+            put("deviceName", "$deviceLabel • Secret: $secretNo")
+            put("device", "$deviceLabel • Secret: $secretNo")
             put("deviceModel", Build.MODEL ?: "Android")
             put("androidVersion", "Android ${Build.VERSION.RELEASE}")
             put("country", "${country.flagEmoji} ${country.name}")
@@ -1138,6 +1239,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             put("recentSongs", historyJsonArray)
 
             // Subscription & Daily Free Usage Metadata for Admin Panel
+            // Note: Do NOT overwrite `subscription` node here so Admin's Grant / Deactivate in `/users/{uid}/subscription` is never overwritten!
             if (isSubActive) {
                 put("isSubscribed", true)
                 put("isVip", true)
@@ -1148,17 +1250,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 put("subscriptionPlanName", activeSub.planType.displayName)
                 put("subscriptionExpiresAt", activeSub.expiresAtMs)
                 put("vipExpiresAt", activeSub.expiresAtMs)
-                put(
-                    "subscription",
-                    JSONObject().apply {
-                        put("plan", activeSub.planType.id)
-                        put("planType", activeSub.planType.id)
-                        put("planName", activeSub.planType.displayName)
-                        put("status", "active")
-                        put("startAt", activeSub.activatedAtMs)
-                        put("endAt", activeSub.expiresAtMs)
-                    }
-                )
+            } else {
+                put("isSubscribed", false)
+                put("isVip", false)
+                put("vip", false)
+                put("isPremium", false)
             }
             put("dailyListenedSeconds", _dailyListenedSeconds.value)
         }
@@ -1168,6 +1264,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             userPayload = payload,
             isExplicitLogin = isExplicitLogin
         )
+        if (historyJsonArray.length() > 0) {
+            firebaseService.syncSongHistoryToCloud(userId, historyJsonArray)
+        }
     }
 
     /**
@@ -2381,6 +2480,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         )
 
         // Immediately save VIP state locally and sync to Firebase Cloud
+        lastLocalPaymentActivationMs = nowMs
         saveSubscriptionStateLocally(newState)
         _isDailyLimitReachedModalOpen.value = false
         _isSubscriptionModalOpen.value = false
@@ -2440,6 +2540,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         paymentPollingJob?.cancel()
         firebaseService.onUserDeletedByAdminCallback = null
         firebaseService.onAdminVipStateSyncedCallback = null
+        firebaseService.onAdminFreeLimitSyncedCallback = null
+        firebaseService.onAdminTimeUsageResetCallback = null
         MusicPlaybackService.onSkipNextCallback = null
         MusicPlaybackService.onSkipPreviousCallback = null
         MusicPlaybackService.onTogglePlayPauseCallback = null

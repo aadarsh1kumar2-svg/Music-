@@ -114,3 +114,27 @@ data class UserSubscriptionState(
         return ((expiresAtMs - nowMs) / 1000L).coerceAtLeast(0L)
     }
 }
+
+/**
+ * Live Admin-editable App Control configuration synced from `/appControl` in Firebase Realtime Database.
+ * Matches Admin.html `page-appSettings`:
+ * - `secretCode`: Secret Code / Secret Number entered by Admin
+ * - `userPanelEnabled`: true = normal, false = show Maintenance screen for matching secretCode
+ * - `maintenanceMessage`: message shown on the Maintenance screen
+ * - `updateEnabled`: true = show App Update popup for matching secretCode
+ * - `updateLink`: URL opened in Chrome browser when user clicks "Update"
+ * - `updateMessage`: message shown in the App Update popup
+ * - `closeAppButtonEnabled`: whether close-app option is enabled
+ * - `updatedAt`: timestamp of last Admin update
+ */
+data class AdminAppControlConfig(
+    val secretCode: String = "",
+    val userPanelEnabled: Boolean = true,
+    val maintenanceMessage: String = "App is under maintenance. Please try again later.",
+    val updateEnabled: Boolean = false,
+    val updateLink: String = "",
+    val updateMessage: String = "A new update is available.",
+    val closeAppButtonEnabled: Boolean = true,
+    val updatedAt: Long = 0L
+)
+
