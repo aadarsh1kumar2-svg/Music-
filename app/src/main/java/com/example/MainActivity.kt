@@ -196,9 +196,11 @@ fun AKMusicAppRoot(
     ) { results ->
         val audioGranted = results[audioPermissionName] == true || musicViewModel.checkAudioPermissionGranted()
         musicViewModel.onAudioStoragePermissionResult(audioGranted)
+        com.example.services.MusicPlaybackService.ensureBackgroundNotificationWatcher(context)
     }
 
     LaunchedEffect(Unit) {
+        com.example.services.MusicPlaybackService.ensureBackgroundNotificationWatcher(context)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val notifGranted = ContextCompat.checkSelfPermission(
                 context,
@@ -931,6 +933,7 @@ fun AKMusicAppRoot(
                                         currentQueue = queue,
                                         currentSong = currentSong,
                                         isPlaying = isPlaying,
+                                        isUserSubscribed = subscriptionState.isActive(),
                                         repeatMode = repeatMode,
                                         onNavigateSubScreen = { musicViewModel.openLibrarySubScreen(it) },
                                         onSongClick = { song, list -> musicViewModel.playSong(song, list) },

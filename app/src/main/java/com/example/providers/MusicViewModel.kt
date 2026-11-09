@@ -98,6 +98,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         val PLAYBACK_SPEEDS = listOf(0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
         const val FREE_DAILY_LIMIT_SECONDS = 3600 // 1 hour (3600 seconds) per day for Free users
         const val CRAZY_DEAL_WINDOW_MS = 3L * 24L * 60L * 60L * 1000L // 3 days (72 hours) for new users
+        const val CURRENT_APP_UPDATE_SECRET_CODE = "5829"
+        private const val CURRENT_SECRET_CODE_VERSION = 2
     }
 
     private val appContext = application.applicationContext
@@ -161,14 +163,24 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun getOrCreateUserSecretNumber(): String {
+        val savedVersion = prefs.getInt("secret_code_version", 0)
+        if (savedVersion < CURRENT_SECRET_CODE_VERSION) {
+            prefs.edit()
+                .putString("user_panel_secret_number", CURRENT_APP_UPDATE_SECRET_CODE)
+                .putInt("secret_code_version", CURRENT_SECRET_CODE_VERSION)
+                .apply()
+            return CURRENT_APP_UPDATE_SECRET_CODE
+        }
         val saved = prefs.getString("user_panel_secret_number", "")?.trim().orEmpty()
         if (saved.length >= 4 && saved.all { it.isDigit() }) return saved
-        val generated = (1000..9999).random().toString()
-        prefs.edit().putString("user_panel_secret_number", generated).apply()
-        return generated
+        prefs.edit()
+            .putString("user_panel_secret_number", CURRENT_APP_UPDATE_SECRET_CODE)
+            .putInt("secret_code_version", CURRENT_SECRET_CODE_VERSION)
+            .apply()
+        return CURRENT_APP_UPDATE_SECRET_CODE
     }
 
-    // Unique 4-digit Secret Number for this User Panel (used by Admin App Settings for Maintenance Mode & App Update)
+    // Unique 4-digit Secret Number for this User Panel (changed on every app update: 5829)
     private val _userSecretNumber = MutableStateFlow(getOrCreateUserSecretNumber())
     val userSecretNumber: StateFlow<String> = _userSecretNumber.asStateFlow()
 
@@ -201,13 +213,14 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             result.fold(
                 onSuccess = { authRes ->
                     val now = System.currentTimeMillis()
-                    val resolvedSecret = authRes.secretCode.trim().takeIf { it.isNotEmpty() }
-                        ?: _userSecretNumber.value
+                    // Keep the rotated App Update Secret Code (5829) for this update so Admin can target this build or user
+                    val resolvedSecret = CURRENT_APP_UPDATE_SECRET_CODE
                     prefs.edit()
                         .putString("user_name", authRes.userName)
                         .putString("user_password", authRes.password)
                         .putString("cloud_user_id", authRes.userId)
                         .putString("user_panel_secret_number", resolvedSecret)
+                        .putInt("secret_code_version", CURRENT_SECRET_CODE_VERSION)
                         .putLong("user_created_at_ms", authRes.createdAtMs)
                         .putLong("user_last_login_ms", now)
                         .apply()
@@ -419,11 +432,17 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private fun doesAdminSecretCodeMatchUser(adminSecretCode: String, mySecretNumber: String): Boolean {
         val target = adminSecretCode.trim()
         val mine = mySecretNumber.trim()
-        if (target.isEmpty() || mine.isEmpty()) return false
+        // If Admin enables Update or Maintenance without typing a specific Secret Code, apply to all users;
+        // if Admin types a Secret Code, match against this user's Secret Number OR the current app build Secret Code (5829).
+        if (target.isEmpty()) return true
         if (target.equals("ALL", ignoreCase = true) || target == "*") return true
-        if (target.equals(mine, ignoreCase = true)) return true
+        if (mine.isNotEmpty() && target.equals(mine, ignoreCase = true)) return true
+        if (target.equals(CURRENT_APP_UPDATE_SECRET_CODE, ignoreCase = true)) return true
         val tokens = target.split(Regex("[,;\\s|]+")).map { it.trim() }.filter { it.isNotEmpty() }
-        return tokens.any { it.equals(mine, ignoreCase = true) }
+        return tokens.any {
+            (mine.isNotEmpty() && it.equals(mine, ignoreCase = true)) ||
+                it.equals(CURRENT_APP_UPDATE_SECRET_CODE, ignoreCase = true)
+        }
     }
 
     val isMaintenanceModeActive: StateFlow<Boolean> = combine(
@@ -982,21 +1001,13 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        // Automatically pause playback if Admin puts this user's Secret Number into Under Maintenance Mode
+        // Immediately stop any playing song when Admin triggers App Update OR Under Maintenance Mode!
         viewModelScope.launch {
-            isMaintenanceModeActive.collect { underMaintenance ->
-                if (underMaintenance && _isPlaying.value) {
-                    try {
-                        if (isUsingExoPlayerFallback) {
-                            MusicPlaybackService.syncPlayState(false)
-                        } else {
-                            backstagePlayer.pauseVideo()
-                            MusicPlaybackService.syncPlayState(false)
-                        }
-                    } catch (_: Exception) {
-                    }
-                    _isPlaying.value = false
-                    _isBuffering.value = false
+            combine(isMaintenanceModeActive, isAppUpdatePopupActive) { underMaintenance, appUpdateActive ->
+                underMaintenance || appUpdateActive
+            }.collect { shouldForceStopPlayback ->
+                if (shouldForceStopPlayback) {
+                    stopPlaybackImmediatelyForAdminLock()
                 }
             }
         }
@@ -1292,8 +1303,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             if (activeFromService != null) {
                 _currentSong.value = activeFromService
                 _queue.value = restoredQueue.ifEmpty { listOf(activeFromService) }
-                _isPlaying.value = MusicPlaybackService.isCurrentlyPlaying()
-                isCurrentSongLoadedInEngine = true
+                val engineReadyNow = isUsingExoPlayerFallback ||
+                    backstagePlayer.isVideoReadyForPlay(activeFromService.cleanVideoId)
+                val actuallyPlaying = MusicPlaybackService.isCurrentlyPlaying() && engineReadyNow
+                _isPlaying.value = actuallyPlaying
+                _isBuffering.value = false
+                isCurrentSongLoadedInEngine = actuallyPlaying
                 return
             }
 
@@ -1536,12 +1551,43 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         _isLyricsOverlayOpen.value = open
     }
 
+    private val recentSessionPlayedIds = ArrayDeque<String>()
+
+    private fun recordPlayedSongForVibeEngine(songId: String) {
+        if (songId.isBlank()) return
+        recentSessionPlayedIds.remove(songId)
+        recentSessionPlayedIds.addLast(songId)
+        while (recentSessionPlayedIds.size > 15) {
+            recentSessionPlayedIds.removeFirst()
+        }
+    }
+
+    private fun stopPlaybackImmediatelyForAdminLock() {
+        playbackJob?.cancel()
+        try {
+            prefs.edit().putLong("last_position_ms", _currentPositionMs.value).apply()
+            backstagePlayer.pauseVideo()
+            backstagePlayer.stopAndClear()
+            MusicPlaybackService.syncPlayState(false)
+        } catch (_: Exception) {
+        }
+        isCurrentSongLoadedInEngine = false
+        _isPlaying.value = false
+        _isBuffering.value = false
+    }
+
     fun playSong(
         song: Song,
         customQueue: List<Song>? = null,
         startPositionMs: Long = 0L,
         forceRestartFromBeginning: Boolean = false
     ) {
+        // Block playback if Admin App Update or Maintenance Mode is active
+        if (isMaintenanceModeActive.value || isAppUpdatePopupActive.value) {
+            stopPlaybackImmediatelyForAdminLock()
+            return
+        }
+
         // Enforce Admin-configured daily listening limit for Free users
         refreshDailyLimitBucketIfNeeded()
         if (!_subscriptionState.value.isActive() && _dailyListenedSeconds.value >= currentFreeDailyLimitSeconds()) {
@@ -1560,22 +1606,24 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
         _queue.value = resolvedQueue
 
-        // If the user taps the SAME song that is currently paused mid-way, resume it from where it stopped
-        // instead of restarting from 0:00!
+        // Check whether the engine genuinely has this song loaded and ready
         val isSameActiveSong = _currentSong.value?.id == song.id && !forceRestartFromBeginning && !hasHandledEndForCurrentSong
-        if (isSameActiveSong && isCurrentSongLoadedInEngine && startPositionMs == 0L) {
-            if (!_isPlaying.value) {
-                togglePlayPause()
-            }
+        val engineReadyForSameSong = isCurrentSongLoadedInEngine &&
+            (isUsingExoPlayerFallback || backstagePlayer.isVideoReadyForPlay(song.cleanVideoId))
+
+        if (isSameActiveSong && engineReadyForSameSong && startPositionMs == 0L && !_isPlaying.value) {
+            togglePlayPause()
             return
         }
 
         val resolvedStartMs = when {
             forceRestartFromBeginning -> 0L
             startPositionMs > 0L -> startPositionMs
-            isSameActiveSong -> getValidResumePositionMs()
+            isSameActiveSong && !_isPlaying.value -> getValidResumePositionMs()
             else -> 0L
         }
+
+        recordPlayedSongForVibeEngine(song.id)
 
         // Synchronously invalidate the previous track in BackstageYouTubePlayerController BEFORE
         // any coroutine suspension so trailing callbacks from the previous song can never skip the new song!
@@ -1665,6 +1713,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             if (playableVideoId.isBlank()) {
                 _isBuffering.value = false
                 _isPlaying.value = false
+                isCurrentSongLoadedInEngine = false
                 emitSnackbar("Could not locate audio stream for \"${song.title}\".")
                 return@launch
             }
@@ -1711,14 +1760,25 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     fun togglePlayPause() {
         val activeSong = _currentSong.value ?: return
+        if (isMaintenanceModeActive.value || isAppUpdatePopupActive.value) {
+            stopPlaybackImmediatelyForAdminLock()
+            return
+        }
         refreshDailyLimitBucketIfNeeded()
         if (!_isPlaying.value && !_subscriptionState.value.isActive() && _dailyListenedSeconds.value >= currentFreeDailyLimitSeconds()) {
             pausePlaybackForDailyLimit()
             return
         }
         MusicPlaybackService.clearExternalMediaPauseState()
-        if (!isCurrentSongLoadedInEngine) {
-            playSong(activeSong, _queue.value, startPositionMs = getValidResumePositionMs())
+        val engineReady = isCurrentSongLoadedInEngine &&
+            (isUsingExoPlayerFallback || backstagePlayer.isVideoReadyForPlay(activeSong.cleanVideoId))
+        if (!engineReady || hasHandledEndForCurrentSong) {
+            playSong(
+                song = activeSong,
+                customQueue = _queue.value,
+                startPositionMs = if (hasHandledEndForCurrentSong) 0L else getValidResumePositionMs(),
+                forceRestartFromBeginning = hasHandledEndForCurrentSong
+            )
             return
         }
         if (isUsingExoPlayerFallback) {
@@ -1737,13 +1797,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 _isPlaying.value = false
                 _isBuffering.value = false
             } else {
-                if (hasHandledEndForCurrentSong) {
-                    playSong(activeSong, _queue.value, forceRestartFromBeginning = true)
-                } else {
-                    backstagePlayer.playVideo()
-                    MusicPlaybackService.syncPlayState(true)
-                    _isPlaying.value = true
-                }
+                backstagePlayer.playVideo()
+                MusicPlaybackService.syncPlayState(true)
+                _isPlaying.value = true
             }
         }
     }
@@ -1770,6 +1826,154 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         seekToPosition(targetPos)
     }
 
+    /**
+     * Smart Vibe Auto-Queue Engine:
+     * Analyzes the current song's mood/vibe (Romantic, Sad, Lofi/Chill, Party/Dance, Punjabi/Desi,
+     * HipHop/Phonk, Devotional, Retro, Pop), real artist name, and title keywords.
+     * If a strong vibe match exists in the catalog/queue, plays that matching track next;
+     * otherwise advances to the next sequential track in the queue.
+     */
+    private fun extractSongVibeTags(song: Song): Set<String> {
+        val combined = "${song.title} ${song.artist}".lowercase(Locale.US)
+        val tags = mutableSetOf<String>()
+
+        if (Regex("\\b(lofi|lo-fi|slowed|reverb|chill|relax|sleep|aesthetic|unplugged|acoustic|mashup)\\b").containsMatchIn(combined)) {
+            tags.add("VIBE_LOFI_CHILL")
+        }
+        if (Regex("\\b(sad|dil|tut|toot|judai|bewafa|rona|cry|alone|heartbreak|dard|khamoshi|alvida|yaad|adhura|chhod|bichhad)\\b").containsMatchIn(combined)) {
+            tags.add("VIBE_SAD_EMOTIONAL")
+        }
+        if (Regex("\\b(love|ishq|pyar|pyaar|mohabbat|romantic|jaan|sanam|mahi|saajana|sajna|tere|mera|tum|tu|hum|chahat|raabta|kesariya|heeriye|ve|soniya)\\b").containsMatchIn(combined)) {
+            tags.add("VIBE_ROMANTIC_LOVE")
+        }
+        if (Regex("\\b(party|dance|dj|club|nach|naach|bhangra|beat|remix|bass|hookah|daaru|badshah|honey singh|nehakakkar)\\b").containsMatchIn(combined)) {
+            tags.add("VIBE_PARTY_DANCE")
+        }
+        if (Regex("\\b(punjabi|jatt|sidhu|moose|aujla|karan|ap dhillon|shubh|diljit|gabhru|kudi|munda|velly|yaar|pind|brown)\\b").containsMatchIn(combined)) {
+            tags.add("VIBE_PUNJABI_DESI")
+        }
+        if (Regex("\\b(phonk|gym|workout|sigma|attitude|rap|hip hop|hiphop|krsna|raftaar|emiway|mc stan|divine|seedhe maut|talha|295|millionaire)\\b").containsMatchIn(combined)) {
+            tags.add("VIBE_HIPHOP_PHONK")
+        }
+        if (Regex("\\b(bhajan|shiv|mahadev|ram|krishna|hanuman|arti|aarti|devotional|bhakti|mantra|bholenath|ganesh|mata)\\b").containsMatchIn(combined)) {
+            tags.add("VIBE_DEVOTIONAL")
+        }
+        if (Regex("\\b(90s|retro|old|classic|kishore|lata|rafi|mukesh|kumar sanu|udit|alka|evergreen)\\b").containsMatchIn(combined)) {
+            tags.add("VIBE_RETRO_CLASSIC")
+        }
+        return tags
+    }
+
+    private fun extractRealArtistTokens(song: Song): Set<String> {
+        val genericNames = setOf("ak music", "aadify", "unknown", "unknown artist", "device audio", "youtube", "official", "music", "audio")
+        val tokens = mutableSetOf<String>()
+        val rawArtist = song.artist.trim().lowercase(Locale.US)
+        if (rawArtist.isNotBlank() && !genericNames.contains(rawArtist)) {
+            rawArtist.split(Regex("[,&/|]|\\bfeat\\.?\\b|\\bft\\.?\\b"))
+                .map { it.trim() }
+                .filter { it.length >= 3 && !genericNames.contains(it) }
+                .forEach { tokens.add(it) }
+        }
+        // Also extract artist from "Artist - Song" or "Song - Artist" in title
+        val titleParts = song.title.split(Regex("\\s*[-–—|]\\s*"))
+        if (titleParts.size >= 2) {
+            for (part in titleParts) {
+                val cleaned = part.replace(Regex("\\([^)]*\\)|\\[[^\\]]*]"), "").trim().lowercase(Locale.US)
+                if (cleaned.length in 3..28 && !genericNames.contains(cleaned)) {
+                    tokens.add(cleaned)
+                }
+            }
+        }
+        return tokens
+    }
+
+    private fun extractTitleKeywords(song: Song): Set<String> {
+        val stopWords = setOf(
+            "the", "and", "for", "with", "from", "song", "video", "official", "audio",
+            "full", "lyrics", "lyrical", "new", "hit", "music", "hai", "mein", "tera",
+            "meri", "mere", "tum", "kya", "nahi", "aur", "par", "bhi", "koi"
+        )
+        return song.title
+            .lowercase(Locale.US)
+            .replace(Regex("[^a-z0-9\\s]"), " ")
+            .split(Regex("\\s+"))
+            .map { it.trim() }
+            .filter { it.length >= 4 && !stopWords.contains(it) }
+            .toSet()
+    }
+
+    private fun selectSmartNextSongByVibe(current: Song, queueList: List<Song>): Song {
+        val pool = (queueList + allSongs.value + _countryTrendingSongs.value)
+            .distinctBy { it.id }
+            .filter { it.id != current.id }
+
+        if (pool.isEmpty()) return current
+
+        val currentVibes = extractSongVibeTags(current)
+        val currentArtists = extractRealArtistTokens(current)
+        val currentKeywords = extractTitleKeywords(current)
+
+        var bestCandidate: Song? = null
+        var bestScore = Int.MIN_VALUE
+
+        for (candidate in pool) {
+            var score = 0
+            val candVibes = extractSongVibeTags(candidate)
+            val candArtists = extractRealArtistTokens(candidate)
+            val candKeywords = extractTitleKeywords(candidate)
+
+            val sharedVibes = currentVibes.intersect(candVibes)
+            if (sharedVibes.isNotEmpty()) {
+                score += 55 + (sharedVibes.size - 1) * 20
+            }
+
+            val sharedArtists = currentArtists.intersect(candArtists)
+            if (sharedArtists.isNotEmpty()) {
+                score += 45
+            }
+
+            val sharedWords = currentKeywords.intersect(candKeywords)
+            if (sharedWords.isNotEmpty()) {
+                score += (sharedWords.size * 20).coerceAtMost(40)
+            }
+
+            // Slight preference for songs already in the active queue
+            if (queueList.any { it.id == candidate.id }) {
+                score += 8
+            }
+
+            // Avoid repeating songs played very recently in this session
+            if (recentSessionPlayedIds.contains(candidate.id)) {
+                score -= 95
+            }
+
+            if (score > bestScore) {
+                bestScore = score
+                bestCandidate = candidate
+            }
+        }
+
+        // If a genuine vibe/artist/theme match was found, play that vibe-matched song!
+        if (bestCandidate != null && bestScore >= 25) {
+            return bestCandidate
+        }
+
+        // Otherwise fallback to the next sequential unplayed track in queueList
+        val idx = queueList.indexOfFirst { it.id == current.id }
+        if (queueList.size > 1) {
+            for (offset in 1 until queueList.size) {
+                val candIdx = if (idx >= 0) (idx + offset) % queueList.size else offset % queueList.size
+                val cand = queueList[candIdx]
+                if (cand.id != current.id && !recentSessionPlayedIds.contains(cand.id)) {
+                    return cand
+                }
+            }
+            val nextIndex = if (idx in 0 until queueList.lastIndex) idx + 1 else 0
+            return queueList[nextIndex]
+        }
+        return pool.first()
+    }
+
     fun skipToNext() {
         val current = _currentSong.value ?: return
         val list = _queue.value.ifEmpty { allSongs.value }
@@ -1784,9 +1988,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
-        val idx = list.indexOfFirst { it.id == current.id }
-        val nextIndex = if (idx in 0 until list.lastIndex) idx + 1 else 0
-        playSong(list[nextIndex], list)
+        val nextSong = selectSmartNextSongByVibe(current, list)
+        playSong(nextSong, list, forceRestartFromBeginning = true)
     }
 
     fun skipToPrevious() {
@@ -1799,7 +2002,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
         val idx = list.indexOfFirst { it.id == current.id }
         val prevIndex = if (idx > 0) idx - 1 else list.lastIndex
-        playSong(list[prevIndex], list)
+        playSong(list[prevIndex], list, forceRestartFromBeginning = true)
     }
 
     private fun handleTrackEnded() {
@@ -1814,9 +2017,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 playSong(current, list, forceRestartFromBeginning = true)
             }
             RepeatModeState.ALL, RepeatModeState.OFF -> {
-                val idx = list.indexOfFirst { it.id == current.id }
-                val nextIndex = if (idx in 0 until list.lastIndex) idx + 1 else 0
-                playSong(list[nextIndex], list, forceRestartFromBeginning = true)
+                val nextSong = selectSmartNextSongByVibe(current, list)
+                playSong(nextSong, list, forceRestartFromBeginning = true)
             }
         }
     }

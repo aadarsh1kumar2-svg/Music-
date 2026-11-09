@@ -77,6 +77,7 @@ class MusicPlaybackService : MediaSessionService() {
         const val ACTION_NOTIFICATION_PLAY_PAUSE = "com.example.services.ACTION_NOTIFICATION_PLAY_PAUSE"
         const val ACTION_NOTIFICATION_NEXT = "com.example.services.ACTION_NOTIFICATION_NEXT"
         const val ACTION_NOTIFICATION_STOP = "com.example.services.ACTION_NOTIFICATION_STOP"
+        const val ACTION_WATCH_NOTIFICATIONS = "com.example.services.ACTION_WATCH_NOTIFICATIONS"
 
         private val mainHandler = Handler(Looper.getMainLooper())
         private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -93,6 +94,9 @@ class MusicPlaybackService : MediaSessionService() {
 
         @Volatile
         private var isForegroundServiceStarted: Boolean = false
+
+        @Volatile
+        private var isBackgroundNotifWatcherStarted: Boolean = false
 
         @Volatile
         private var pendingSync: SyncRequest? = null
@@ -147,6 +151,99 @@ class MusicPlaybackService : MediaSessionService() {
         fun getCurrentSyncedSong(): Song? = pendingSync?.song
 
         fun isCurrentlyPlaying(): Boolean = pendingSync?.isPlaying == true
+
+        /**
+         * Starts a persistent background notification watcher so that once the user opens the app
+         * and allows notifications, Admin notifications from Firebase (/notifications, /messages, /broadcast)
+         * and FCM arrive even when the user closes the app.
+         */
+        fun ensureBackgroundNotificationWatcher(context: Context) {
+            val appCtx = context.applicationContext
+            AADIFYMessagingService.initializeAndSubscribe(appCtx)
+            try {
+                val intent = Intent(appCtx, MusicPlaybackService::class.java).apply {
+                    action = ACTION_WATCH_NOTIFICATIONS
+                }
+                appCtx.startService(intent)
+            } catch (_: Exception) {
+            }
+            if (!isBackgroundNotifWatcherStarted) {
+                isBackgroundNotifWatcherStarted = true
+                ioScope.launch {
+                    val installBaselineMs = AdminNotificationHelper.getOrInitInstallBaselineMs(appCtx)
+                    val endpoints = listOf("notifications", "messages", "notification", "broadcast")
+                    while (true) {
+                        for (node in endpoints) {
+                            try {
+                                val nodeName = "rtdb_$node"
+                                val isFirstSeed = !AdminNotificationHelper.isNodeBaselineSeeded(appCtx, nodeName)
+                                val req = Request.Builder()
+                                    .url("${FirebaseSongsService.DATABASE_URL}/$node.json")
+                                    .get()
+                                    .build()
+                                artworkHttpClient.newCall(req).execute().use { resp ->
+                                    if (!resp.isSuccessful) return@use
+                                    val bodyStr = resp.body?.string()?.trim().orEmpty()
+                                    if (bodyStr.isEmpty() || bodyStr == "null" || !bodyStr.startsWith("{")) {
+                                        if (isFirstSeed) {
+                                            AdminNotificationHelper.markNodeBaselineSeeded(appCtx, nodeName)
+                                        }
+                                        return@use
+                                    }
+                                    val root = org.json.JSONObject(bodyStr)
+                                    val keys = root.keys()
+                                    while (keys.hasNext()) {
+                                        val k = keys.next()
+                                        val obj = root.optJSONObject(k) ?: continue
+                                        val title = obj.optString("title").ifBlank {
+                                            obj.optString("heading").ifBlank {
+                                                obj.optString("subject").ifBlank { obj.optString("name") }
+                                            }
+                                        }
+                                        val body = obj.optString("body").ifBlank {
+                                            obj.optString("message").ifBlank {
+                                                obj.optString("paragraph").ifBlank {
+                                                    obj.optString("text").ifBlank {
+                                                        obj.optString("description").ifBlank { obj.optString("content") }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if (title.isBlank() && body.isBlank()) continue
+                                        val imageUrl = AdminNotificationHelper.extractImageUrlFromJson(obj)
+                                        val rawTs = obj.optLong("timestamp", obj.optLong("createdAt", obj.optLong("time", 0L)))
+                                        val ts = if (rawTs in 1_000_000_000L..9_999_999_999L) rawTs * 1000L else rawTs
+                                        val uniqueKey = "rtdb_${k}_${ts}_${title}"
+                                        val isOld = if (ts > 0L) ts < (installBaselineMs - 15_000L) else isFirstSeed
+                                        if (isOld) {
+                                            AdminNotificationHelper.markNotificationSilentlySeen(
+                                                context = appCtx,
+                                                uniqueKey = uniqueKey,
+                                                title = title.ifBlank { "AADIFY" },
+                                                body = body
+                                            )
+                                        } else {
+                                            AdminNotificationHelper.showAdminNotificationBlocking(
+                                                context = appCtx,
+                                                uniqueKey = uniqueKey,
+                                                title = title.ifBlank { "AADIFY" },
+                                                body = body,
+                                                imageUrl = imageUrl
+                                            )
+                                        }
+                                    }
+                                    if (isFirstSeed) {
+                                        AdminNotificationHelper.markNodeBaselineSeeded(appCtx, nodeName)
+                                    }
+                                }
+                            } catch (_: Exception) {
+                            }
+                        }
+                        kotlinx.coroutines.delay(8_000L)
+                    }
+                }
+            }
+        }
 
         fun notifyUnexpectedOnlinePause() {
             mainHandler.post {
@@ -814,8 +911,12 @@ class MusicPlaybackService : MediaSessionService() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
+        ensureBackgroundNotificationWatcher(applicationContext)
         val action = intent?.action
         when (action) {
+            ACTION_WATCH_NOTIFICATIONS -> {
+                return START_STICKY
+            }
             ACTION_NOTIFICATION_PREV -> {
                 onSkipPreviousCallback?.invoke()
                 return START_STICKY
@@ -843,9 +944,11 @@ class MusicPlaybackService : MediaSessionService() {
             }
         }
         val activeSong = pendingSync?.song
-        val activePlaying = pendingSync?.isPlaying ?: true
-        val cachedBytes = activeSong?.highResBannerUrl?.takeIf { it.isNotBlank() }?.let { artworkBytesCache.get(it) }
-        postOrUpdateForegroundMediaNotification(activeSong, activePlaying, cachedBytes)
+        if (activeSong != null) {
+            val activePlaying = pendingSync?.isPlaying ?: true
+            val cachedBytes = activeSong.highResBannerUrl.takeIf { it.isNotBlank() }?.let { artworkBytesCache.get(it) }
+            postOrUpdateForegroundMediaNotification(activeSong, activePlaying, cachedBytes)
+        }
         return START_STICKY
     }
 
@@ -1457,10 +1560,26 @@ class MusicPlaybackService : MediaSessionService() {
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        val player = mediaSession?.player
-        if (player == null || (!player.playWhenReady && !isPausedByExternalMedia) || player.mediaItemCount == 0) {
-            stopSelf()
+        // Keep background notification watcher alive and schedule a quick restart if the task is swiped away
+        try {
+            val restartIntent = Intent(applicationContext, MusicPlaybackService::class.java).apply {
+                action = ACTION_WATCH_NOTIFICATIONS
+            }
+            val pendingRestart = PendingIntent.getService(
+                applicationContext,
+                777,
+                restartIntent,
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_ONE_SHOT
+            )
+            val alarmManager = getSystemService(Context.ALARM_SERVICE) as? android.app.AlarmManager
+            alarmManager?.set(
+                android.app.AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                android.os.SystemClock.elapsedRealtime() + 2500L,
+                pendingRestart
+            )
+        } catch (_: Exception) {
         }
+        ensureBackgroundNotificationWatcher(applicationContext)
     }
 
     override fun onDestroy() {

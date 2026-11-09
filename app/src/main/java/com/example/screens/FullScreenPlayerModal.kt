@@ -744,6 +744,10 @@ private fun LrcLibLyricsOverlayPanel(
     onRetry: () -> Unit,
     onClose: () -> Unit
 ) {
+    var languageMode by remember {
+        mutableStateOf(com.example.services.LyricsLanguageMode.BOTH)
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -767,44 +771,82 @@ private fun LrcLibLyricsOverlayPanel(
         Column(
             modifier = Modifier.fillMaxSize()
         ) {
-            // Lyrics Panel Header
+            // Lyrics Panel Header + Language Mode Selector (Hinglish + Original / Hinglish / Original)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Surface(
-                    color = SpotifyDarkGreenPill,
-                    shape = RoundedCornerShape(50),
-                    modifier = Modifier.border(
-                        width = 1.dp,
-                        color = SpotifyVibrantGreen.copy(alpha = 0.8f),
-                        shape = RoundedCornerShape(50)
-                    )
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
                 ) {
-                    val badgeText = when (lyricsState) {
-                        is LyricsUiState.Success -> if (lyricsState.isSynced) "● SYNCED LYRICS" else "● LYRICS"
-                        is LyricsUiState.Loading -> "LOADING LYRICS..."
-                        else -> "LYRICS"
+                    Surface(
+                        color = SpotifyDarkGreenPill,
+                        shape = RoundedCornerShape(50),
+                        modifier = Modifier.border(
+                            width = 1.dp,
+                            color = SpotifyVibrantGreen.copy(alpha = 0.8f),
+                            shape = RoundedCornerShape(50)
+                        )
+                    ) {
+                        val badgeText = when (lyricsState) {
+                            is LyricsUiState.Success -> if (lyricsState.isSynced) "● SYNCED" else "● LYRICS"
+                            is LyricsUiState.Loading -> "LOADING..."
+                            else -> "LYRICS"
+                        }
+                        Text(
+                            text = badgeText,
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                color = SpotifyVibrantGreen,
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 10.sp,
+                                letterSpacing = 0.6.sp
+                            ),
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                        )
                     }
-                    Text(
-                        text = badgeText,
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            color = SpotifyVibrantGreen,
-                            fontWeight = FontWeight.ExtraBold,
-                            fontSize = 11.sp,
-                            letterSpacing = 0.8.sp
-                        ),
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp)
-                    )
+
+                    // Language Mode Cycle / Pill Button (Both: Hinglish + Original / Hinglish / Original)
+                    Surface(
+                        color = SurfaceDarkCard,
+                        shape = RoundedCornerShape(50),
+                        modifier = Modifier
+                            .border(
+                                width = 1.dp,
+                                color = SpotifyVibrantGreen.copy(alpha = 0.55f),
+                                shape = RoundedCornerShape(50)
+                            )
+                            .clickable {
+                                languageMode = when (languageMode) {
+                                    com.example.services.LyricsLanguageMode.BOTH -> com.example.services.LyricsLanguageMode.HINGLISH
+                                    com.example.services.LyricsLanguageMode.HINGLISH -> com.example.services.LyricsLanguageMode.ORIGINAL
+                                    com.example.services.LyricsLanguageMode.ORIGINAL -> com.example.services.LyricsLanguageMode.BOTH
+                                }
+                            }
+                            .testTag("lyrics_language_mode_toggle")
+                    ) {
+                        Text(
+                            text = "🌐 ${languageMode.label}",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                color = PrimaryWhite,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 10.sp
+                            ),
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                        )
+                    }
                 }
+
+                Spacer(modifier = Modifier.width(6.dp))
 
                 IconButton(
                     onClick = onClose,
                     modifier = Modifier
-                        .size(34.dp)
+                        .size(32.dp)
                         .clip(CircleShape)
                         .background(SurfaceDarkCard)
                 ) {
@@ -896,12 +938,15 @@ private fun LrcLibLyricsOverlayPanel(
                         if (lyricsState.isSynced && lyricsState.syncedLines.isNotEmpty()) {
                             SyncedLyricsListView(
                                 syncedLines = lyricsState.syncedLines,
+                                languageMode = languageMode,
                                 currentPositionMs = currentPositionMs,
                                 onSeekTo = onSeekTo
                             )
                         } else {
                             PlainLyricsListView(
-                                plainLines = lyricsState.plainLines
+                                plainDualLines = lyricsState.plainDualLines,
+                                plainLines = lyricsState.plainLines,
+                                languageMode = languageMode
                             )
                         }
                     }
@@ -914,6 +959,7 @@ private fun LrcLibLyricsOverlayPanel(
 @Composable
 private fun SyncedLyricsListView(
     syncedLines: List<com.example.services.SyncedLyricLine>,
+    languageMode: com.example.services.LyricsLanguageMode,
     currentPositionMs: Long,
     onSeekTo: (Long) -> Unit
 ) {
@@ -946,7 +992,7 @@ private fun SyncedLyricsListView(
         modifier = Modifier
             .fillMaxSize()
             .testTag("synced_lyrics_list"),
-        contentPadding = PaddingValues(top = 80.dp, bottom = 120.dp),
+        contentPadding = PaddingValues(top = 72.dp, bottom = 120.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         itemsIndexed(
@@ -960,17 +1006,42 @@ private fun SyncedLyricsListView(
                 targetValue = when {
                     isCurrent -> SpotifyVibrantGreen
                     isPast -> PrimaryWhite.copy(alpha = 0.45f)
-                    else -> PrimaryWhite.copy(alpha = 0.80f)
+                    else -> PrimaryWhite.copy(alpha = 0.82f)
                 },
                 animationSpec = tween(durationMillis = 240),
                 label = "lyricColor"
             )
 
+            val secondaryColor by animateColorAsState(
+                targetValue = when {
+                    isCurrent -> PrimaryWhite.copy(alpha = 0.92f)
+                    isPast -> MutedGray.copy(alpha = 0.42f)
+                    else -> MutedGray.copy(alpha = 0.72f)
+                },
+                animationSpec = tween(durationMillis = 240),
+                label = "lyricSecondaryColor"
+            )
+
             val targetScale by animateFloatAsState(
-                targetValue = if (isCurrent) 1.04f else 0.97f,
+                targetValue = if (isCurrent) 1.03f else 0.97f,
                 animationSpec = tween(durationMillis = 240, easing = FastOutSlowInEasing),
                 label = "lyricScale"
             )
+
+            val primaryText = when (languageMode) {
+                com.example.services.LyricsLanguageMode.BOTH -> line.hinglishText.ifBlank { line.text }
+                com.example.services.LyricsLanguageMode.HINGLISH -> line.hinglishText.ifBlank { line.text }
+                com.example.services.LyricsLanguageMode.ORIGINAL -> line.originalText.ifBlank { line.text }
+            }
+            val secondaryText = if (
+                languageMode == com.example.services.LyricsLanguageMode.BOTH &&
+                line.originalText.isNotBlank() &&
+                !line.originalText.equals(primaryText, ignoreCase = true)
+            ) {
+                line.originalText
+            } else {
+                ""
+            }
 
             Box(
                 modifier = Modifier
@@ -987,16 +1058,34 @@ private fun SyncedLyricsListView(
                     .padding(horizontal = 16.dp, vertical = if (isCurrent) 12.dp else 8.dp),
                 contentAlignment = Alignment.Center
             ) {
-                Text(
-                    text = line.text,
-                    style = MaterialTheme.typography.titleLarge.copy(
-                        color = targetColor,
-                        fontWeight = if (isCurrent) FontWeight.ExtraBold else FontWeight.SemiBold,
-                        fontSize = if (isCurrent) 21.sp else 16.5.sp,
-                        lineHeight = if (isCurrent) 28.sp else 23.sp
-                    ),
-                    textAlign = TextAlign.Center
-                )
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = primaryText,
+                        style = MaterialTheme.typography.titleLarge.copy(
+                            color = targetColor,
+                            fontWeight = if (isCurrent) FontWeight.ExtraBold else FontWeight.SemiBold,
+                            fontSize = if (isCurrent) 20.sp else 16.sp,
+                            lineHeight = if (isCurrent) 26.sp else 22.sp
+                        ),
+                        textAlign = TextAlign.Center
+                    )
+                    if (secondaryText.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(3.dp))
+                        Text(
+                            text = secondaryText,
+                            style = MaterialTheme.typography.bodyMedium.copy(
+                                color = secondaryColor,
+                                fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Medium,
+                                fontSize = if (isCurrent) 15.sp else 13.5.sp,
+                                lineHeight = if (isCurrent) 21.sp else 18.sp
+                            ),
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
             }
         }
     }
@@ -1004,32 +1093,82 @@ private fun SyncedLyricsListView(
 
 @Composable
 private fun PlainLyricsListView(
-    plainLines: List<String>
+    plainDualLines: List<com.example.services.SyncedLyricLine>,
+    plainLines: List<String>,
+    languageMode: com.example.services.LyricsLanguageMode
 ) {
+    val resolvedLines = remember(plainDualLines, plainLines) {
+        if (plainDualLines.isNotEmpty()) {
+            plainDualLines
+        } else {
+            plainLines.mapIndexed { index, raw ->
+                val (hinglish, original) = com.example.services.LrcLibLyricsService.buildDualLanguageTexts(raw)
+                com.example.services.SyncedLyricLine(
+                    timeMs = index * 3000L,
+                    text = raw,
+                    hinglishText = hinglish,
+                    originalText = original
+                )
+            }
+        }
+    }
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
             .testTag("plain_lyrics_list"),
-        contentPadding = PaddingValues(vertical = 28.dp, horizontal = 10.dp),
+        contentPadding = PaddingValues(vertical = 24.dp, horizontal = 10.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         itemsIndexed(
-            items = plainLines,
+            items = resolvedLines,
             key = { index, _ -> "plain_$index" }
         ) { _, line ->
-            Text(
-                text = line,
-                style = MaterialTheme.typography.titleMedium.copy(
-                    color = PrimaryWhite.copy(alpha = 0.95f),
-                    fontWeight = FontWeight.SemiBold,
-                    fontSize = 18.sp,
-                    lineHeight = 27.sp
-                ),
-                textAlign = TextAlign.Center,
+            val primaryText = when (languageMode) {
+                com.example.services.LyricsLanguageMode.BOTH -> line.hinglishText.ifBlank { line.text }
+                com.example.services.LyricsLanguageMode.HINGLISH -> line.hinglishText.ifBlank { line.text }
+                com.example.services.LyricsLanguageMode.ORIGINAL -> line.originalText.ifBlank { line.text }
+            }
+            val secondaryText = if (
+                languageMode == com.example.services.LyricsLanguageMode.BOTH &&
+                line.originalText.isNotBlank() &&
+                !line.originalText.equals(primaryText, ignoreCase = true)
+            ) {
+                line.originalText
+            } else {
+                ""
+            }
+
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(vertical = 7.dp)
-            )
+            ) {
+                Text(
+                    text = primaryText,
+                    style = MaterialTheme.typography.titleMedium.copy(
+                        color = PrimaryWhite.copy(alpha = 0.96f),
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 18.sp,
+                        lineHeight = 25.sp
+                    ),
+                    textAlign = TextAlign.Center
+                )
+                if (secondaryText.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = secondaryText,
+                        style = MaterialTheme.typography.bodyMedium.copy(
+                            color = SpotifyVibrantGreen.copy(alpha = 0.88f),
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 14.5.sp,
+                            lineHeight = 20.sp
+                        ),
+                        textAlign = TextAlign.Center
+                    )
+                }
+            }
         }
     }
 }

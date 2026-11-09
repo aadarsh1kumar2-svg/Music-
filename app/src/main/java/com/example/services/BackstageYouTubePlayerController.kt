@@ -559,18 +559,35 @@ class BackstageYouTubePlayerController(
         }
     }
 
+    fun isVideoReadyForPlay(expectedVideoId: String): Boolean {
+        val cleanExpected = Song.extractYoutubeVideoId(expectedVideoId)
+        if (cleanExpected.isBlank()) return false
+        return currentLoadedVideoId == cleanExpected && !hasFiredEndedForCurrentTrack && webView != null
+    }
+
     fun playVideo() {
         val targetId = currentLoadedVideoId
         if (targetId.isBlank()) return
         isUserPaused = false
         isPausedByExternalAudio = false
+        hasFiredEndedForCurrentTrack = false
         val savedSec = lastKnownPositionSeconds.coerceAtLeast(0.0)
         mainHandler.post {
             val view = webView
-            view?.onResume()
-            view?.resumeTimers()
-            view?.dispatchWindowVisibilityChanged(View.VISIBLE)
-            view?.onWindowFocusChanged(true)
+            if (view == null) {
+                loadVideoById(
+                    rawVideoId = targetId,
+                    startSeconds = savedSec,
+                    songTitle = currentSongTitle,
+                    songArtist = currentSongArtist,
+                    artworkUrl = currentSongArtworkUrl
+                )
+                return@post
+            }
+            view.onResume()
+            view.resumeTimers()
+            view.dispatchWindowVisibilityChanged(View.VISIBLE)
+            view.onWindowFocusChanged(true)
             try {
                 BackgroundGamingAudioKeeper.getInstance(context).startGamingKeepAlive()
             } catch (_: Exception) {
@@ -579,6 +596,7 @@ class BackstageYouTubePlayerController(
                 (function() {
                     window.__akUserPaused = false;
                     window.__akExternalPaused = false;
+                    window.__akTrackEndedFired = false;
                     var mp = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
                     var matched = (window.__akLoadedInPlaceId === '$targetId' || window.__akTargetVideoId === '$targetId');
                     try {
@@ -593,7 +611,7 @@ class BackstageYouTubePlayerController(
                         return 'NEEDS_RELOAD';
                     }
                     var v = document.querySelector('video');
-                    if (!v) {
+                    if (!v || (!v.src && (!v.currentSrc || v.currentSrc === ''))) {
                         return 'NEEDS_RELOAD';
                     }
                     v.muted = false;
@@ -608,21 +626,19 @@ class BackstageYouTubePlayerController(
                             v.currentTime = bestSaved;
                         } catch(e) {}
                     }
-                    if (!window.__akTrackEndedFired) {
-                        if (mp && typeof mp.playVideo === 'function') {
-                            try { mp.playVideo(); } catch(e) {}
-                        }
-                        try {
-                            var p = v.play();
-                            if (p && typeof p.catch === 'function') {
-                                p.catch(function() {
-                                    if (mp && typeof mp.playVideo === 'function') {
-                                        try { mp.playVideo(); } catch(e2) {}
-                                    }
-                                });
-                            }
-                        } catch (e) {}
+                    if (mp && typeof mp.playVideo === 'function') {
+                        try { mp.playVideo(); } catch(e) {}
                     }
+                    try {
+                        var p = v.play();
+                        if (p && typeof p.catch === 'function') {
+                            p.catch(function() {
+                                if (mp && typeof mp.playVideo === 'function') {
+                                    try { mp.playVideo(); } catch(e2) {}
+                                }
+                            });
+                        }
+                    } catch (e) {}
                     if (typeof window.__akTick === 'function') {
                         window.__akTick();
                     }
@@ -633,8 +649,8 @@ class BackstageYouTubePlayerController(
                 })();
             """.trimIndent()
 
-            view?.evaluateJavascript(resumeJs) { result ->
-                if (result?.contains("NEEDS_RELOAD") == true && currentLoadedVideoId.isNotBlank() && !isUserPaused) {
+            view.evaluateJavascript(resumeJs) { result ->
+                if ((result == null || result.contains("NEEDS_RELOAD")) && currentLoadedVideoId.isNotBlank() && !isUserPaused) {
                     loadVideoById(
                         rawVideoId = currentLoadedVideoId,
                         startSeconds = savedSec,
@@ -645,14 +661,27 @@ class BackstageYouTubePlayerController(
                 }
             }
 
-            // Schedule rapid follow-up wake pulses so background WebView audio starts immediately
-            val retryDelays = longArrayOf(120L, 300L, 600L)
+            // Schedule rapid follow-up wake pulses so background WebView audio starts immediately,
+            // and if the video is still paused/unloaded at 520ms, force reload it at savedSec!
+            val retryDelays = longArrayOf(120L, 300L, 520L)
             for (delayMs in retryDelays) {
                 mainHandler.postDelayed({
                     if (!isUserPaused && !isPausedByExternalAudio && currentLoadedVideoId == targetId && !hasFiredEndedForCurrentTrack) {
                         webView?.onResume()
                         webView?.resumeTimers()
-                        webView?.evaluateJavascript(resumeJs, null)
+                        webView?.evaluateJavascript(resumeJs) { res ->
+                            if (delayMs == 520L && (res == null || res.contains("NEEDS_RELOAD") || res.contains("STILL_PAUSED")) &&
+                                !isUserPaused && currentLoadedVideoId == targetId
+                            ) {
+                                loadVideoById(
+                                    rawVideoId = targetId,
+                                    startSeconds = lastKnownPositionSeconds.coerceAtLeast(savedSec),
+                                    songTitle = currentSongTitle,
+                                    songArtist = currentSongArtist,
+                                    artworkUrl = currentSongArtworkUrl
+                                )
+                            }
+                        }
                     }
                 }, delayMs)
             }

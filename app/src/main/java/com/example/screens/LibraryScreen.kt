@@ -99,6 +99,7 @@ fun LibraryScreen(
     currentQueue: List<Song>,
     currentSong: Song?,
     isPlaying: Boolean,
+    isUserSubscribed: Boolean = false,
     repeatMode: RepeatModeState = RepeatModeState.OFF,
     onNavigateSubScreen: (LibrarySubScreen) -> Unit,
     onSongClick: (Song, List<Song>) -> Unit,
@@ -131,6 +132,7 @@ fun LibraryScreen(
                 playlistsCount = playlists.size,
                 sessionCount = sessionHistory.size,
                 queueCount = currentQueue.size,
+                isUserSubscribed = isUserSubscribed,
                 onNavigateSubScreen = onNavigateSubScreen,
                 onOpenDrawerMenu = onOpenDrawerMenu,
                 modifier = modifier
@@ -255,6 +257,7 @@ private fun LibraryRootContent(
     playlistsCount: Int,
     sessionCount: Int,
     queueCount: Int,
+    isUserSubscribed: Boolean,
     onNavigateSubScreen: (LibrarySubScreen) -> Unit,
     onOpenDrawerMenu: () -> Unit,
     modifier: Modifier = Modifier
@@ -312,7 +315,8 @@ private fun LibraryRootContent(
                         icon = Icons.Default.Favorite,
                         title = stringResource(id = R.string.library_favorites),
                         countBadge = favoritesCount,
-                        showVipBadge = true,
+                        showVipBadge = !isUserSubscribed,
+                        isPrimaryAccentIcon = true,
                         testTag = "library_row_favorites",
                         onClick = { onNavigateSubScreen(LibrarySubScreen.Favorites) }
                     )
@@ -335,7 +339,8 @@ private fun LibraryRootContent(
                         icon = Icons.AutoMirrored.Filled.PlaylistPlay,
                         title = stringResource(id = R.string.library_playlists),
                         countBadge = playlistsCount,
-                        showVipBadge = true,
+                        showVipBadge = !isUserSubscribed,
+                        isPrimaryAccentIcon = true,
                         testTag = "library_row_playlists",
                         onClick = { onNavigateSubScreen(LibrarySubScreen.Playlists) }
                     )
@@ -411,6 +416,7 @@ private fun LibraryMenuCardRow(
     countBadge: Int,
     testTag: String,
     showVipBadge: Boolean = false,
+    isPrimaryAccentIcon: Boolean = false,
     onClick: () -> Unit
 ) {
     Row(
@@ -431,7 +437,7 @@ private fun LibraryMenuCardRow(
             Icon(
                 imageVector = icon,
                 contentDescription = title,
-                tint = if (showVipBadge) SpotifyVibrantGreen else PrimaryWhite,
+                tint = if (showVipBadge || isPrimaryAccentIcon) SpotifyVibrantGreen else PrimaryWhite,
                 modifier = Modifier.size(26.dp)
             )
         }
@@ -450,6 +456,28 @@ private fun LibraryMenuCardRow(
                     fontSize = 19.sp
                 )
             )
+            if (showVipBadge) {
+                Spacer(modifier = Modifier.width(10.dp))
+                Surface(
+                    color = SpotifyDarkGreenPill,
+                    shape = RoundedCornerShape(50),
+                    modifier = Modifier.border(
+                        width = 1.dp,
+                        color = SpotifyVibrantGreen,
+                        shape = RoundedCornerShape(50)
+                    )
+                ) {
+                    Text(
+                        text = "👑 VIP",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            color = SpotifyVibrantGreen,
+                            fontWeight = FontWeight.ExtraBold,
+                            fontSize = 11.sp
+                        ),
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp)
+                    )
+                }
+            }
         }
 
         if (countBadge > 0) {
