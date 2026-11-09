@@ -229,8 +229,7 @@ class BackstageYouTubePlayerController(
                 domStorageEnabled = true
                 databaseEnabled = true
                 mediaPlaybackRequiresUserGesture = false
-                loadsImagesAutomatically = false
-                blockNetworkImage = true
+                loadsImagesAutomatically = true
                 mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                 cacheMode = WebSettings.LOAD_DEFAULT
                 useWideViewPort = true
@@ -303,13 +302,6 @@ class BackstageYouTubePlayerController(
         try {
             BackgroundGamingAudioKeeper.getInstance(context).attachWebView(created)
         } catch (_: Exception) {
-        }
-        // Pre-warm DNS + TLS 1.3 connection to m.youtube.com with a tiny 500-byte request so first song tap is instant
-        if (currentLoadedVideoId.isBlank()) {
-            try {
-                created.loadUrl("https://m.youtube.com/robots.txt")
-            } catch (_: Exception) {
-            }
         }
         return created
     }
@@ -429,101 +421,39 @@ class BackstageYouTubePlayerController(
             fallbackUrlReloadRunnable = null
             mainHandler.removeCallbacks(nativeHeartbeatRunnable)
 
-            val currentWebUrl = view.url.orEmpty()
-            val canAttemptInPlace = currentWebUrl.contains("youtube.com/watch")
-
-            if (canAttemptInPlace) {
-                view.evaluateJavascript(
-                    """
-                    (function() {
-                        window.__akLoadToken = $token;
-                        window.__akTargetVideoId = '$cleanId';
-                        window.__akLoadedInPlaceId = '';
-                        window.__akUserPaused = false;
-                        window.__akExternalPaused = false;
-                        window.__akSongTitle = '$safeTitle';
-                        window.__akSongArtist = '$safeArtist';
-                        window.__akSongArtwork = '$safeArtwork';
-                        window.__akSongFallbackArtwork = '$safeFallbackArt';
-                        window.__akTrackEndedFired = false;
-                        window.__akErrorFired = false;
-                        window.__akHasSeenStartOfTrack = $hasResumeStart;
-                        window.__akMaxDurationForTrack = 0;
-                        window.__akResumeTargetSeconds = $safeStartSec;
-                        window.__akLastGoodTime = $safeStartSec;
-                        window.__akLastReportedDur = 0;
-                        window.__akLastMetaKey = '';
-                        if (typeof window.__akSyncMediaSession === 'function') {
-                            window.__akSyncMediaSession();
-                        }
-                        try {
-                            var mp = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
-                            if (mp && typeof mp.loadVideoById === 'function') {
-                                window.__akLoadedInPlaceId = '$cleanId';
-                                mp.loadVideoById('$cleanId', $safeStartSec);
-                                if (typeof mp.playVideo === 'function') {
-                                    mp.playVideo();
-                                }
-                                return 'IN_PLACE_OK';
-                            }
-                        } catch (e) {}
-                        var vOld = document.querySelector('video');
-                        if (vOld) {
-                            try { vOld.pause(); } catch (e2) {}
-                        }
-                        return 'NEEDS_URL_LOAD';
-                    })();
-                    """.trimIndent()
-                ) { result ->
-                    if (token != currentLoadToken) return@evaluateJavascript
-                    if (result?.contains("IN_PLACE_OK") == true) {
-                        val reloadCheck = Runnable {
-                            if (token == currentLoadToken &&
-                                currentLoadedVideoId == cleanId &&
-                                !hasSeenValidStartForCurrentToken &&
-                                !isUserPaused &&
-                                !isPausedByExternalAudio
-                            ) {
-                                view.loadUrl(watchUrl)
-                            }
-                        }
-                        fallbackUrlReloadRunnable = reloadCheck
-                        mainHandler.postDelayed(reloadCheck, 2200L)
-                    } else {
-                        view.loadUrl(watchUrl)
+            view.evaluateJavascript(
+                """
+                (function() {
+                    window.__akLoadToken = $token;
+                    window.__akTargetVideoId = '$cleanId';
+                    window.__akLoadedInPlaceId = '';
+                    window.__akUserPaused = false;
+                    window.__akExternalPaused = false;
+                    window.__akSongTitle = '$safeTitle';
+                    window.__akSongArtist = '$safeArtist';
+                    window.__akSongArtwork = '$safeArtwork';
+                    window.__akSongFallbackArtwork = '$safeFallbackArt';
+                    window.__akTrackEndedFired = false;
+                    window.__akErrorFired = false;
+                    window.__akHasSeenStartOfTrack = $hasResumeStart;
+                    window.__akMaxDurationForTrack = 0;
+                    window.__akResumeTargetSeconds = $safeStartSec;
+                    window.__akLastGoodTime = $safeStartSec;
+                    window.__akLastReportedDur = 0;
+                    window.__akLastMetaKey = '';
+                    var vOld = document.querySelector('video');
+                    if (vOld) {
+                        try { vOld.pause(); } catch (e) {}
                     }
-                }
-            } else {
-                view.evaluateJavascript(
-                    """
-                    (function() {
-                        window.__akLoadToken = $token;
-                        window.__akTargetVideoId = '$cleanId';
-                        window.__akLoadedInPlaceId = '';
-                        window.__akUserPaused = false;
-                        window.__akExternalPaused = false;
-                        window.__akSongTitle = '$safeTitle';
-                        window.__akSongArtist = '$safeArtist';
-                        window.__akSongArtwork = '$safeArtwork';
-                        window.__akSongFallbackArtwork = '$safeFallbackArt';
-                        window.__akTrackEndedFired = false;
-                        window.__akErrorFired = false;
-                        window.__akHasSeenStartOfTrack = $hasResumeStart;
-                        window.__akMaxDurationForTrack = 0;
-                        window.__akResumeTargetSeconds = $safeStartSec;
-                        window.__akLastGoodTime = $safeStartSec;
-                        window.__akLastReportedDur = 0;
-                        window.__akLastMetaKey = '';
-                        if (typeof window.__akSyncMediaSession === 'function') {
-                            window.__akSyncMediaSession();
-                        }
-                    })();
-                    """.trimIndent(),
-                    null
-                )
-                view.loadUrl(watchUrl)
-            }
-            mainHandler.postDelayed(nativeHeartbeatRunnable, 400L)
+                    if (typeof window.__akSyncMediaSession === 'function') {
+                        window.__akSyncMediaSession();
+                    }
+                })();
+                """.trimIndent(),
+                null
+            )
+            view.loadUrl(watchUrl)
+            mainHandler.postDelayed(nativeHeartbeatRunnable, 250L)
         }
     }
 
@@ -1084,21 +1014,13 @@ class BackstageYouTubePlayerController(
                 }
 
                 function isAdPlaying() {
-                    if (document.querySelector('.ad-showing, .ad-interrupting, .ytp-ad-player-overlay, .ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-skip-ad-button, .ytp-ad-skip-button-slot, .videoAdUi')) {
-                        return true;
-                    }
                     try {
                         var mp = getMoviePlayer();
-                        if (mp) {
-                            if (mp.classList && (mp.classList.contains('ad-showing') || mp.classList.contains('ad-interrupting'))) {
-                                return true;
-                            }
-                            if (typeof mp.getAdState === 'function' && mp.getAdState() === 1) {
-                                return true;
-                            }
+                        if (mp && mp.classList) {
+                            return mp.classList.contains('ad-showing') || mp.classList.contains('ad-interrupting');
                         }
                     } catch (e) {}
-                    return false;
+                    return document.querySelector('#movie_player.ad-showing, #movie_player.ad-interrupting, .html5-video-player.ad-showing, .html5-video-player.ad-interrupting') !== null;
                 }
 
                 function skipAndMuteAdInstantly(vOpt) {
@@ -1106,64 +1028,32 @@ class BackstageYouTubePlayerController(
                         var v = vOpt || document.querySelector('video');
                         if (v) {
                             v.muted = true;
-                            v.volume = 0;
                         }
                         var mp = getMoviePlayer();
                         if (mp && typeof mp.skipAd === 'function') {
                             try { mp.skipAd(); } catch (e) {}
                         }
-                        var skipSelectors = [
-                            '.ytp-ad-skip-button',
-                            '.ytp-ad-skip-button-modern',
-                            '.ytp-skip-ad-button',
-                            '.ytp-ad-skip-button-slot button',
-                            '.ytp-ad-skip-button-container button',
-                            '.videoAdUiSkipButton',
-                            'button[id^="skip-button"]'
-                        ];
-                        for (var s = 0; s < skipSelectors.length; s++) {
-                            var btns = document.querySelectorAll(skipSelectors[s]);
-                            for (var b = 0; b < btns.length; b++) {
-                                if (btns[b]) {
-                                    try { btns[b].click(); } catch (e) {}
-                                }
+                        var skipBtns = document.querySelectorAll('.ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-skip-ad-button, .ytp-ad-skip-button-slot button, .ytp-ad-skip-button-container button, .videoAdUiSkipButton');
+                        for (var b = 0; b < skipBtns.length; b++) {
+                            if (skipBtns[b]) {
+                                try { skipBtns[b].click(); } catch (e) {}
                             }
                         }
-                        if (v) {
-                            try { v.playbackRate = 16.0; } catch (e) {}
+                        if (v && !v.seeking && v.readyState >= 1) {
                             var adDur = v.duration;
-                            if (adDur && isFinite(adDur) && adDur > 0 && adDur < 600) {
-                                if (v.currentTime < adDur - 0.05) {
-                                    try { v.currentTime = adDur; } catch (e) {}
+                            var nowMs = Date.now();
+                            if (adDur && isFinite(adDur) && adDur > 0 && adDur < 300 && v.currentTime < adDur - 0.3) {
+                                if (nowMs - (window.__akLastAdSeekMs || 0) > 600) {
+                                    window.__akLastAdSeekMs = nowMs;
+                                    try { v.currentTime = Math.max(0, adDur - 0.15); } catch (e) {}
                                 }
+                            }
+                            if (v.paused) {
+                                try { v.play(); } catch (e) {}
                             }
                         }
                     } catch (e) {}
                 }
-
-                // Zero-latency MutationObserver + fast 120ms guard to skip any pre-roll or mid-roll ad in <100ms
-                try {
-                    if (!window.__akFastAdGuardInstalled) {
-                        window.__akFastAdGuardInstalled = true;
-                        setInterval(function() {
-                            if (isAdPlaying()) {
-                                skipAndMuteAdInstantly(document.querySelector('video'));
-                            }
-                        }, 120);
-                        if (typeof MutationObserver !== 'undefined' && document.documentElement) {
-                            var adObserver = new MutationObserver(function() {
-                                if (isAdPlaying()) {
-                                    skipAndMuteAdInstantly(document.querySelector('video'));
-                                }
-                            });
-                            adObserver.observe(document.documentElement, {
-                                attributes: true,
-                                subtree: true,
-                                attributeFilter: ['class']
-                            });
-                        }
-                    }
-                } catch (e) {}
 
                 function getTrueDuration(v) {
                     if (!isCurrentVideoMatchingTarget() || isAdPlaying()) return 0;
