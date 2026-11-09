@@ -309,7 +309,7 @@ fun AKMusicAppRoot(
 
     LaunchedEffect(launchStage) {
         if (launchStage == LaunchStage.LOADING) {
-            delay(1800L)
+            delay(900L)
             launchStage = LaunchStage.DEVELOPER_INTRO
         } else if (launchStage == LaunchStage.MAIN_APP) {
             musicViewModel.onHomeScreenEntered()
@@ -361,9 +361,6 @@ fun AKMusicAppRoot(
                         )
                         musicViewModel.attachBackstagePlayer(this)
                     }
-                },
-                update = { container ->
-                    musicViewModel.attachBackstagePlayer(container)
                 },
                 modifier = Modifier.fillMaxSize()
             )

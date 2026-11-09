@@ -1,5 +1,6 @@
 package com.example.widgets
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -23,6 +24,10 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -35,7 +40,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import coil.compose.SubcomposeAsyncImage
+import coil.compose.AsyncImagePainter
+import coil.compose.rememberAsyncImagePainter
 import coil.request.ImageRequest
 import com.example.models.Song
 import com.example.ui.theme.DeepCharcoal
@@ -49,58 +55,91 @@ fun SongArtwork(
     imageUrl: String,
     contentDescription: String,
     modifier: Modifier = Modifier,
-    cornerRadius: Dp = 12.dp
+    cornerRadius: Dp = 12.dp,
+    fallbackVideoId: String = ""
 ) {
     val shape = RoundedCornerShape(cornerRadius)
-    SubcomposeAsyncImage(
+    val candidateUrls = remember(imageUrl, fallbackVideoId) {
+        val list = mutableListOf<String>()
+        val trimmed = imageUrl.trim()
+        if (trimmed.isNotEmpty()) {
+            // If someone pasted a YouTube watch/short URL into bannerUrl, convert it directly to thumbnail
+            if (trimmed.contains("youtube.com/watch", ignoreCase = true) ||
+                trimmed.contains("youtu.be/", ignoreCase = true) ||
+                trimmed.contains("youtube.com/shorts/", ignoreCase = true)
+            ) {
+                val extracted = Song.extractYoutubeVideoId(trimmed)
+                if (extracted.isNotBlank()) {
+                    list.add("https://i.ytimg.com/vi/$extracted/hqdefault.jpg")
+                    list.add("https://img.youtube.com/vi/$extracted/mqdefault.jpg")
+                }
+            } else {
+                list.add(trimmed)
+            }
+        }
+        val vid = fallbackVideoId.trim().ifBlank {
+            val match = Regex("""/vi/([a-zA-Z0-9_-]{11})/""").find(trimmed)
+            match?.groupValues?.getOrNull(1).orEmpty()
+        }
+        if (vid.isNotBlank()) {
+            val hq1 = "https://i.ytimg.com/vi/$vid/hqdefault.jpg"
+            val hq2 = "https://img.youtube.com/vi/$vid/hqdefault.jpg"
+            val mq = "https://i.ytimg.com/vi/$vid/mqdefault.jpg"
+            if (hq1 !in list) list.add(hq1)
+            if (hq2 !in list) list.add(hq2)
+            if (mq !in list) list.add(mq)
+        }
+        list
+    }
+
+    var attemptIndex by remember(candidateUrls) { mutableIntStateOf(0) }
+    val activeUrl = candidateUrls.getOrNull(attemptIndex).orEmpty()
+
+    val painter = rememberAsyncImagePainter(
         model = ImageRequest.Builder(LocalContext.current)
-            .data(imageUrl)
+            .data(activeUrl.ifBlank { null })
             .crossfade(true)
             .build(),
-        contentDescription = contentDescription,
-        contentScale = ContentScale.Crop,
-        modifier = modifier
-            .clip(shape)
-            .background(SurfaceDarkCard),
-        loading = {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(
-                        Brush.linearGradient(
-                            colors = listOf(SurfaceDarkCard, DeepCharcoal)
-                        )
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Default.MusicNote,
-                    contentDescription = null,
-                    tint = MutedGray.copy(alpha = 0.5f),
-                    modifier = Modifier.size(28.dp)
-                )
-            }
-        },
-        error = {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(
-                        Brush.linearGradient(
-                            colors = listOf(SurfaceDarkCard, DeepCharcoal)
-                        )
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Default.MusicNote,
-                    contentDescription = null,
-                    tint = SpotifyVibrantGreen.copy(alpha = 0.75f),
-                    modifier = Modifier.size(28.dp)
-                )
+        onError = {
+            if (attemptIndex + 1 < candidateUrls.size) {
+                attemptIndex += 1
             }
         }
     )
+
+    val state = painter.state
+
+    Box(
+        modifier = modifier
+            .clip(shape)
+            .background(
+                Brush.linearGradient(
+                    colors = listOf(SurfaceDarkCard, DeepCharcoal)
+                )
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        if (state !is AsyncImagePainter.State.Success) {
+            Icon(
+                imageVector = Icons.Default.MusicNote,
+                contentDescription = null,
+                tint = if (state is AsyncImagePainter.State.Error) {
+                    SpotifyVibrantGreen.copy(alpha = 0.75f)
+                } else {
+                    MutedGray.copy(alpha = 0.5f)
+                },
+                modifier = Modifier.size(28.dp)
+            )
+        }
+        if (activeUrl.isNotBlank()) {
+            Image(
+                painter = painter,
+                contentDescription = contentDescription,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+    }
 }
 
 @Composable
@@ -128,7 +167,8 @@ fun SongListRow(
                 imageUrl = song.resolvedBannerUrl,
                 contentDescription = song.title,
                 modifier = Modifier.size(60.dp),
-                cornerRadius = 12.dp
+                cornerRadius = 12.dp,
+                fallbackVideoId = song.cleanVideoId
             )
             if (isCurrentSong && isPlaying) {
                 Box(

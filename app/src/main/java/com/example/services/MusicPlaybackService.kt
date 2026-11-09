@@ -157,89 +157,97 @@ class MusicPlaybackService : MediaSessionService() {
          * and allows notifications, Admin notifications from Firebase (/notifications, /messages, /broadcast)
          * and FCM arrive even when the user closes the app.
          */
-        fun ensureBackgroundNotificationWatcher(context: Context) {
+        fun ensureBackgroundNotificationWatcher(
+            context: Context,
+            startServiceIfNeeded: Boolean = true
+        ) {
+            if (isBackgroundNotifWatcherStarted) return
+            isBackgroundNotifWatcherStarted = true
             val appCtx = context.applicationContext
             AADIFYMessagingService.initializeAndSubscribe(appCtx)
-            try {
-                val intent = Intent(appCtx, MusicPlaybackService::class.java).apply {
-                    action = ACTION_WATCH_NOTIFICATIONS
+            if (startServiceIfNeeded && instance == null) {
+                try {
+                    val intent = Intent(appCtx, MusicPlaybackService::class.java).apply {
+                        action = ACTION_WATCH_NOTIFICATIONS
+                    }
+                    appCtx.startService(intent)
+                } catch (_: Exception) {
                 }
-                appCtx.startService(intent)
-            } catch (_: Exception) {
             }
-            if (!isBackgroundNotifWatcherStarted) {
-                isBackgroundNotifWatcherStarted = true
-                ioScope.launch {
-                    val installBaselineMs = AdminNotificationHelper.getOrInitInstallBaselineMs(appCtx)
-                    val endpoints = listOf("notifications", "messages", "notification", "broadcast")
-                    while (true) {
-                        for (node in endpoints) {
-                            try {
-                                val nodeName = "rtdb_$node"
-                                val isFirstSeed = !AdminNotificationHelper.isNodeBaselineSeeded(appCtx, nodeName)
-                                val req = Request.Builder()
-                                    .url("${FirebaseSongsService.DATABASE_URL}/$node.json")
-                                    .get()
-                                    .build()
-                                artworkHttpClient.newCall(req).execute().use { resp ->
-                                    if (!resp.isSuccessful) return@use
-                                    val bodyStr = resp.body?.string()?.trim().orEmpty()
-                                    if (bodyStr.isEmpty() || bodyStr == "null" || !bodyStr.startsWith("{")) {
-                                        if (isFirstSeed) {
-                                            AdminNotificationHelper.markNodeBaselineSeeded(appCtx, nodeName)
-                                        }
-                                        return@use
-                                    }
-                                    val root = org.json.JSONObject(bodyStr)
-                                    val keys = root.keys()
-                                    while (keys.hasNext()) {
-                                        val k = keys.next()
-                                        val obj = root.optJSONObject(k) ?: continue
-                                        val title = obj.optString("title").ifBlank {
-                                            obj.optString("heading").ifBlank {
-                                                obj.optString("subject").ifBlank { obj.optString("name") }
-                                            }
-                                        }
-                                        val body = obj.optString("body").ifBlank {
-                                            obj.optString("message").ifBlank {
-                                                obj.optString("paragraph").ifBlank {
-                                                    obj.optString("text").ifBlank {
-                                                        obj.optString("description").ifBlank { obj.optString("content") }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        if (title.isBlank() && body.isBlank()) continue
-                                        val imageUrl = AdminNotificationHelper.extractImageUrlFromJson(obj)
-                                        val rawTs = obj.optLong("timestamp", obj.optLong("createdAt", obj.optLong("time", 0L)))
-                                        val ts = if (rawTs in 1_000_000_000L..9_999_999_999L) rawTs * 1000L else rawTs
-                                        val uniqueKey = "rtdb_${k}_${ts}_${title}"
-                                        val isOld = if (ts > 0L) ts < (installBaselineMs - 15_000L) else isFirstSeed
-                                        if (isOld) {
-                                            AdminNotificationHelper.markNotificationSilentlySeen(
-                                                context = appCtx,
-                                                uniqueKey = uniqueKey,
-                                                title = title.ifBlank { "AADIFY" },
-                                                body = body
-                                            )
-                                        } else {
-                                            AdminNotificationHelper.showAdminNotificationBlocking(
-                                                context = appCtx,
-                                                uniqueKey = uniqueKey,
-                                                title = title.ifBlank { "AADIFY" },
-                                                body = body,
-                                                imageUrl = imageUrl
-                                            )
-                                        }
-                                    }
+            ioScope.launch {
+                try {
+                    getOrCreateSilentWavUri(appCtx)
+                } catch (_: Exception) {
+                }
+                val installBaselineMs = AdminNotificationHelper.getOrInitInstallBaselineMs(appCtx)
+                val endpoints = listOf("notifications", "messages", "notification", "broadcast")
+                while (true) {
+                    kotlinx.coroutines.delay(15_000L)
+                    for (node in endpoints) {
+                        try {
+                            val nodeName = "rtdb_$node"
+                            val isFirstSeed = !AdminNotificationHelper.isNodeBaselineSeeded(appCtx, nodeName)
+                            val req = Request.Builder()
+                                .url("${FirebaseSongsService.DATABASE_URL}/$node.json")
+                                .get()
+                                .build()
+                            artworkHttpClient.newCall(req).execute().use { resp ->
+                                if (!resp.isSuccessful) return@use
+                                val bodyStr = resp.body?.string()?.trim().orEmpty()
+                                if (bodyStr.isEmpty() || bodyStr == "null" || !bodyStr.startsWith("{")) {
                                     if (isFirstSeed) {
                                         AdminNotificationHelper.markNodeBaselineSeeded(appCtx, nodeName)
                                     }
+                                    return@use
                                 }
-                            } catch (_: Exception) {
+                                val root = org.json.JSONObject(bodyStr)
+                                val keys = root.keys()
+                                while (keys.hasNext()) {
+                                    val k = keys.next()
+                                    val obj = root.optJSONObject(k) ?: continue
+                                    val title = obj.optString("title").ifBlank {
+                                        obj.optString("heading").ifBlank {
+                                            obj.optString("subject").ifBlank { obj.optString("name") }
+                                        }
+                                    }
+                                    val body = obj.optString("body").ifBlank {
+                                        obj.optString("message").ifBlank {
+                                            obj.optString("paragraph").ifBlank {
+                                                obj.optString("text").ifBlank {
+                                                    obj.optString("description").ifBlank { obj.optString("content") }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if (title.isBlank() && body.isBlank()) continue
+                                    val imageUrl = AdminNotificationHelper.extractImageUrlFromJson(obj)
+                                    val rawTs = obj.optLong("timestamp", obj.optLong("createdAt", obj.optLong("time", 0L)))
+                                    val ts = if (rawTs in 1_000_000_000L..9_999_999_999L) rawTs * 1000L else rawTs
+                                    val uniqueKey = "rtdb_${k}_${ts}_${title}"
+                                    val isOld = if (ts > 0L) ts < (installBaselineMs - 15_000L) else isFirstSeed
+                                    if (isOld) {
+                                        AdminNotificationHelper.markNotificationSilentlySeen(
+                                            context = appCtx,
+                                            uniqueKey = uniqueKey,
+                                            title = title.ifBlank { "AADIFY" },
+                                            body = body
+                                        )
+                                    } else {
+                                        AdminNotificationHelper.showAdminNotificationBlocking(
+                                            context = appCtx,
+                                            uniqueKey = uniqueKey,
+                                            title = title.ifBlank { "AADIFY" },
+                                            body = body,
+                                            imageUrl = imageUrl
+                                        )
+                                    }
+                                }
+                                if (isFirstSeed) {
+                                    AdminNotificationHelper.markNodeBaselineSeeded(appCtx, nodeName)
+                                }
                             }
+                        } catch (_: Exception) {
                         }
-                        kotlinx.coroutines.delay(8_000L)
                     }
                 }
             }
@@ -911,7 +919,7 @@ class MusicPlaybackService : MediaSessionService() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
-        ensureBackgroundNotificationWatcher(applicationContext)
+        ensureBackgroundNotificationWatcher(applicationContext, startServiceIfNeeded = false)
         val action = intent?.action
         when (action) {
             ACTION_WATCH_NOTIFICATIONS -> {
@@ -1579,7 +1587,7 @@ class MusicPlaybackService : MediaSessionService() {
             )
         } catch (_: Exception) {
         }
-        ensureBackgroundNotificationWatcher(applicationContext)
+        ensureBackgroundNotificationWatcher(applicationContext, startServiceIfNeeded = false)
     }
 
     override fun onDestroy() {

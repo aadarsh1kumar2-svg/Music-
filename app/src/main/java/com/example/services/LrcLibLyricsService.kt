@@ -12,17 +12,9 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 
-enum class LyricsLanguageMode(val label: String) {
-    BOTH("Hinglish + Original"),
-    HINGLISH("Hinglish"),
-    ORIGINAL("Original")
-}
-
 data class SyncedLyricLine(
     val timeMs: Long,
-    val text: String,
-    val hinglishText: String = text,
-    val originalText: String = text
+    val text: String
 )
 
 sealed class LyricsUiState {
@@ -33,7 +25,6 @@ sealed class LyricsUiState {
         val artistName: String,
         val syncedLines: List<SyncedLyricLine>,
         val plainLines: List<String>,
-        val plainDualLines: List<SyncedLyricLine> = emptyList(),
         val isSynced: Boolean
     ) : LyricsUiState()
     data object NotFound : LyricsUiState()
@@ -44,8 +35,8 @@ object LrcLibLyricsService {
     private const val USER_AGENT = "AADIFY Music Player v5.0 (https://lrclib.net)"
 
     private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(10, TimeUnit.SECONDS)
+        .connectTimeout(6, TimeUnit.SECONDS)
+        .readTimeout(6, TimeUnit.SECONDS)
         .followRedirects(true)
         .followSslRedirects(true)
         .build()
@@ -94,12 +85,54 @@ object LrcLibLyricsService {
         val durationSeconds = if (durationMs > 5_000L) (durationMs / 1000L).toInt() else 0
         val isGenericArtist = cleanArtist.isBlank() || GENERIC_ARTIST_NAMES.contains(cleanArtist.lowercase(Locale.US))
 
-        // Extract candidate (track, artist) pairs from titles like "Anuv Jain - INAAM" or "INAAM - Anuv Jain"
+        // Extract candidate (track, artist) pairs from titles like "Anuv Jain - INAAM" or "Sheesha | Mitta Ror"
         val candidatePairs = buildCandidateTrackArtistPairs(rawTitle, cleanTitle, cleanArtist, isGenericArtist)
 
         try {
-            // Stage 1: Try exact /api/get for top (track, artist) pairs
+            // Step 1: Fast full-text search queries (/api/search?q=...) — finds both "Artist - Song" and "Song" in 1 request!
+            val searchQueries = LinkedHashSet<String>()
+            if (!isGenericArtist && cleanTitle.isNotBlank()) {
+                searchQueries.add("$cleanTitle $cleanArtist".trim())
+            }
+            if (cleanTitle.isNotBlank()) {
+                // Replace hyphens with space so "Anuv Jain - INAAM" becomes "Anuv Jain INAAM"
+                val spaceNormalized = cleanTitle.replace(Regex("""\s*[-–—:]\s*"""), " ").replace(Regex("""\s+"""), " ").trim()
+                if (spaceNormalized.isNotBlank()) {
+                    searchQueries.add(spaceNormalized)
+                }
+                searchQueries.add(cleanTitle)
+            }
             for ((trackCand, artistCand) in candidatePairs) {
+                if (trackCand.isNotBlank() && artistCand.isNotBlank()) {
+                    searchQueries.add("$trackCand $artistCand".trim())
+                }
+            }
+            val coreStrippedTitle = stripExtraSubtitleWords(cleanTitle)
+            if (coreStrippedTitle.isNotBlank() && coreStrippedTitle.length >= 2) {
+                if (!isGenericArtist) {
+                    searchQueries.add("$coreStrippedTitle $cleanArtist".trim())
+                }
+                searchQueries.add(coreStrippedTitle)
+            }
+            for ((trackCand, _) in candidatePairs) {
+                if (trackCand.isNotBlank() && trackCand.length >= 2) {
+                    searchQueries.add(trackCand)
+                }
+            }
+
+            // Try top 4 distinct search queries on LRCLIB /api/search?q=...
+            for (query in searchQueries.take(4)) {
+                if (query.isBlank()) continue
+                val url = "$BASE_URL/api/search?q=${urlEncode(query)}"
+                val match = executeSearchArrayRequest(url, durationSeconds, query, if (isGenericArtist) "" else cleanArtist)
+                if (match != null) {
+                    lyricsCache[cacheKey] = match
+                    return@withContext match
+                }
+            }
+
+            // Step 2: Try exact /api/get for top (track, artist) pairs
+            for ((trackCand, artistCand) in candidatePairs.take(2)) {
                 if (trackCand.isNotBlank() && artistCand.isNotBlank()) {
                     val getUrl = buildString {
                         append("$BASE_URL/api/get?track_name=")
@@ -118,70 +151,19 @@ object LrcLibLyricsService {
                 }
             }
 
-            // Stage 2: Try /api/search?track_name=...&artist_name=... for candidate pairs
-            for ((trackCand, artistCand) in candidatePairs) {
-                if (trackCand.isNotBlank() && artistCand.isNotBlank()) {
-                    val searchUrl =
-                        "$BASE_URL/api/search?track_name=${urlEncode(trackCand)}&artist_name=${urlEncode(artistCand)}"
-                    val match = executeSearchArrayRequest(searchUrl, durationSeconds, trackCand, artistCand)
-                    if (match != null) {
-                        lyricsCache[cacheKey] = match
-                        return@withContext match
-                    }
-                }
-            }
-
-            // Stage 3: Build distinct general search queries (/api/search?q=...)
-            val searchQueries = LinkedHashSet<String>()
-            for ((trackCand, artistCand) in candidatePairs) {
-                if (trackCand.isNotBlank() && artistCand.isNotBlank()) {
-                    searchQueries.add("$trackCand $artistCand".trim())
-                }
-            }
-            if (cleanTitle.isNotBlank()) {
-                searchQueries.add(cleanTitle)
-            }
-            for ((trackCand, _) in candidatePairs) {
-                if (trackCand.isNotBlank()) {
-                    searchQueries.add(trackCand)
-                }
-            }
-            val coreStrippedTitle = stripExtraSubtitleWords(cleanTitle)
-            if (coreStrippedTitle.isNotBlank() && coreStrippedTitle.length >= 2) {
-                searchQueries.add(coreStrippedTitle)
-                if (!isGenericArtist) {
-                    searchQueries.add("$coreStrippedTitle $cleanArtist")
-                }
-            }
-
-            for (query in searchQueries) {
-                if (query.isBlank()) continue
-                val url = "$BASE_URL/api/search?q=${urlEncode(query)}"
-                val match = executeSearchArrayRequest(url, durationSeconds, query, cleanArtist)
+            // Step 3: Try track_name-only search on LRCLIB for the main song name
+            val trackOnlyTarget = candidatePairs.firstOrNull()?.first?.ifBlank { coreStrippedTitle } ?: coreStrippedTitle
+            if (trackOnlyTarget.isNotBlank()) {
+                val url = "$BASE_URL/api/search?track_name=${urlEncode(trackOnlyTarget)}"
+                val match = executeSearchArrayRequest(url, durationSeconds, trackOnlyTarget, if (isGenericArtist) "" else cleanArtist)
                 if (match != null) {
                     lyricsCache[cacheKey] = match
                     return@withContext match
                 }
             }
 
-            // Stage 4: Try track_name-only search on LRCLIB for each segment
-            val trackOnlyCandidates = LinkedHashSet<String>()
-            for ((trackCand, _) in candidatePairs) {
-                if (trackCand.isNotBlank()) trackOnlyCandidates.add(trackCand)
-            }
-            if (coreStrippedTitle.isNotBlank()) trackOnlyCandidates.add(coreStrippedTitle)
-
-            for (trackCand in trackOnlyCandidates) {
-                val url = "$BASE_URL/api/search?track_name=${urlEncode(trackCand)}"
-                val match = executeSearchArrayRequest(url, durationSeconds, trackCand, cleanArtist)
-                if (match != null) {
-                    lyricsCache[cacheKey] = match
-                    return@withContext match
-                }
-            }
-
-            // Stage 5: Fallback to lyrics.ovh API if LRCLIB had no entry
-            for ((trackCand, artistCand) in candidatePairs) {
+            // Step 4: Fallback to lyrics.ovh API if LRCLIB had no entry
+            for ((trackCand, artistCand) in candidatePairs.take(2)) {
                 if (trackCand.isNotBlank() && artistCand.isNotBlank()) {
                     val ovhMatch = fetchFromLyricsOvhFallback(trackCand, artistCand)
                     if (ovhMatch != null) {
@@ -204,7 +186,6 @@ object LrcLibLyricsService {
     ): List<Pair<String, String>> {
         val pairs = mutableListOf<Pair<String, String>>()
 
-        // Check if rawTitle or cleanTitle contains " - ", " – ", " — ", or ":"
         val prePipe = rawTitle.substringBefore("|").trim()
         val segments = prePipe.split(Regex("""\s*[-–—:]\s*"""))
             .map { cleanSongTitle(it) }
@@ -213,8 +194,7 @@ object LrcLibLyricsService {
         if (segments.size >= 2) {
             val first = segments[0]
             val second = segments[1]
-            // In Indian/YouTube music titles, both "Artist - Song" (e.g. "Anuv Jain - INAAM")
-            // and "Song - Artist" are very common. Try both!
+            // Both "Artist - Song" (e.g. "Anuv Jain - INAAM") and "Song - Artist" are common
             pairs.add(second to first)
             pairs.add(first to second)
             if (!isGenericArtist) {
@@ -335,21 +315,11 @@ object LrcLibLyricsService {
                     .map { it.trim() }
                     .filter { it.isNotBlank() && !it.startsWith("Paroles de la chanson", ignoreCase = true) }
                 if (lines.isEmpty()) return null
-                val dualPlain = lines.mapIndexed { idx, line ->
-                    val (hinglish, original) = buildDualLanguageTexts(line)
-                    SyncedLyricLine(
-                        timeMs = idx * 3000L,
-                        text = line,
-                        hinglishText = hinglish,
-                        originalText = original
-                    )
-                }
                 LyricsUiState.Success(
                     trackTitle = track,
                     artistName = artist,
                     syncedLines = emptyList(),
                     plainLines = lines,
-                    plainDualLines = dualPlain,
                     isSynced = false
                 )
             }
@@ -375,7 +345,6 @@ object LrcLibLyricsService {
                 artistName = artistName,
                 syncedLines = syncedLines,
                 plainLines = plainFallback,
-                plainDualLines = syncedLines,
                 isSynced = true
             )
         }
@@ -385,21 +354,11 @@ object LrcLibLyricsService {
                 .map { it.trim() }
                 .filter { it.isNotBlank() }
             if (lines.isNotEmpty()) {
-                val dualLines = lines.mapIndexed { idx, line ->
-                    val (hinglish, original) = buildDualLanguageTexts(line)
-                    SyncedLyricLine(
-                        timeMs = idx * 3000L,
-                        text = line,
-                        hinglishText = hinglish,
-                        originalText = original
-                    )
-                }
                 return LyricsUiState.Success(
                     trackTitle = trackName,
                     artistName = artistName,
                     syncedLines = emptyList(),
                     plainLines = lines,
-                    plainDualLines = dualLines,
                     isSynced = false
                 )
             }
@@ -408,11 +367,6 @@ object LrcLibLyricsService {
         return null
     }
 
-    /**
-     * Parses LRC format lines and enriches every line with BOTH:
-     * - `hinglishText` (Roman script)
-     * - `originalText` (Original script: Devanagari Hindi / Native script)
-     */
     fun parseSyncedLrc(lrcContent: String): List<SyncedLyricLine> {
         val result = mutableListOf<SyncedLyricLine>()
         val timeTagRegex = Regex("""\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?]""")
@@ -423,7 +377,6 @@ object LrcLibLyricsService {
 
             val lyricText = rawLine.replace(timeTagRegex, "").trim()
             val displayLyric = lyricText.ifBlank { "♪ • • ♪" }
-            val (hinglish, original) = buildDualLanguageTexts(displayLyric)
 
             for (match in matches) {
                 val minutes = match.groupValues[1].toLongOrNull() ?: 0L
@@ -439,333 +392,13 @@ object LrcLibLyricsService {
                 result.add(
                     SyncedLyricLine(
                         timeMs = totalMs,
-                        text = displayLyric,
-                        hinglishText = hinglish,
-                        originalText = original
+                        text = displayLyric
                     )
                 )
             }
         }
 
         return result.sortedBy { it.timeMs }
-    }
-
-    /**
-     * Produces `(hinglishText, originalText)` for any lyric line:
-     * 1. If the input line contains Devanagari (Hindi) script, `originalText` is the Devanagari line
-     *    and `hinglishText` is transliterated into smooth Roman Hinglish.
-     * 2. If the input line is in Roman script (Hinglish), `hinglishText` is the Roman line
-     *    and `originalText` is transliterated into Hindi Devanagari script so both Hinglish & Original
-     *    language scripts are displayed together!
-     */
-    fun buildDualLanguageTexts(rawLine: String): Pair<String, String> {
-        val trimmed = rawLine.trim()
-        if (trimmed.isBlank() || trimmed == "♪ • • ♪") {
-            return "♪ • • ♪" to "♪ • • ♪"
-        }
-
-        // Case 1: Line already contains both scripts separated by "/" or "|"
-        if (containsDevanagari(trimmed) && containsLatinLetters(trimmed)) {
-            val parts = trimmed.split(Regex("""\s*[|/]\s*""")).map { it.trim() }.filter { it.isNotEmpty() }
-            if (parts.size >= 2) {
-                val devPart = parts.firstOrNull { containsDevanagari(it) }
-                val latPart = parts.firstOrNull { !containsDevanagari(it) && containsLatinLetters(it) }
-                if (devPart != null && latPart != null) {
-                    return latPart to devPart
-                }
-            }
-        }
-
-        // Case 2: Line is in Devanagari (Hindi) script -> generate Hinglish (Roman)
-        if (containsDevanagari(trimmed)) {
-            val hinglish = transliterateDevanagariToHinglish(trimmed)
-            return hinglish.ifBlank { trimmed } to trimmed
-        }
-
-        // Case 3: Line is in non-Latin native script (Punjabi Gurmukhi, Tamil, Telugu, etc.)
-        if (!containsLatinLetters(trimmed)) {
-            return trimmed to trimmed
-        }
-
-        // Case 4: Line is in Roman script -> transliterate Hinglish to Hindi Devanagari for Original Language line
-        val devanagariOriginal = transliterateHinglishToDevanagari(trimmed)
-        return trimmed to devanagariOriginal
-    }
-
-    private fun containsDevanagari(text: String): Boolean {
-        return text.any { it.code in 0x0900..0x097F }
-    }
-
-    private fun containsLatinLetters(text: String): Boolean {
-        return text.any { it in 'a'..'z' || it in 'A'..'Z' }
-    }
-
-    // Common Hinglish lyric dictionary for natural Devanagari rendering
-    private val HINGLISH_WORD_DICTIONARY = mapOf(
-        "kya" to "क्या", "kyu" to "क्यूँ", "kyun" to "क्यूँ", "kyon" to "क्यों",
-        "tum" to "तुम", "tumko" to "तुमको", "tumhe" to "तुम्हें", "tumhein" to "तुम्हें",
-        "tumhare" to "तुम्हारे", "tumhara" to "तुम्हारा", "tumhari" to "तुम्हारी", "tumse" to "तुमसे",
-        "hum" to "हम", "humko" to "हमको", "humein" to "हमें", "hume" to "हमें", "humse" to "हमसे",
-        "hamara" to "हमारा", "hamari" to "हमारी", "hamare" to "हमारे",
-        "main" to "मैं", "mai" to "मैं", "maine" to "मैंने", "mujhe" to "मुझे", "mujhko" to "मुझको", "mujhse" to "मुझसे",
-        "mera" to "मेरा", "meri" to "मेरी", "mere" to "मेरे",
-        "tu" to "तू", "tune" to "तूने", "tujhe" to "तुझे", "tujhko" to "तुझको", "tujhse" to "तुझसे",
-        "tera" to "तेरा", "teri" to "तेरी", "tere" to "तेरे",
-        "wo" to "वो", "woh" to "वो", "ye" to "ये", "yeh" to "यह", "is" to "इस", "us" to "उस",
-        "hai" to "है", "hain" to "हैं", "ho" to "हो", "hoon" to "हूँ", "hun" to "हूँ",
-        "tha" to "था", "thi" to "थी", "the" to "थे",
-        "na" to "ना", "nahi" to "नहीं", "nahin" to "नहीं", "mat" to "मत",
-        "aur" to "और", "ya" to "या", "par" to "पर", "pe" to "पे", "se" to "से",
-        "ko" to "को", "ka" to "का", "ki" to "की", "ke" to "के",
-        "mein" to "में", "me" to "में", "bhi" to "भी", "hi" to "ही", "to" to "तो", "toh" to "तो",
-        "dil" to "दिल", "pyar" to "प्यार", "pyaar" to "प्यार", "ishq" to "इश्क़", "mohabbat" to "मोहब्बत",
-        "jaan" to "जान", "jaana" to "जाना", "jaane" to "जाने", "jaaneman" to "जानेमन",
-        "yaad" to "याद", "yaadein" to "यादें", "yaadon" to "यादों",
-        "raat" to "रात", "raatein" to "रातें", "din" to "दिन", "shaam" to "शाम", "subah" to "सुबह",
-        "ankhein" to "आँखें", "aankhein" to "आँखें", "aankhon" to "आँखों", "aankh" to "आँख",
-        "baat" to "बात", "baatein" to "बातें", "baaton" to "बातों",
-        "saath" to "साथ", "sath" to "साथ", "haath" to "हाथ", "hath" to "हाथ",
-        "zindagi" to "ज़िंदगी", "duniya" to "दुनिया", "jahan" to "जहाँ", "kahan" to "कहाँ", "yahan" to "यहाँ", "wahan" to "वहाँ",
-        "kabhi" to "कभी", "kuch" to "कुछ", "kuchh" to "कुछ", "koi" to "कोई", "sab" to "सब",
-        "ab" to "अब", "jab" to "जब", "tab" to "तब", "kab" to "कब",
-        "kaise" to "कैसे", "kaisa" to "कैसा", "kaisi" to "कैसी", "jaise" to "जैसे", "aisa" to "ऐसा", "aisi" to "ऐसी",
-        "kitna" to "कितना", "kitni" to "कितनी", "kitne" to "कितने", "itna" to "इतना", "itni" to "इतनी",
-        "karte" to "करते", "karta" to "करता", "karti" to "करती", "kar" to "कर", "karo" to "करो", "kiya" to "किया",
-        "kehte" to "कहते", "kehta" to "कहता", "kehti" to "कहती", "kaha" to "कहा", "kaho" to "कहो",
-        "pehle" to "पहले", "pehlay" to "पहले", "panay" to "पाने", "paane" to "पाने", "paana" to "पाना",
-        "chah" to "चाह", "chaah" to "चाह", "chahat" to "चाहत", "chahte" to "चाहते",
-        "inaam" to "इनाम", "ilzaam" to "इल्ज़ाम", "naam" to "नाम", "kaam" to "काम",
-        "dekho" to "देखो", "dekha" to "देखा", "dekhe" to "देखे", "dekh" to "देख",
-        "suno" to "सुनो", "suna" to "सुना", "sun" to "सुन",
-        "chalo" to "चलो", "chala" to "चला", "chali" to "चली", "chal" to "चल",
-        "aao" to "आओ", "aaya" to "आया", "aayi" to "आई", "aaye" to "आए", "aa" to "आ",
-        "gaya" to "गया", "gayi" to "गई", "gaye" to "गए", "ja" to "जा", "jao" to "जाओ",
-        "raha" to "रहा", "rahi" to "रही", "rahe" to "रहे", "rehna" to "रहना",
-        "mil" to "मिल", "mila" to "मिला", "mili" to "मिली", "mile" to "मिले", "milna" to "मिलना",
-        "khuda" to "ख़ुदा", "rab" to "रब", "maula" to "मौला", "dua" to "दुआ",
-        "hawa" to "हवा", "aasman" to "आसमान", "aasmaan" to "आसमान", "chand" to "चाँद", "taare" to "तारे",
-        "sapna" to "सपना", "sapne" to "सपने", "khwab" to "ख़्वाब", "khwaab" to "ख़्वाब",
-        "apna" to "अपना", "apni" to "अपनी", "apne" to "अपने", "paraya" to "पराया",
-        "sajna" to "सजना", "saajana" to "साजना", "mahi" to "माही", "maahi" to "माही", "piya" to "पिया", "sanam" to "सनम",
-        "bewafa" to "बेवफ़ा", "wafa" to "वफ़ा", "dard" to "दर्द", "gham" to "ग़म", "khushi" to "ख़ुशी",
-        "muskan" to "मुस्कान", "hansi" to "हँसी", "aansu" to "आँसू",
-        "raasta" to "रास्ता", "raaste" to "रास्ते", "manzil" to "मंज़िल", "safar" to "सफ़र",
-        "pal" to "पल", "lamha" to "लम्हा", "lamhe" to "लम्हे", "waqt" to "वक़्त",
-        "phir" to "फिर", "fir" to "फिर", "bina" to "बिना", "bin" to "बिन", "sang" to "संग"
-    )
-
-    private fun transliterateHinglishToDevanagari(line: String): String {
-        val tokens = Regex("""([A-Za-z']+)|([^A-Za-z']+)""").findAll(line)
-        val out = StringBuilder()
-        for (match in tokens) {
-            val token = match.value
-            if (token.first().isLetter()) {
-                val lower = token.lowercase(Locale.US).replace("'", "")
-                val dictHit = HINGLISH_WORD_DICTIONARY[lower]
-                if (dictHit != null) {
-                    out.append(dictHit)
-                } else {
-                    out.append(phoneticRomanToDevanagariWord(lower))
-                }
-            } else {
-                out.append(token)
-            }
-        }
-        return out.toString()
-    }
-
-    private fun phoneticRomanToDevanagariWord(word: String): String {
-        if (word.isEmpty()) return ""
-        val sb = StringBuilder()
-        var i = 0
-        val n = word.length
-
-        while (i < n) {
-            val isStart = (i == 0)
-            val rem = word.substring(i)
-
-            // Check vowels at word start
-            if (isStart) {
-                when {
-                    rem.startsWith("aa") -> { sb.append("आ"); i += 2; continue }
-                    rem.startsWith("ai") -> { sb.append("ऐ"); i += 2; continue }
-                    rem.startsWith("au") -> { sb.append("औ"); i += 2; continue }
-                    rem.startsWith("ee") -> { sb.append("ई"); i += 2; continue }
-                    rem.startsWith("oo") -> { sb.append("ऊ"); i += 2; continue }
-                    rem.startsWith("a") -> { sb.append("अ"); i += 1; continue }
-                    rem.startsWith("i") -> { sb.append("इ"); i += 1; continue }
-                    rem.startsWith("u") -> { sb.append("उ"); i += 1; continue }
-                    rem.startsWith("e") -> { sb.append("ए"); i += 1; continue }
-                    rem.startsWith("o") -> { sb.append("ओ"); i += 1; continue }
-                }
-            }
-
-            // Match consonant (up to 3 chars like chh, ksh)
-            val (consDeva, consLen) = when {
-                rem.startsWith("chh") -> "छ" to 3
-                rem.startsWith("ksh") -> "क्ष" to 3
-                rem.startsWith("kh") -> "ख" to 2
-                rem.startsWith("gh") -> "घ" to 2
-                rem.startsWith("ch") -> "च" to 2
-                rem.startsWith("jh") -> "झ" to 2
-                rem.startsWith("th") -> "थ" to 2
-                rem.startsWith("dh") -> "ध" to 2
-                rem.startsWith("ph") -> "फ" to 2
-                rem.startsWith("bh") -> "भ" to 2
-                rem.startsWith("sh") -> "श" to 2
-                rem.startsWith("gy") -> "ज्ञ" to 2
-                rem.startsWith("k") -> "क" to 1
-                rem.startsWith("q") -> "क़" to 1
-                rem.startsWith("g") -> "ग" to 1
-                rem.startsWith("c") -> "क" to 1
-                rem.startsWith("j") -> "ज" to 1
-                rem.startsWith("z") -> "ज़" to 1
-                rem.startsWith("t") -> "त" to 1
-                rem.startsWith("d") -> "द" to 1
-                rem.startsWith("n") -> "न" to 1
-                rem.startsWith("p") -> "प" to 1
-                rem.startsWith("f") -> "फ़" to 1
-                rem.startsWith("b") -> "ब" to 1
-                rem.startsWith("m") -> "म" to 1
-                rem.startsWith("y") -> "य" to 1
-                rem.startsWith("r") -> "र" to 1
-                rem.startsWith("l") -> "ल" to 1
-                rem.startsWith("v") || rem.startsWith("w") -> "व" to 1
-                rem.startsWith("s") -> "स" to 1
-                rem.startsWith("h") -> "ह" to 1
-                else -> "" to 0
-            }
-
-            if (consLen > 0) {
-                sb.append(consDeva)
-                i += consLen
-                if (i >= n) break
-                val afterCons = word.substring(i)
-                when {
-                    afterCons.startsWith("aa") -> { sb.append("ा"); i += 2 }
-                    afterCons.startsWith("ai") || afterCons.startsWith("ay") -> { sb.append("ै"); i += 2 }
-                    afterCons.startsWith("au") -> { sb.append("ौ"); i += 2 }
-                    afterCons.startsWith("ee") -> { sb.append("ी"); i += 2 }
-                    afterCons.startsWith("oo") -> { sb.append("ू"); i += 2 }
-                    afterCons.startsWith("a") -> {
-                        // In Hinglish, trailing 'a' at the end of a word is long 'ा' (e.g. "tera" -> "तेरा")
-                        if (i == n - 1) {
-                            sb.append("ा")
-                        }
-                        i += 1
-                    }
-                    afterCons.startsWith("i") -> {
-                        sb.append(if (i == n - 1) "ी" else "ि")
-                        i += 1
-                    }
-                    afterCons.startsWith("u") -> { sb.append("ु"); i += 1 }
-                    afterCons.startsWith("e") -> { sb.append("े"); i += 1 }
-                    afterCons.startsWith("o") -> { sb.append("ो"); i += 1 }
-                    else -> {
-                        // Consonant cluster (add halant if another consonant immediately follows)
-                        if (i < n && !isRomanVowel(word[i])) {
-                            sb.append("्")
-                        }
-                    }
-                }
-            } else {
-                // Standalone vowel inside word
-                when {
-                    rem.startsWith("aa") -> { sb.append("ा"); i += 2 }
-                    rem.startsWith("ee") -> { sb.append("ी"); i += 2 }
-                    rem.startsWith("oo") -> { sb.append("ू"); i += 2 }
-                    rem.startsWith("a") -> { sb.append("ा"); i += 1 }
-                    rem.startsWith("i") -> { sb.append("ि"); i += 1 }
-                    rem.startsWith("u") -> { sb.append("ु"); i += 1 }
-                    rem.startsWith("e") -> { sb.append("े"); i += 1 }
-                    rem.startsWith("o") -> { sb.append("ो"); i += 1 }
-                    else -> { i += 1 }
-                }
-            }
-        }
-        return sb.toString()
-    }
-
-    private fun isRomanVowel(c: Char): Boolean {
-        return c == 'a' || c == 'e' || c == 'i' || c == 'o' || c == 'u'
-    }
-
-    private fun transliterateDevanagariToHinglish(text: String): String {
-        val consonantMap: Map<Char, String> = mapOf(
-            'क' to "k", 'ख' to "kh", 'ग' to "g", 'घ' to "gh", 'ङ' to "n",
-            'च' to "ch", 'छ' to "chh", 'ज' to "j", 'झ' to "jh", 'ञ' to "n",
-            'ट' to "t", 'ठ' to "th", 'ड' to "d", 'ढ' to "dh", 'ण' to "n",
-            'त' to "t", 'थ' to "th", 'द' to "d", 'ध' to "dh", 'न' to "n",
-            'प' to "p", 'फ' to "ph", 'ब' to "b", 'भ' to "bh", 'म' to "m",
-            'य' to "y", 'र' to "r", 'ल' to "l", 'व' to "v",
-            'श' to "sh", 'ष' to "sh", 'स' to "s", 'ह' to "h"
-        )
-        val vowelMap = mapOf(
-            'अ' to "a", 'आ' to "aa", 'इ' to "i", 'ई' to "ee",
-            'उ' to "u", 'ऊ' to "oo", 'ऋ' to "ri",
-            'ए' to "e", 'ऐ' to "ai", 'ओ' to "o", 'औ' to "au"
-        )
-        val matraMap = mapOf(
-            'ा' to "aa", 'ि' to "i", 'ी' to "ee",
-            'ु' to "u", 'ू' to "oo", 'ृ' to "ri",
-            'े' to "e", 'ै' to "ai", 'ो' to "o", 'ौ' to "au",
-            'ं' to "n", 'ँ' to "n", 'ः' to "h"
-        )
-
-        val sb = StringBuilder()
-        var i = 0
-        while (i < text.length) {
-            val ch = text[i]
-            val next = text.getOrNull(i + 1)
-
-            if (consonantMap.containsKey(ch)) {
-                val base = consonantMap[ch] ?: ""
-                sb.append(base)
-                when {
-                    next == '्' -> {
-                        i += 2
-                        continue
-                    }
-                    next == '़' -> {
-                        val afterNukta = text.getOrNull(i + 2)
-                        if (afterNukta != null && matraMap.containsKey(afterNukta)) {
-                            sb.append(matraMap[afterNukta])
-                            i += 3
-                        } else {
-                            if (afterNukta != null && afterNukta.code in 0x0900..0x097F) {
-                                sb.append("a")
-                            }
-                            i += 2
-                        }
-                        continue
-                    }
-                    next != null && matraMap.containsKey(next) -> {
-                        sb.append(matraMap[next])
-                        i += 2
-                        continue
-                    }
-                    else -> {
-                        val isWordEnd = next == null || next.isWhitespace() || next !in '\u0900'..'\u097F'
-                        if (!isWordEnd) {
-                            sb.append("a")
-                        }
-                        i += 1
-                        continue
-                    }
-                }
-            } else if (vowelMap.containsKey(ch)) {
-                sb.append(vowelMap[ch])
-            } else if (matraMap.containsKey(ch)) {
-                sb.append(matraMap[ch])
-            } else if (ch != '्' && ch != '़') {
-                sb.append(ch)
-            }
-            i += 1
-        }
-        return sb.toString()
-            .replace(Regex("""\s+"""), " ")
-            .trim()
-            .replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.US) else it.toString() }
     }
 
     private fun cleanSongTitle(rawTitle: String): String {

@@ -89,7 +89,8 @@ fun PersistentMiniPlayer(
                     imageUrl = song.resolvedBannerUrl,
                     contentDescription = song.title,
                     modifier = Modifier.size(48.dp),
-                    cornerRadius = 10.dp
+                    cornerRadius = 10.dp,
+                    fallbackVideoId = song.cleanVideoId
                 )
 
                 Spacer(modifier = Modifier.width(12.dp))

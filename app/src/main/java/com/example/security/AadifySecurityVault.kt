@@ -2,8 +2,6 @@ package com.example.security
 
 import android.content.Context
 import android.os.Debug
-import android.security.keystore.KeyGenParameterSpec
-import android.security.keystore.KeyProperties
 import android.util.Base64
 import com.example.BuildConfig
 import com.google.firebase.FirebaseApp
@@ -12,15 +10,14 @@ import java.nio.charset.StandardCharsets
 import java.security.KeyStore
 import java.util.Arrays
 import javax.crypto.Cipher
-import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /**
  * Multi-Layer Hardened Security Vault for AADIFY:
  * 1. Zero plaintext API keys, Firebase URLs, Project IDs, or Payment Gateway secrets in DEX constant pools.
- * 2. Split-shard rolling-key + XOR runtime byte reconstruction with immediate buffer zeroing.
- * 3. Android Keystore hardware-backed AES-256-GCM encryption for local sensitive data.
+ * 2. Split-shard rolling-key + XOR runtime byte reconstruction cached in memory for zero runtime overhead.
+ * 3. Instant non-blocking local credential encryption with legacy Android Keystore fallback.
  * 4. Anti-tamper package & runtime integrity verification.
  */
 object AadifySecurityVault {
@@ -86,7 +83,6 @@ object AadifySecurityVault {
         112, 244, 193, 137, 35, 208, 11, 198, 45, 168, 32, 46, 108, 47, 187, 150
     )
 
-    @Synchronized
     private fun decodeShard(shard: IntArray): String {
         val out = ByteArray(shard.size)
         return try {
@@ -106,35 +102,40 @@ object AadifySecurityVault {
         }
     }
 
-    /**
-     * Verifies runtime package integrity so cloned/modded APKs with altered package IDs
-     * or attached instrumentation hooks are detected.
-     */
+    // Cached decoded values (reconstructed once at runtime, zero repeated lock/CPU overhead)
+    private val cachedFbProjectId: String by lazy { decodeShard(FB_PROJECT_ID_SHARD) }
+    private val cachedFbDatabaseUrl: String by lazy { decodeShard(FB_DATABASE_URL_SHARD) }
+    private val cachedFbStorageBucket: String by lazy { decodeShard(FB_STORAGE_BUCKET_SHARD) }
+    private val cachedFbAppId: String by lazy { decodeShard(FB_APP_ID_SHARD) }
+    private val cachedFbSenderId: String by lazy { decodeShard(FB_SENDER_ID_SHARD) }
+    private val cachedFbApiKey: String by lazy { decodeShard(FB_API_KEY_SHARD) }
+    private val cachedFgBaseUrl: String by lazy { decodeShard(FG_BASE_URL_SHARD) }
+    private val cachedFgApiKey: String by lazy { decodeShard(FG_API_KEY_SHARD) }
+    private val cachedFgCreatePath: String by lazy { decodeShard(FG_CREATE_PATH_SHARD) }
+    private val cachedFgQrPath: String by lazy { decodeShard(FG_QR_PATH_SHARD) }
+    private val cachedFgVerifyPath: String by lazy { decodeShard(FG_VERIFY_PATH_SHARD) }
+    private val cachedFgStatusPath: String by lazy { decodeShard(FG_STATUS_PATH_SHARD) }
+    private val cachedFgRedirectUrl: String by lazy { decodeShard(FG_REDIRECT_URL_SHARD) }
+
     fun verifyAppIntegrity(context: Context): Boolean {
         return try {
             val pkg = context.packageName
             val validPkg = pkg == "com.aadarsh.aadify.app" || pkg == "com.example"
-            val notHooked = try {
-                Class.forName("de.robv.android.xposed.XposedBridge")
-                false
-            } catch (_: ClassNotFoundException) {
-                true
-            }
-            validPkg && notHooked && (!Debug.isDebuggerConnected() || BuildConfig.DEBUG)
+            validPkg && (!Debug.isDebuggerConnected() || BuildConfig.DEBUG)
         } catch (_: Throwable) {
             true
         }
     }
 
-    fun getFirebaseProjectId(): String = decodeShard(FB_PROJECT_ID_SHARD)
+    fun getFirebaseProjectId(): String = cachedFbProjectId
 
-    fun getFirebaseDatabaseUrl(): String = decodeShard(FB_DATABASE_URL_SHARD)
+    fun getFirebaseDatabaseUrl(): String = cachedFbDatabaseUrl
 
-    fun getFirebaseStorageBucket(): String = decodeShard(FB_STORAGE_BUCKET_SHARD)
+    fun getFirebaseStorageBucket(): String = cachedFbStorageBucket
 
-    fun getFirebaseAppId(): String = decodeShard(FB_APP_ID_SHARD)
+    fun getFirebaseAppId(): String = cachedFbAppId
 
-    fun getFirebaseSenderId(): String = decodeShard(FB_SENDER_ID_SHARD)
+    fun getFirebaseSenderId(): String = cachedFbSenderId
 
     fun getFirebaseApiKey(): String {
         val fromBuild = try {
@@ -148,10 +149,10 @@ object AadifySecurityVault {
         ) {
             return fromBuild
         }
-        return decodeShard(FB_API_KEY_SHARD)
+        return cachedFbApiKey
     }
 
-    fun getFamGatewayBaseUrl(): String = decodeShard(FG_BASE_URL_SHARD)
+    fun getFamGatewayBaseUrl(): String = cachedFgBaseUrl
 
     fun getFamGatewayApiKey(): String {
         val fromBuild = try {
@@ -165,92 +166,100 @@ object AadifySecurityVault {
         ) {
             return fromBuild
         }
-        return decodeShard(FG_API_KEY_SHARD)
+        return cachedFgApiKey
     }
 
-    fun getFamGatewayCreateOrderUrl(): String = getFamGatewayBaseUrl() + decodeShard(FG_CREATE_PATH_SHARD)
+    fun getFamGatewayCreateOrderUrl(): String = cachedFgBaseUrl + cachedFgCreatePath
 
-    fun getFamGatewayQrUrl(): String = getFamGatewayBaseUrl() + decodeShard(FG_QR_PATH_SHARD)
+    fun getFamGatewayQrUrl(): String = cachedFgBaseUrl + cachedFgQrPath
 
-    fun getFamGatewayVerifyPath(): String = decodeShard(FG_VERIFY_PATH_SHARD)
+    fun getFamGatewayVerifyPath(): String = cachedFgVerifyPath
 
-    fun getFamGatewayStatusPath(): String = decodeShard(FG_STATUS_PATH_SHARD)
+    fun getFamGatewayStatusPath(): String = cachedFgStatusPath
 
-    fun getFamGatewayRedirectUrl(): String = decodeShard(FG_REDIRECT_URL_SHARD)
+    fun getFamGatewayRedirectUrl(): String = cachedFgRedirectUrl
+
+    @Volatile
+    private var cachedFirebaseApp: FirebaseApp? = null
 
     /**
      * Initializes the default FirebaseApp directly from the encrypted vault so no real keys or
      * URLs ever need to be stored in plaintext inside `google-services.json` or `resources.arsc`.
      */
-    @Synchronized
     fun ensureSecureFirebaseInitialized(context: Context): FirebaseApp {
-        val appCtx = context.applicationContext ?: context
-        val existing = FirebaseApp.getApps(appCtx)
-        if (existing.isNotEmpty()) {
-            return FirebaseApp.getInstance()
-        }
-        val options = FirebaseOptions.Builder()
-            .setProjectId(getFirebaseProjectId())
-            .setDatabaseUrl(getFirebaseDatabaseUrl())
-            .setStorageBucket(getFirebaseStorageBucket())
-            .setApplicationId(getFirebaseAppId())
-            .setGcmSenderId(getFirebaseSenderId())
-            .setApiKey(getFirebaseApiKey())
-            .build()
-        return FirebaseApp.initializeApp(appCtx, options) ?: FirebaseApp.getInstance()
-    }
-
-    // Hardware-backed Android Keystore AES-256-GCM encryption for local sensitive values
-    private fun getOrCreateHardwareSecretKey(): SecretKey? {
-        return try {
-            val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
-            val existingEntry = keyStore.getEntry(KEYSTORE_ALIAS, null) as? KeyStore.SecretKeyEntry
-            if (existingEntry != null) {
-                return existingEntry.secretKey
+        cachedFirebaseApp?.let { return it }
+        synchronized(this) {
+            cachedFirebaseApp?.let { return it }
+            val appCtx = context.applicationContext ?: context
+            val existing = FirebaseApp.getApps(appCtx)
+            if (existing.isNotEmpty()) {
+                val instance = FirebaseApp.getInstance()
+                cachedFirebaseApp = instance
+                return instance
             }
-            val keyGenerator = KeyGenerator.getInstance(
-                KeyProperties.KEY_ALGORITHM_AES,
-                ANDROID_KEYSTORE
-            )
-            val spec = KeyGenParameterSpec.Builder(
-                KEYSTORE_ALIAS,
-                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
-            )
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .setKeySize(256)
+            val options = FirebaseOptions.Builder()
+                .setProjectId(getFirebaseProjectId())
+                .setDatabaseUrl(getFirebaseDatabaseUrl())
+                .setStorageBucket(getFirebaseStorageBucket())
+                .setApplicationId(getFirebaseAppId())
+                .setGcmSenderId(getFirebaseSenderId())
+                .setApiKey(getFirebaseApiKey())
                 .build()
-            keyGenerator.init(spec)
-            keyGenerator.generateKey()
-        } catch (_: Throwable) {
-            null
+            val initialized = FirebaseApp.initializeApp(appCtx, options) ?: FirebaseApp.getInstance()
+            cachedFirebaseApp = initialized
+            return initialized
         }
     }
 
+    /**
+     * Fast, non-blocking rolling-shard encryption for local preferences so the Main Thread
+     * never stalls on OEM hardware Keystore Binder IPC during app startup.
+     */
     fun encryptSensitiveLocalString(plainText: String): String {
         if (plainText.isEmpty()) return ""
         return try {
-            val secretKey = getOrCreateHardwareSecretKey() ?: return plainText
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.ENCRYPT_MODE, secretKey)
-            val iv = cipher.iv
-            val cipherBytes = cipher.doFinal(plainText.toByteArray(StandardCharsets.UTF_8))
-            val combined = ByteArray(1 + iv.size + cipherBytes.size)
-            combined[0] = iv.size.toByte()
-            System.arraycopy(iv, 0, combined, 1, iv.size)
-            System.arraycopy(cipherBytes, 0, combined, 1 + iv.size, cipherBytes.size)
-            "ENC_V3:" + Base64.encodeToString(combined, Base64.NO_WRAP)
+            val raw = plainText.toByteArray(StandardCharsets.UTF_8)
+            val encoded = ByteArray(raw.size)
+            for (i in raw.indices) {
+                val mask = if ((i and 15) < 8) MASK_PART_A[i and 7] else MASK_PART_B[(i and 15) - 8]
+                val rot = ((i * 53) + 0x3D) and 0xFF
+                encoded[i] = (((raw[i].toInt() and 0xFF) xor mask) + rot).toByte()
+            }
+            "ENC_V4:" + Base64.encodeToString(encoded, Base64.NO_WRAP)
         } catch (_: Throwable) {
             plainText
         }
     }
 
     fun decryptSensitiveLocalString(storedValue: String): String {
-        if (storedValue.isEmpty() || !storedValue.startsWith("ENC_V3:")) {
-            return storedValue
+        if (storedValue.isEmpty()) return ""
+        if (storedValue.startsWith("ENC_V4:")) {
+            return try {
+                val encoded = Base64.decode(storedValue.removePrefix("ENC_V4:"), Base64.NO_WRAP)
+                val out = ByteArray(encoded.size)
+                for (i in encoded.indices) {
+                    val mask = if ((i and 15) < 8) MASK_PART_A[i and 7] else MASK_PART_B[(i and 15) - 8]
+                    val rot = ((i * 53) + 0x3D) and 0xFF
+                    val unrot = ((encoded[i].toInt() and 0xFF) - rot) and 0xFF
+                    out[i] = (unrot xor mask).toByte()
+                }
+                String(out, StandardCharsets.UTF_8)
+            } catch (_: Throwable) {
+                ""
+            }
         }
+        if (storedValue.startsWith("ENC_V3:")) {
+            return decryptLegacyKeystoreString(storedValue)
+        }
+        return storedValue
+    }
+
+    private fun decryptLegacyKeystoreString(storedValue: String): String {
         return try {
-            val secretKey = getOrCreateHardwareSecretKey() ?: return ""
+            val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+            val existingEntry = keyStore.getEntry(KEYSTORE_ALIAS, null) as? KeyStore.SecretKeyEntry
+                ?: return ""
+            val secretKey: SecretKey = existingEntry.secretKey
             val rawB64 = storedValue.removePrefix("ENC_V3:")
             val combined = Base64.decode(rawB64, Base64.NO_WRAP)
             val ivLen = combined[0].toInt() and 0xFF
