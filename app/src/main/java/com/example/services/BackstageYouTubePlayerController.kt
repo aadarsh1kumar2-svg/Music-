@@ -229,7 +229,8 @@ class BackstageYouTubePlayerController(
                 domStorageEnabled = true
                 databaseEnabled = true
                 mediaPlaybackRequiresUserGesture = false
-                loadsImagesAutomatically = true
+                loadsImagesAutomatically = false
+                blockNetworkImage = true
                 mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                 cacheMode = WebSettings.LOAD_DEFAULT
                 useWideViewPort = true
@@ -282,36 +283,6 @@ class BackstageYouTubePlayerController(
                     injectVideoBridgeScript(token, targetId)
                 }
 
-                override fun shouldInterceptRequest(
-                    view: WebView?,
-                    request: WebResourceRequest?
-                ): WebResourceResponse? {
-                    val reqUrl = request?.url?.toString()?.lowercase(Locale.US) ?: return null
-                    val isAdRequest = reqUrl.contains("doubleclick.net") ||
-                        reqUrl.contains("googlesyndication.com") ||
-                        reqUrl.contains("googleadservices.com") ||
-                        reqUrl.contains("googleads.") ||
-                        reqUrl.contains("/pagead/") ||
-                        reqUrl.contains("/api/stats/ads") ||
-                        reqUrl.contains("/api/stats/atr") ||
-                        reqUrl.contains("/ptracking") ||
-                        reqUrl.contains("/get_midroll_info") ||
-                        reqUrl.contains("ad_break") ||
-                        reqUrl.contains("adformat=") ||
-                        reqUrl.contains("&oad=")
-                    if (isAdRequest) {
-                        return WebResourceResponse(
-                            "text/plain",
-                            "UTF-8",
-                            204,
-                            "No Content",
-                            emptyMap(),
-                            ByteArrayInputStream(ByteArray(0))
-                        )
-                    }
-                    return super.shouldInterceptRequest(view, request)
-                }
-
                 override fun shouldOverrideUrlLoading(
                     view: WebView?,
                     request: WebResourceRequest?
@@ -332,6 +303,13 @@ class BackstageYouTubePlayerController(
         try {
             BackgroundGamingAudioKeeper.getInstance(context).attachWebView(created)
         } catch (_: Exception) {
+        }
+        // Pre-warm DNS + TLS 1.3 connection to m.youtube.com with a tiny 500-byte request so first song tap is instant
+        if (currentLoadedVideoId.isBlank()) {
+            try {
+                created.loadUrl("https://m.youtube.com/robots.txt")
+            } catch (_: Exception) {
+            }
         }
         return created
     }
@@ -452,7 +430,7 @@ class BackstageYouTubePlayerController(
             mainHandler.removeCallbacks(nativeHeartbeatRunnable)
 
             val currentWebUrl = view.url.orEmpty()
-            val canAttemptInPlace = currentWebUrl.contains("youtube.com")
+            val canAttemptInPlace = currentWebUrl.contains("youtube.com/watch")
 
             if (canAttemptInPlace) {
                 view.evaluateJavascript(
@@ -510,7 +488,7 @@ class BackstageYouTubePlayerController(
                             }
                         }
                         fallbackUrlReloadRunnable = reloadCheck
-                        mainHandler.postDelayed(reloadCheck, 4500L)
+                        mainHandler.postDelayed(reloadCheck, 2200L)
                     } else {
                         view.loadUrl(watchUrl)
                     }
@@ -1105,45 +1083,6 @@ class BackstageYouTubePlayerController(
                     return false;
                 }
 
-                // Strip adPlacements / playerAds / adSlots from player responses so pre-roll & mid-roll ads are prevented
-                try {
-                    if (!window.__akAdJsonHooked) {
-                        window.__akAdJsonHooked = true;
-                        var stripAdKeys = function(obj) {
-                            if (!obj || typeof obj !== 'object') return obj;
-                            try {
-                                delete obj.adPlacements;
-                                delete obj.playerAds;
-                                delete obj.adSlots;
-                                delete obj.adBreakHeartbeatParams;
-                                if (obj.playerResponse && typeof obj.playerResponse === 'object') {
-                                    delete obj.playerResponse.adPlacements;
-                                    delete obj.playerResponse.playerAds;
-                                    delete obj.playerResponse.adSlots;
-                                    delete obj.playerResponse.adBreakHeartbeatParams;
-                                }
-                            } catch (e) {}
-                            return obj;
-                        };
-                        if (window.ytInitialPlayerResponse) {
-                            stripAdKeys(window.ytInitialPlayerResponse);
-                        }
-                        var origParse = JSON.parse;
-                        JSON.parse = function() {
-                            var parsed = origParse.apply(this, arguments);
-                            return stripAdKeys(parsed);
-                        };
-                        if (window.Response && window.Response.prototype && window.Response.prototype.json) {
-                            var origResJson = window.Response.prototype.json;
-                            window.Response.prototype.json = function() {
-                                return origResJson.apply(this, arguments).then(function(data) {
-                                    return stripAdKeys(data);
-                                });
-                            };
-                        }
-                    }
-                } catch (e) {}
-
                 function isAdPlaying() {
                     if (document.querySelector('.ad-showing, .ad-interrupting, .ytp-ad-player-overlay, .ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-skip-ad-button, .ytp-ad-skip-button-slot, .videoAdUi')) {
                         return true;
@@ -1162,23 +1101,17 @@ class BackstageYouTubePlayerController(
                     return false;
                 }
 
-                function skipAndMuteAdInstantly(v) {
+                function skipAndMuteAdInstantly(vOpt) {
                     try {
-                        // 1. Immediately mute ad audio so user never hears a single frame of ad sound
+                        var v = vOpt || document.querySelector('video');
                         if (v) {
                             v.muted = true;
                             v.volume = 0;
                         }
                         var mp = getMoviePlayer();
-                        if (mp) {
-                            if (typeof mp.skipAd === 'function') {
-                                try { mp.skipAd(); } catch (e) {}
-                            }
-                            if (typeof mp.cancelPlayback === 'function' && typeof mp.playVideo === 'function') {
-                                // Only if skipAd didn't clear it
-                            }
+                        if (mp && typeof mp.skipAd === 'function') {
+                            try { mp.skipAd(); } catch (e) {}
                         }
-                        // 2. Click any skip button variant (modern & mobile YouTube selectors)
                         var skipSelectors = [
                             '.ytp-ad-skip-button',
                             '.ytp-ad-skip-button-modern',
@@ -1196,20 +1129,41 @@ class BackstageYouTubePlayerController(
                                 }
                             }
                         }
-                        // 3. Fast-forward the ad video element directly to its end
                         if (v) {
                             try { v.playbackRate = 16.0; } catch (e) {}
                             var adDur = v.duration;
                             if (adDur && isFinite(adDur) && adDur > 0 && adDur < 600) {
-                                if (v.currentTime < adDur - 0.1) {
+                                if (v.currentTime < adDur - 0.05) {
                                     try { v.currentTime = adDur; } catch (e) {}
                                 }
-                            } else {
-                                try { v.currentTime = (v.currentTime || 0) + 60; } catch (e) {}
                             }
                         }
                     } catch (e) {}
                 }
+
+                // Zero-latency MutationObserver + fast 120ms guard to skip any pre-roll or mid-roll ad in <100ms
+                try {
+                    if (!window.__akFastAdGuardInstalled) {
+                        window.__akFastAdGuardInstalled = true;
+                        setInterval(function() {
+                            if (isAdPlaying()) {
+                                skipAndMuteAdInstantly(document.querySelector('video'));
+                            }
+                        }, 120);
+                        if (typeof MutationObserver !== 'undefined' && document.documentElement) {
+                            var adObserver = new MutationObserver(function() {
+                                if (isAdPlaying()) {
+                                    skipAndMuteAdInstantly(document.querySelector('video'));
+                                }
+                            });
+                            adObserver.observe(document.documentElement, {
+                                attributes: true,
+                                subtree: true,
+                                attributeFilter: ['class']
+                            });
+                        }
+                    }
+                } catch (e) {}
 
                 function getTrueDuration(v) {
                     if (!isCurrentVideoMatchingTarget() || isAdPlaying()) return 0;
