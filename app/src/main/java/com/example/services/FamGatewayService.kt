@@ -1,9 +1,8 @@
 package com.example.services
 
-import android.util.Base64
 import android.util.Log
-import com.example.BuildConfig
 import com.example.models.SubscriptionPlanType
+import com.example.security.AadifySecurityVault
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -55,41 +54,18 @@ data class FamOrderStatusResult(
 }
 
 /**
- * Official FamGateway v2.0 Production UPI Payment Service
- * Base URL: https://famgateway.in
- *
- * - Creates Dynamic UPI QR & UPI Intent Orders (`POST /api/create-order` & `/api/qr.php`)
- * - Polls Live Payment Status (`GET /api/checkout-status.php?order_id=...`)
- * - Performs Authoritative Verification (`GET /api/verify-order.php`)
- * - Supports Timing-Safe HMAC-SHA256 Signature Verification
+ * Hardened UPI Payment Service backed by AadifySecurityVault (zero plaintext keys or URLs in DEX).
  */
 class FamGatewayService {
 
     companion object {
-        private const val TAG = "FamGatewayService"
-        const val BASE_URL = "https://famgateway.in"
+        private const val TAG = "AadifyPaymentVault"
 
-        // Obfuscated fallback key if BuildConfig.FAMGATEWAY_API_KEY is not injected via .env yet
-        private const val ENCODED_DEFAULT_KEY =
-            "ZmFtX2Q4MjFmMDkzNDFiYzI4MmNjNzZlZWRjM2FkZDFhMjIxZTQzZGRlYjE="
+        val BASE_URL: String
+            get() = AadifySecurityVault.getFamGatewayBaseUrl()
 
         fun resolveApiKey(): String {
-            val fromBuildConfig = try {
-                BuildConfig.FAMGATEWAY_API_KEY.trim()
-            } catch (_: Throwable) {
-                ""
-            }
-            if (fromBuildConfig.isNotBlank() &&
-                !fromBuildConfig.startsWith("YOUR_", ignoreCase = true) &&
-                !fromBuildConfig.startsWith("MY_", ignoreCase = true)
-            ) {
-                return fromBuildConfig
-            }
-            return try {
-                String(Base64.decode(ENCODED_DEFAULT_KEY, Base64.DEFAULT), StandardCharsets.UTF_8).trim()
-            } catch (_: Throwable) {
-                ""
-            }
+            return AadifySecurityVault.getFamGatewayApiKey()
         }
     }
 
@@ -101,7 +77,7 @@ class FamGatewayService {
         .build()
 
     /**
-     * Creates a live FamGateway UPI order for the given subscription plan and amount.
+     * Creates a live UPI order for the given subscription plan and amount.
      */
     suspend fun createOrder(
         planType: SubscriptionPlanType,
@@ -111,7 +87,7 @@ class FamGatewayService {
     ): Result<FamGatewayOrderSession> = withContext(Dispatchers.IO) {
         val apiKey = resolveApiKey()
         if (apiKey.isBlank()) {
-            return@withContext Result.failure(IllegalStateException("FamGateway API Key is not configured."))
+            return@withContext Result.failure(IllegalStateException("Payment API Key is not configured."))
         }
 
         val cleanAmount = kotlin.math.max(1, amountInr)
@@ -122,13 +98,13 @@ class FamGatewayService {
             put("amount", cleanAmount)
             put("customer_name", cleanCustomer)
             put("customer_id", customerId)
-            put("redirect_url", "https://famgateway.in/status.php")
+            put("redirect_url", AadifySecurityVault.getFamGatewayRedirectUrl())
         }
 
         val jsonMediaType = "application/json; charset=utf-8".toMediaType()
         val endpoints = listOf(
-            "$BASE_URL/api/create-order",
-            "$BASE_URL/api/qr.php"
+            AadifySecurityVault.getFamGatewayCreateOrderUrl(),
+            AadifySecurityVault.getFamGatewayQrUrl()
         )
 
         var lastError: Exception? = null
@@ -153,10 +129,11 @@ class FamGatewayService {
                         val orderId = dataObj.optString("order_id", "").trim()
                         if (status.equals("success", ignoreCase = true) || orderId.isNotBlank()) {
                             val resolvedOrderId = orderId.ifBlank { "fg_${System.currentTimeMillis()}" }
+                            val baseUrl = BASE_URL
                             val qrUrl = dataObj.optString("qr_url")
-                                .ifBlank { "$BASE_URL/api/qr-image.php?order_id=$resolvedOrderId" }
+                                .ifBlank { "$baseUrl/api/qr-image.php?order_id=$resolvedOrderId" }
                             val checkoutUrl = dataObj.optString("checkout_url")
-                                .ifBlank { "$BASE_URL/pay.php?order_id=$resolvedOrderId" }
+                                .ifBlank { "$baseUrl/pay.php?order_id=$resolvedOrderId" }
                             val upiId = dataObj.optString("upi_id", "")
                             val amtStr = dataObj.optString("amount", String.format(Locale.US, "%d.00", cleanAmount))
                             val payableStr = dataObj.optString("payable_amount", amtStr)
@@ -190,18 +167,16 @@ class FamGatewayService {
                     }
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "Order creation attempt failed on $endpoint: ${e.message}")
+                Log.w(TAG, "Order creation attempt failed: ${e.message}")
                 lastError = e
             }
         }
 
-        Result.failure(lastError ?: Exception("Unable to connect to FamGateway."))
+        Result.failure(lastError ?: Exception("Unable to connect to payment gateway."))
     }
 
     /**
-     * Checks live order status via BOTH FamGateway's client-side polling endpoint (`checkout-status.php`)
-     * and authoritative verification endpoint (`verify-order.php`) with cache-busting headers so real
-     * payment confirmation is detected as fast as the web checkout.
+     * Checks live order status via both authoritative verification and live checkout status endpoints.
      */
     suspend fun checkOrderStatus(orderId: String): Result<FamOrderStatusResult> = withContext(Dispatchers.IO) {
         val cleanOrderId = orderId.trim()
@@ -210,14 +185,14 @@ class FamGatewayService {
         }
 
         try {
-            // Query verify-order.php first (authoritative real-time DB status), then checkout-status.php
             val verifiedFirst = verifyOrderAuthoritativeInternal(cleanOrderId)
             if (verifiedFirst != null && (verifiedFirst.isPaid || verifiedFirst.isExpired)) {
                 return@withContext Result.success(verifiedFirst)
             }
 
             val ts = System.currentTimeMillis()
-            val pollUrl = "$BASE_URL/api/checkout-status.php?order_id=$cleanOrderId&_t=$ts"
+            val statusPath = AadifySecurityVault.getFamGatewayStatusPath()
+            val pollUrl = "$BASE_URL$statusPath?order_id=$cleanOrderId&_t=$ts"
             val pollReq = Request.Builder()
                 .url(pollUrl)
                 .header("Cache-Control", "no-cache, no-store, must-revalidate")
@@ -262,7 +237,8 @@ class FamGatewayService {
         if (apiKey.isBlank()) return null
         return try {
             val ts = System.currentTimeMillis()
-            val verifyUrl = "$BASE_URL/api/verify-order.php?api_key=$apiKey&order_id=$orderId&_t=$ts"
+            val verifyPath = AadifySecurityVault.getFamGatewayVerifyPath()
+            val verifyUrl = "$BASE_URL$verifyPath?api_key=$apiKey&order_id=$orderId&_t=$ts"
             val req = Request.Builder()
                 .url(verifyUrl)
                 .header("X-Api-Key", apiKey)
@@ -291,8 +267,6 @@ class FamGatewayService {
             .trim()
             .lowercase(Locale.US)
 
-        // Note: In some responses, root `status` is "success" (meaning HTTP call succeeded) while `data.status` is "pending".
-        // Make sure we check `dataObj`'s status first when `data` object exists!
         val nestedData = obj.optJSONObject("data")
         val resolvedStatus = if (nestedData != null) {
             nestedData.optString("payment_status")
@@ -314,10 +288,6 @@ class FamGatewayService {
         )
     }
 
-    /**
-     * Timing-safe HMAC-SHA256 verification per FamGateway Webhook specification:
-     * Expected Signature = HMAC_SHA256(raw_post_body_bytes, merchant_api_key)
-     */
     fun verifyWebhookSignature(rawBody: String, receivedHexSignature: String): Boolean {
         val apiKey = resolveApiKey()
         if (apiKey.isBlank() || receivedHexSignature.isBlank()) return false

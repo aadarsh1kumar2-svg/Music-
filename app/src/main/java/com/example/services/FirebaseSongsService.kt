@@ -50,26 +50,17 @@ class FirebaseSongsService(private val context: Context) {
 
     companion object {
         private const val TAG = "AKCloudService"
-        const val PROJECT_ID = "file-66f59"
-        const val DATABASE_URL = "https://file-66f59-default-rtdb.firebaseio.com"
-        const val STORAGE_BUCKET = "file-66f59.firebasestorage.app"
-        private const val APP_ID = "1:237773536493:android:a7740030a05679148c60e4"
-        private const val FALLBACK_FB_KEY_B64 = "QUl6YVN5REZWWGpHTFVaeXU5d2hQN2Nhd0R3c3VuWVIyZjFlbGFF"
+        val PROJECT_ID: String
+            get() = com.example.security.AadifySecurityVault.getFirebaseProjectId()
+        val DATABASE_URL: String
+            get() = com.example.security.AadifySecurityVault.getFirebaseDatabaseUrl()
+        val STORAGE_BUCKET: String
+            get() = com.example.security.AadifySecurityVault.getFirebaseStorageBucket()
+        private val APP_ID: String
+            get() = com.example.security.AadifySecurityVault.getFirebaseAppId()
 
         private fun resolveFirebaseApiKey(): String {
-            val fromBuild = try {
-                BuildConfig.FIREBASE_WEB_API_KEY.trim()
-            } catch (_: Exception) {
-                ""
-            }
-            if (fromBuild.isNotBlank() && !fromBuild.startsWith("YOUR_")) {
-                return fromBuild
-            }
-            return try {
-                String(Base64.decode(FALLBACK_FB_KEY_B64, Base64.DEFAULT), Charsets.UTF_8).trim()
-            } catch (_: Exception) {
-                ""
-            }
+            return com.example.security.AadifySecurityVault.getFirebaseApiKey()
         }
 
         private val RANK_FIELD_NAMES = listOf(
@@ -214,19 +205,7 @@ class FirebaseSongsService(private val context: Context) {
 
     private fun initializeCloudAndListen() {
         try {
-            val existingApps = FirebaseApp.getApps(context)
-            val app = if (existingApps.isEmpty()) {
-                val options = FirebaseOptions.Builder()
-                    .setProjectId(PROJECT_ID)
-                    .setDatabaseUrl(DATABASE_URL)
-                    .setStorageBucket(STORAGE_BUCKET)
-                    .setApplicationId(APP_ID)
-                    .setApiKey(resolveFirebaseApiKey())
-                    .build()
-                FirebaseApp.initializeApp(context, options)
-            } else {
-                FirebaseApp.getInstance()
-            }
+            val app = com.example.security.AadifySecurityVault.ensureSecureFirebaseInitialized(context)
 
             AADIFYMessagingService.initializeAndSubscribe(context)
 

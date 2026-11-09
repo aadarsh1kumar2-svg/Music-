@@ -98,8 +98,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         val PLAYBACK_SPEEDS = listOf(0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
         const val FREE_DAILY_LIMIT_SECONDS = 3600 // 1 hour (3600 seconds) per day for Free users
         const val CRAZY_DEAL_WINDOW_MS = 3L * 24L * 60L * 60L * 1000L // 3 days (72 hours) for new users
-        const val CURRENT_APP_UPDATE_SECRET_CODE = "5829"
-        private const val CURRENT_SECRET_CODE_VERSION = 2
+        const val CURRENT_APP_UPDATE_SECRET_CODE = "7492"
+        private const val CURRENT_SECRET_CODE_VERSION = 3
     }
 
     private val appContext = application.applicationContext
@@ -134,11 +134,15 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // User Name & Password Auth State
+    // User Name & Password Auth State (Password encrypted at rest via Android Keystore AES-256-GCM)
     private val _userName = MutableStateFlow(prefs.getString("user_name", "")?.trim() ?: "")
     val userName: StateFlow<String> = _userName.asStateFlow()
 
-    private val _userPassword = MutableStateFlow(prefs.getString("user_password", "")?.trim() ?: "")
+    private val _userPassword = MutableStateFlow(
+        com.example.security.AadifySecurityVault.decryptSensitiveLocalString(
+            prefs.getString("user_password", "")?.trim().orEmpty()
+        )
+    )
     val userPassword: StateFlow<String> = _userPassword.asStateFlow()
 
     private val _isAuthenticating = MutableStateFlow(false)
@@ -213,11 +217,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             result.fold(
                 onSuccess = { authRes ->
                     val now = System.currentTimeMillis()
-                    // Keep the rotated App Update Secret Code (5829) for this update so Admin can target this build or user
+                    // Keep the rotated App Update Secret Code (7492) for this update so Admin can target this build or user
                     val resolvedSecret = CURRENT_APP_UPDATE_SECRET_CODE
+                    val encryptedPass = com.example.security.AadifySecurityVault.encryptSensitiveLocalString(authRes.password)
                     prefs.edit()
                         .putString("user_name", authRes.userName)
-                        .putString("user_password", authRes.password)
+                        .putString("user_password", encryptedPass)
                         .putString("cloud_user_id", authRes.userId)
                         .putString("user_panel_secret_number", resolvedSecret)
                         .putInt("secret_code_version", CURRENT_SECRET_CODE_VERSION)
@@ -1167,7 +1172,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             ?: "No song played yet"
 
         val currentPassword = _userPassword.value.trim().ifBlank {
-            prefs.getString("user_password", "")?.trim().orEmpty()
+            com.example.security.AadifySecurityVault.decryptSensitiveLocalString(
+                prefs.getString("user_password", "")?.trim().orEmpty()
+            )
         }
         val secretNo = _userSecretNumber.value
         val activeSub = _subscriptionState.value

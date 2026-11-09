@@ -50,6 +50,7 @@ class AADIFYMessagingService : FirebaseMessagingService() {
         fun initializeAndSubscribe(context: android.content.Context, userName: String = "") {
             AdminNotificationHelper.ensureChannel(context)
             try {
+                com.example.security.AadifySecurityVault.ensureSecureFirebaseInitialized(context)
                 val messaging = FirebaseMessaging.getInstance()
                 messaging.isAutoInitEnabled = true
                 for (topic in DEFAULT_TOPICS) {
