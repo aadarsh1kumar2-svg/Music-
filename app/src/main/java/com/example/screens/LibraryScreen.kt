@@ -495,13 +495,13 @@ private fun LibraryMenuCardRow(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
-            .padding(horizontal = 18.dp, vertical = 18.dp)
+            .padding(horizontal = 14.dp, vertical = 16.dp)
             .testTag(testTag),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Box(
             modifier = Modifier
-                .size(56.dp)
+                .size(52.dp)
                 .clip(RoundedCornerShape(14.dp))
                 .background(SurfaceDarkCard),
             contentAlignment = Alignment.Center
@@ -510,11 +510,11 @@ private fun LibraryMenuCardRow(
                 imageVector = icon,
                 contentDescription = title,
                 tint = if (showVipBadge || isPrimaryAccentIcon) SpotifyVibrantGreen else PrimaryWhite,
-                modifier = Modifier.size(26.dp)
+                modifier = Modifier.size(25.dp)
             )
         }
 
-        Spacer(modifier = Modifier.width(18.dp))
+        Spacer(modifier = Modifier.width(14.dp))
 
         Row(
             modifier = Modifier.weight(1f),
@@ -525,11 +525,15 @@ private fun LibraryMenuCardRow(
                 style = MaterialTheme.typography.titleLarge.copy(
                     color = PrimaryWhite,
                     fontWeight = FontWeight.Medium,
-                    fontSize = 19.sp
-                )
+                    fontSize = 17.sp
+                ),
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false)
             )
             if (showVipBadge) {
-                Spacer(modifier = Modifier.width(10.dp))
+                Spacer(modifier = Modifier.width(8.dp))
                 Surface(
                     color = SpotifyDarkGreenPill,
                     shape = RoundedCornerShape(50),
@@ -541,25 +545,31 @@ private fun LibraryMenuCardRow(
                 ) {
                     Text(
                         text = "👑 VIP",
+                        maxLines = 1,
+                        softWrap = false,
                         style = MaterialTheme.typography.labelSmall.copy(
                             color = SpotifyVibrantGreen,
                             fontWeight = FontWeight.ExtraBold,
                             fontSize = 11.sp
                         ),
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp)
+                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.dp)
                     )
                 }
             }
         }
 
+        Spacer(modifier = Modifier.width(6.dp))
+
         if (countBadge > 0) {
             Text(
                 text = countBadge.toString(),
+                maxLines = 1,
+                softWrap = false,
                 style = MaterialTheme.typography.bodyMedium.copy(
                     color = MutedGray,
                     fontSize = 14.sp
                 ),
-                modifier = Modifier.padding(end = 8.dp)
+                modifier = Modifier.padding(end = 6.dp)
             )
         }
 
@@ -567,7 +577,7 @@ private fun LibraryMenuCardRow(
             imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
             contentDescription = null,
             tint = MutedGray,
-            modifier = Modifier.size(24.dp)
+            modifier = Modifier.size(22.dp)
         )
     }
 }

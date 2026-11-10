@@ -235,6 +235,9 @@ interface MusicLibraryDao {
     @Query("UPDATE spotify_playlist_songs SET videoId = :videoId, bannerUrl = :bannerUrl WHERE songId = :songId")
     suspend fun updateSpotifyPlaylistSongVideoId(songId: String, videoId: String, bannerUrl: String)
 
+    @Query("UPDATE spotify_playlist_songs SET bannerUrl = :bannerUrl WHERE songId = :songId")
+    suspend fun updateSpotifyPlaylistSongBannerUrl(songId: String, bannerUrl: String)
+
     @Query("SELECT * FROM downloaded_songs ORDER BY downloadedAt DESC")
     fun getAllDownloadedSongs(): Flow<List<DownloadedSongEntity>>
 

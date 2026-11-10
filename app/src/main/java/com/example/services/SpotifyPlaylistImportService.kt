@@ -4,6 +4,9 @@ import android.net.Uri
 import android.util.Base64
 import com.example.models.Song
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -11,6 +14,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
@@ -20,7 +24,8 @@ data class ImportedSpotifyTrack(
     val artist: String,
     val coverUrl: String,
     val durationMs: Int = 210_000,
-    val videoId: String = ""
+    val videoId: String = "",
+    val spotifyTrackId: String = ""
 )
 
 data class ImportedSpotifyCollection(
@@ -43,11 +48,13 @@ class SpotifyPlaylistImportService {
     }
 
     private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(12, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(12, TimeUnit.SECONDS)
         .followRedirects(true)
         .followSslRedirects(true)
         .build()
+
+    private val trackCoverCache = ConcurrentHashMap<String, String>()
 
     /**
      * Generates a shareable link using https://aadify.xo.je/?aadify_playlist=<payload>
@@ -145,6 +152,64 @@ class SpotifyPlaylistImportService {
     }
 
     /**
+     * Resolves a song's own individual official cover image (NOT the playlist banner!)
+     * using Spotify Track oEmbed (if spotifyTrackId is known) or iTunes Search API by Title + Artist.
+     */
+    suspend fun resolveIndividualTrackCoverUrl(
+        spotifyTrackId: String = "",
+        title: String,
+        artist: String
+    ): String = withContext(Dispatchers.IO) {
+        val cacheKey = "${spotifyTrackId.trim()}|${title.trim().lowercase()}|${artist.trim().lowercase()}"
+        trackCoverCache[cacheKey]?.let { cached ->
+            if (cached.isNotBlank()) return@withContext cached
+        }
+
+        // 1. If we have a Spotify Track ID, fetch its exact official cover from Spotify oEmbed
+        val cleanTrackId = spotifyTrackId.trim()
+        if (cleanTrackId.isNotBlank()) {
+            try {
+                val oembedUrl = "https://open.spotify.com/oembed?url=https://open.spotify.com/track/$cleanTrackId"
+                val json = fetchHtml(oembedUrl)
+                if (json.isNotBlank() && json.trim().startsWith("{")) {
+                    val thumb = JSONObject(json).optString("thumbnail_url").trim()
+                    if (thumb.isNotBlank()) {
+                        trackCoverCache[cacheKey] = thumb
+                        return@withContext thumb
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }
+
+        // 2. Fallback: Query iTunes Search API by song title + primary artist for official single/movie album cover art
+        val cleanTitle = title.replace(Regex("\\([^)]*\\)|\\[[^\\]]*]"), "").trim()
+        val primaryArtist = artist.split(",").firstOrNull()?.trim().orEmpty()
+            .let { if (it.equals("Spotify", ignoreCase = true) || it.equals("Spotify Artist", ignoreCase = true)) "" else it }
+        val searchQuery = "$cleanTitle $primaryArtist".trim()
+        if (searchQuery.isNotBlank()) {
+            try {
+                val itunesUrl = "https://itunes.apple.com/search?term=${Uri.encode(searchQuery)}&entity=song&limit=1"
+                val body = fetchHtml(itunesUrl)
+                if (body.isNotBlank() && body.trim().startsWith("{")) {
+                    val results = JSONObject(body).optJSONArray("results")
+                    if (results != null && results.length() > 0) {
+                        val rawArt = results.optJSONObject(0)?.optString("artworkUrl100")?.trim().orEmpty()
+                        if (rawArt.isNotBlank()) {
+                            val hiResArt = rawArt.replace("100x100bb", "600x600bb")
+                            trackCoverCache[cacheKey] = hiResArt
+                            return@withContext hiResArt
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }
+
+        ""
+    }
+
+    /**
      * Imports a Spotify Playlist, Track/Song, or Album from any Spotify link or share text.
      */
     suspend fun importFromSpotifyUrl(rawInput: String): Result<ImportedSpotifyCollection> = withContext(Dispatchers.IO) {
@@ -166,7 +231,9 @@ class SpotifyPlaylistImportService {
             if (embedHtml.isNotBlank()) {
                 val parsedFromEmbed = parseFromEmbedHtml(embedHtml, entityType, canonicalUrl)
                 if (parsedFromEmbed != null && parsedFromEmbed.tracks.isNotEmpty()) {
-                    return@withContext Result.success(parsedFromEmbed)
+                    // Hydrate the first 16 songs' individual cover images immediately in parallel so they show right away!
+                    val hydratedTracks = hydrateInitialTrackCovers(parsedFromEmbed.tracks)
+                    return@withContext Result.success(parsedFromEmbed.copy(tracks = hydratedTracks))
                 }
             }
 
@@ -174,7 +241,8 @@ class SpotifyPlaylistImportService {
             val mainHtml = fetchHtml(canonicalUrl)
             val parsedFromMain = parseFromMainHtmlAndOEmbed(mainHtml, entityType, entityId, canonicalUrl)
             if (parsedFromMain != null && parsedFromMain.tracks.isNotEmpty()) {
-                return@withContext Result.success(parsedFromMain)
+                val hydratedTracks = hydrateInitialTrackCovers(parsedFromMain.tracks)
+                return@withContext Result.success(parsedFromMain.copy(tracks = hydratedTracks))
             }
 
             Result.failure(IllegalStateException("Is Spotify link se songs load nahi ho paaye. Make sure playlist Public hai."))
@@ -183,11 +251,29 @@ class SpotifyPlaylistImportService {
         }
     }
 
+    private suspend fun hydrateInitialTrackCovers(tracks: List<ImportedSpotifyTrack>): List<ImportedSpotifyTrack> = coroutineScope {
+        val immediateCount = 16
+        val firstBatch = tracks.take(immediateCount).map { track ->
+            async(Dispatchers.IO) {
+                if (track.coverUrl.isNotBlank()) {
+                    track
+                } else {
+                    val resolvedCover = resolveIndividualTrackCoverUrl(
+                        spotifyTrackId = track.spotifyTrackId,
+                        title = track.title,
+                        artist = track.artist
+                    )
+                    track.copy(coverUrl = resolvedCover)
+                }
+            }
+        }.awaitAll()
+        firstBatch + tracks.drop(immediateCount)
+    }
+
     private fun extractSpotifyUrl(raw: String): String? {
         val trimmed = raw.trim()
         if (trimmed.isBlank()) return null
 
-        // Handle spotify:playlist:ID or spotify:track:ID URI format
         val uriMatch = Regex("""spotify:(playlist|track|album):([A-Za-z0-9]+)""", RegexOption.IGNORE_CASE).find(trimmed)
         if (uriMatch != null) {
             val type = uriMatch.groupValues[1].lowercase()
@@ -274,28 +360,34 @@ class SpotifyPlaylistImportService {
                 .trim()
                 .ifBlank { "Spotify Playlist" }
 
-            val coverUrl = extractEntityCoverUrl(entity)
+            val collectionCoverUrl = extractEntityCoverUrl(entity)
             val tracks = mutableListOf<ImportedSpotifyTrack>()
 
             if (entityType == "track") {
                 val trackTitle = collectionTitle
                 val artistName = extractArtistsFromEntity(entity)
                 val durationMs = entity.optInt("duration", 210_000).coerceAtLeast(30_000)
+                val trackUri = entity.optString("uri", "")
+                val trackId = trackUri.substringAfterLast("spotify:track:", "").trim()
                 tracks.add(
                     ImportedSpotifyTrack(
                         title = trackTitle,
                         artist = artistName,
-                        coverUrl = coverUrl,
-                        durationMs = durationMs
+                        coverUrl = collectionCoverUrl,
+                        durationMs = durationMs,
+                        spotifyTrackId = trackId
                     )
                 )
                 return ImportedSpotifyCollection(
                     title = trackTitle,
-                    coverUrl = coverUrl,
+                    coverUrl = collectionCoverUrl,
                     sourceUrl = canonicalUrl,
                     tracks = tracks
                 )
             }
+
+            // Note: For an album, all tracks genuinely share the album cover; for a playlist, each song has its own cover!
+            val defaultTrackCover = if (entityType == "album") collectionCoverUrl else ""
 
             val trackList = entity.optJSONArray("trackList") ?: JSONArray()
             for (i in 0 until trackList.length()) {
@@ -307,19 +399,23 @@ class SpotifyPlaylistImportService {
                     .trim()
                     .ifBlank { "Spotify Artist" }
                 val durationMs = item.optInt("duration", 210_000).coerceAtLeast(30_000)
+                val uri = item.optString("uri", "").trim()
+                val spotifyTrackId = uri.substringAfterLast("spotify:track:", "").trim()
+                val itemOwnCover = extractEntityCoverUrl(item).ifBlank { defaultTrackCover }
                 tracks.add(
                     ImportedSpotifyTrack(
                         title = title,
                         artist = subtitle,
-                        coverUrl = coverUrl,
-                        durationMs = durationMs
+                        coverUrl = itemOwnCover,
+                        durationMs = durationMs,
+                        spotifyTrackId = spotifyTrackId
                     )
                 )
             }
 
             if (tracks.isEmpty()) null else ImportedSpotifyCollection(
                 title = collectionTitle,
-                coverUrl = coverUrl,
+                coverUrl = collectionCoverUrl,
                 sourceUrl = canonicalUrl,
                 tracks = tracks
             )
@@ -340,6 +436,8 @@ class SpotifyPlaylistImportService {
                 ?: visualImage.optJSONObject(0)?.optString("url")
             if (!best.isNullOrBlank()) return best
         }
+        val directImg = entity.optString("imageUrl").ifBlank { entity.optString("thumbnailUrl") }.trim()
+        if (directImg.isNotBlank()) return directImg
         return ""
     }
 
@@ -387,7 +485,6 @@ class SpotifyPlaylistImportService {
 
             val tracks = mutableListOf<ImportedSpotifyTrack>()
             if (entityType == "track") {
-                // e.g. description: "Listen to <Song> on Spotify. <Artist> · Song · 2024."
                 val artist = description
                     .substringAfter("on Spotify.", "")
                     .substringBefore("·")
@@ -399,22 +496,25 @@ class SpotifyPlaylistImportService {
                     ImportedSpotifyTrack(
                         title = cleanTitle,
                         artist = artist,
-                        coverUrl = coverUrl
+                        coverUrl = coverUrl,
+                        spotifyTrackId = entityId
                     )
                 )
             } else {
-                // Attempt to extract track rows from main page HTML if any
+                val defaultTrackCover = if (entityType == "album") coverUrl else ""
                 val trackMatches = Regex(
-                    """"name"\s*:\s*"([^"\\]+)"\s*,\s*"uri"\s*:\s*"spotify:track:[A-Za-z0-9]+""""
+                    """"name"\s*:\s*"([^"\\]+)"\s*,\s*"uri"\s*:\s*"spotify:track:([A-Za-z0-9]+)"""
                 ).findAll(html)
                 for (m in trackMatches) {
                     val tName = decodeHtmlEntities(m.groupValues[1].trim())
+                    val tId = m.groupValues[2].trim()
                     if (tName.isNotBlank() && tracks.none { it.title.equals(tName, ignoreCase = true) }) {
                         tracks.add(
                             ImportedSpotifyTrack(
                                 title = tName,
                                 artist = "Spotify",
-                                coverUrl = coverUrl
+                                coverUrl = defaultTrackCover,
+                                spotifyTrackId = tId
                             )
                         )
                     }
