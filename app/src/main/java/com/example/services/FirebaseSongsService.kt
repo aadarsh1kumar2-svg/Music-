@@ -43,7 +43,8 @@ data class CloudUserAuthResult(
     val createdAtMs: Long,
     val isNewAccount: Boolean,
     val subscriptionState: UserSubscriptionState? = null,
-    val secretCode: String = ""
+    val secretCode: String = "",
+    val todayListenedSeconds: Int = 0
 )
 
 class FirebaseSongsService(private val context: Context) {
@@ -1242,6 +1243,7 @@ class FirebaseSongsService(private val context: Context) {
     fun resetAdminDeletionFlagForFreshLogin() {
         isCurrentUserDeletedByAdmin = false
         hasConfirmedCloudUserUpload = false
+        hasUploadedTimeUsageNonZero = false
     }
 
     /**
@@ -1362,6 +1364,7 @@ class FirebaseSongsService(private val context: Context) {
         }
 
         currentWatchedUserId = userId
+        hasUploadedTimeUsageNonZero = false
         val db = firebaseDatabase ?: return
         val ref = db.getReference("users").child(userId)
         currentUserNodeRef = ref
@@ -1418,7 +1421,14 @@ class FirebaseSongsService(private val context: Context) {
         val timeListener = object : ValueEventListener {
             override fun onDataChange(snapshot: DataSnapshot) {
                 if (!hasConfirmedCloudUserUpload || isCurrentUserDeletedByAdmin) return
-                if (!snapshot.exists() || snapshot.value == null) {
+                if (snapshot.exists() && snapshot.value != null) {
+                    val cloudSecs = (snapshot.child("totalSeconds").value as? Number)?.toInt()
+                        ?: (snapshot.child("usedSeconds").value as? Number)?.toInt()
+                        ?: 0
+                    if (cloudSecs > 0) {
+                        hasUploadedTimeUsageNonZero = true
+                    }
+                } else {
                     if (hasUploadedTimeUsageNonZero) {
                         hasUploadedTimeUsageNonZero = false
                         onAdminTimeUsageResetCallback?.invoke()
@@ -2402,6 +2412,48 @@ class FirebaseSongsService(private val context: Context) {
                 } catch (_: Exception) {
                 }
 
+                // Also fetch today's cloud listening time for this user so logging out & back in never resets their daily usage
+                val todayLocalDateKey = java.text.SimpleDateFormat("yyyy-MM-dd", Locale.US).format(java.util.Date(nowMs))
+                val todayUtcDateKey = java.text.SimpleDateFormat("yyyy-MM-dd", Locale.US).apply {
+                    timeZone = java.util.TimeZone.getTimeZone("UTC")
+                }.format(java.util.Date(nowMs))
+                var cloudTodayListenedSeconds = 0
+                val recordDateKey = matchedRecord.optString("dailyListenedDate", "").trim()
+                if (recordDateKey == todayLocalDateKey || recordDateKey == todayUtcDateKey) {
+                    cloudTodayListenedSeconds = maxOf(
+                        cloudTodayListenedSeconds,
+                        matchedRecord.optInt("dailyListenedSeconds", 0),
+                        matchedRecord.optInt("todaySeconds", 0),
+                        matchedRecord.optInt("usedSeconds", 0)
+                    )
+                }
+                try {
+                    val usageReq = Request.Builder()
+                        .url("$DATABASE_URL/userTimeUsage/$resolvedUserId.json")
+                        .get()
+                        .build()
+                    httpClient.newCall(usageReq).execute().use { usageResp ->
+                        if (usageResp.isSuccessful) {
+                            val usageBody = usageResp.body?.string()?.trim().orEmpty()
+                            if (usageBody.isNotEmpty() && usageBody != "null" && usageBody.startsWith("{")) {
+                                val usageObj = JSONObject(usageBody)
+                                val dailyObj = usageObj.optJSONObject("daily")
+                                val todayEntry = dailyObj?.optJSONObject(todayLocalDateKey)
+                                    ?: dailyObj?.optJSONObject(todayUtcDateKey)
+                                if (todayEntry != null) {
+                                    cloudTodayListenedSeconds = maxOf(
+                                        cloudTodayListenedSeconds,
+                                        todayEntry.optInt("totalSeconds", 0),
+                                        todayEntry.optInt("usedSeconds", 0),
+                                        todayEntry.optInt("listeningSeconds", 0)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                } catch (_: Exception) {
+                }
+
                 return@withContext Result.success(
                     CloudUserAuthResult(
                         userId = resolvedUserId,
@@ -2410,7 +2462,8 @@ class FirebaseSongsService(private val context: Context) {
                         createdAtMs = createdAtMs,
                         isNewAccount = false,
                         subscriptionState = cloudSub,
-                        secretCode = savedSecretCode
+                        secretCode = savedSecretCode,
+                        todayListenedSeconds = cloudTodayListenedSeconds
                     )
                 )
             }

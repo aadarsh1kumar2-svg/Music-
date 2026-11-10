@@ -156,19 +156,33 @@ private enum class LaunchStage {
 }
 
 class MainActivity : ComponentActivity() {
+    private var pendingDeepLinkUri by mutableStateOf<Uri?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pendingDeepLinkUri = intent?.data
         enableEdgeToEdge()
         setContent {
             MyApplicationTheme {
-                AKMusicAppRoot()
+                AKMusicAppRoot(
+                    incomingDeepLinkUri = pendingDeepLinkUri,
+                    onConsumeDeepLink = { pendingDeepLinkUri = null }
+                )
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        pendingDeepLinkUri = intent.data
     }
 }
 
 @Composable
 fun AKMusicAppRoot(
+    incomingDeepLinkUri: Uri? = null,
+    onConsumeDeepLink: () -> Unit = {},
     musicViewModel: MusicViewModel = viewModel()
 ) {
     val context = LocalContext.current
@@ -263,7 +277,17 @@ fun AKMusicAppRoot(
     val sessionHistory by musicViewModel.sessionHistoryEntities.collectAsStateWithLifecycle()
     val playlists by musicViewModel.playlists.collectAsStateWithLifecycle()
     val allPlaylistSongs by musicViewModel.allPlaylistSongs.collectAsStateWithLifecycle()
+    val spotifyPlaylists by musicViewModel.spotifyPlaylists.collectAsStateWithLifecycle()
+    val allSpotifyPlaylistSongs by musicViewModel.allSpotifyPlaylistSongs.collectAsStateWithLifecycle()
+    val isImportingSpotifyPlaylist by musicViewModel.isImportingSpotifyPlaylist.collectAsStateWithLifecycle()
     val downloadedSongs by musicViewModel.downloadedSongs.collectAsStateWithLifecycle()
+
+    LaunchedEffect(incomingDeepLinkUri) {
+        if (incomingDeepLinkUri != null) {
+            musicViewModel.handleIncomingDeepLink(incomingDeepLinkUri)
+            onConsumeDeepLink()
+        }
+    }
 
     val currentSong by musicViewModel.currentSong.collectAsStateWithLifecycle()
     val queue by musicViewModel.queue.collectAsStateWithLifecycle()
@@ -926,6 +950,9 @@ fun AKMusicAppRoot(
                                         hasAudioStoragePermission = hasAudioStoragePermission,
                                         playlists = playlists,
                                         allPlaylistSongs = allPlaylistSongs,
+                                        spotifyPlaylists = spotifyPlaylists,
+                                        allSpotifyPlaylistSongs = allSpotifyPlaylistSongs,
+                                        isImportingSpotifyPlaylist = isImportingSpotifyPlaylist,
                                         sessionHistory = sessionHistory,
                                         currentQueue = queue,
                                         currentSong = currentSong,
@@ -937,6 +964,29 @@ fun AKMusicAppRoot(
                                         onSongMoreClick = { musicViewModel.openSongOptions(it) },
                                         onCreatePlaylist = { musicViewModel.createNewPlaylist(it) },
                                         onDeletePlaylist = { musicViewModel.deletePlaylist(it) },
+                                        onImportSpotifyPlaylist = { link ->
+                                            musicViewModel.importSpotifyPlaylistOrSong(link)
+                                        },
+                                        onDeleteSpotifyPlaylist = { spPlaylist ->
+                                            musicViewModel.deleteSpotifyPlaylist(spPlaylist)
+                                        },
+                                        onSharePlaylist = { playlistName, songsToShare ->
+                                            val shareText = musicViewModel.buildSharePlaylistText(playlistName, songsToShare)
+                                            try {
+                                                val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                                                    type = "text/plain"
+                                                    putExtra(Intent.EXTRA_SUBJECT, "AADIFY Playlist: $playlistName")
+                                                    putExtra(Intent.EXTRA_TEXT, shareText)
+                                                }
+                                                val chooser = Intent.createChooser(sendIntent, "Share Playlist ($playlistName)")
+                                                if (context !is Activity) {
+                                                    chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                                }
+                                                context.startActivity(chooser)
+                                            } catch (_: Exception) {
+                                                musicViewModel.emitSnackbar("Share sheet open nahi ho paya.")
+                                            }
+                                        },
                                         onDeleteDownloadedSong = { musicViewModel.deleteDownloadedSong(it) },
                                         onRequestStoragePermission = {
                                             if (musicViewModel.checkAudioPermissionGranted()) {

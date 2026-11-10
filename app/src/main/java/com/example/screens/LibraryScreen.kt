@@ -27,6 +27,7 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.PlaylistPlay
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FolderSpecial
@@ -36,9 +37,11 @@ import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.RepeatOne
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -62,6 +65,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.R
@@ -71,6 +75,8 @@ import com.example.models.PlaylistEntity
 import com.example.models.PlaylistSongEntity
 import com.example.models.SessionHistoryEntity
 import com.example.models.Song
+import com.example.models.SpotifyPlaylistEntity
+import com.example.models.SpotifyPlaylistSongEntity
 import com.example.providers.LibrarySubScreen
 import com.example.providers.RepeatModeState
 import com.example.ui.theme.DeepCharcoal
@@ -83,6 +89,7 @@ import com.example.ui.theme.SpotifyDarkGreenPill
 import com.example.ui.theme.SpotifyGreenBorder
 import com.example.ui.theme.SpotifyVibrantGreen
 import com.example.ui.theme.SurfaceDarkCard
+import com.example.widgets.SongArtwork
 import com.example.widgets.SongListRow
 
 @Composable
@@ -95,6 +102,9 @@ fun LibraryScreen(
     hasAudioStoragePermission: Boolean = false,
     playlists: List<PlaylistEntity>,
     allPlaylistSongs: List<PlaylistSongEntity>,
+    spotifyPlaylists: List<SpotifyPlaylistEntity> = emptyList(),
+    allSpotifyPlaylistSongs: List<SpotifyPlaylistSongEntity> = emptyList(),
+    isImportingSpotifyPlaylist: Boolean = false,
     sessionHistory: List<SessionHistoryEntity>,
     currentQueue: List<Song>,
     currentSong: Song?,
@@ -106,6 +116,9 @@ fun LibraryScreen(
     onSongMoreClick: (Song) -> Unit,
     onCreatePlaylist: (String) -> Unit,
     onDeletePlaylist: (PlaylistEntity) -> Unit,
+    onImportSpotifyPlaylist: (String) -> Unit = {},
+    onDeleteSpotifyPlaylist: (SpotifyPlaylistEntity) -> Unit = {},
+    onSharePlaylist: (String, List<Song>) -> Unit = { _, _ -> },
     onDeleteDownloadedSong: (DownloadedSongEntity) -> Unit,
     onRequestStoragePermission: () -> Unit = {},
     onCycleRepeatMode: () -> Unit = {},
@@ -114,10 +127,10 @@ fun LibraryScreen(
 ) {
     if (subScreen != LibrarySubScreen.Root) {
         BackHandler {
-            if (subScreen is LibrarySubScreen.PlaylistDetail) {
-                onNavigateSubScreen(LibrarySubScreen.Playlists)
-            } else {
-                onNavigateSubScreen(LibrarySubScreen.Root)
+            when (subScreen) {
+                is LibrarySubScreen.PlaylistDetail -> onNavigateSubScreen(LibrarySubScreen.Playlists)
+                is LibrarySubScreen.SpotifyPlaylistDetail -> onNavigateSubScreen(LibrarySubScreen.SpotifyPlaylists)
+                else -> onNavigateSubScreen(LibrarySubScreen.Root)
             }
         }
     }
@@ -130,6 +143,7 @@ fun LibraryScreen(
                 favoritesCount = favorites.size,
                 downloadsCount = totalMyMusicCount,
                 playlistsCount = playlists.size,
+                spotifyPlaylistsCount = spotifyPlaylists.size,
                 sessionCount = sessionHistory.size,
                 queueCount = currentQueue.size,
                 isUserSubscribed = isUserSubscribed,
@@ -178,6 +192,7 @@ fun LibraryScreen(
                 onOpenPlaylist = { onNavigateSubScreen(LibrarySubScreen.PlaylistDetail(it)) },
                 onCreatePlaylist = onCreatePlaylist,
                 onDeletePlaylist = onDeletePlaylist,
+                onSharePlaylist = onSharePlaylist,
                 modifier = modifier
             )
         }
@@ -195,7 +210,50 @@ fun LibraryScreen(
                 repeatMode = repeatMode,
                 showPlaylistControls = true,
                 onCycleRepeatMode = onCycleRepeatMode,
+                onShareClick = if (playlistSongs.isNotEmpty()) {
+                    { onSharePlaylist(subScreen.playlist.name, playlistSongs) }
+                } else {
+                    null
+                },
                 onBack = { onNavigateSubScreen(LibrarySubScreen.Playlists) },
+                onSongClick = onSongClick,
+                onSongMoreClick = onSongMoreClick,
+                modifier = modifier
+            )
+        }
+        is LibrarySubScreen.SpotifyPlaylists -> {
+            LibrarySpotifyPlaylistsListView(
+                spotifyPlaylists = spotifyPlaylists,
+                allSpotifyPlaylistSongs = allSpotifyPlaylistSongs,
+                isImporting = isImportingSpotifyPlaylist,
+                onBack = { onNavigateSubScreen(LibrarySubScreen.Root) },
+                onOpenSpotifyPlaylist = { onNavigateSubScreen(LibrarySubScreen.SpotifyPlaylistDetail(it)) },
+                onImportSpotifyPlaylist = onImportSpotifyPlaylist,
+                onDeleteSpotifyPlaylist = onDeleteSpotifyPlaylist,
+                onSharePlaylist = onSharePlaylist,
+                modifier = modifier
+            )
+        }
+        is LibrarySubScreen.SpotifyPlaylistDetail -> {
+            val spotifySongs = allSpotifyPlaylistSongs
+                .filter { it.spotifyPlaylistId == subScreen.playlist.spotifyPlaylistId }
+                .sortedBy { it.addedAt }
+                .map { it.toSong() }
+            LibrarySongCollectionView(
+                title = subScreen.playlist.name,
+                emptyMessage = "No songs in this Spotify playlist yet.",
+                songs = spotifySongs,
+                currentSong = currentSong,
+                isPlaying = isPlaying,
+                repeatMode = repeatMode,
+                showPlaylistControls = true,
+                onCycleRepeatMode = onCycleRepeatMode,
+                onShareClick = if (spotifySongs.isNotEmpty()) {
+                    { onSharePlaylist(subScreen.playlist.name, spotifySongs) }
+                } else {
+                    null
+                },
+                onBack = { onNavigateSubScreen(LibrarySubScreen.SpotifyPlaylists) },
                 onSongClick = onSongClick,
                 onSongMoreClick = onSongMoreClick,
                 modifier = modifier
@@ -255,6 +313,7 @@ private fun LibraryRootContent(
     favoritesCount: Int,
     downloadsCount: Int,
     playlistsCount: Int,
+    spotifyPlaylistsCount: Int,
     sessionCount: Int,
     queueCount: Int,
     isUserSubscribed: Boolean,
@@ -301,7 +360,7 @@ private fun LibraryRootContent(
             }
         }
 
-        // Primary Group Card: Favorites, My Music (Device Songs + Offline Downloads), Playlists
+        // Primary Group Card: Favorites, My Music, Playlists, and Spotify Playlists (below Playlists, VIP-gated)
         item {
             Surface(
                 color = DeepCharcoal,
@@ -343,6 +402,19 @@ private fun LibraryRootContent(
                         isPrimaryAccentIcon = true,
                         testTag = "library_row_playlists",
                         onClick = { onNavigateSubScreen(LibrarySubScreen.Playlists) }
+                    )
+                    HorizontalDivider(
+                        color = DividerDark,
+                        modifier = Modifier.padding(start = 88.dp, end = 20.dp)
+                    )
+                    LibraryMenuCardRow(
+                        icon = Icons.Default.CloudDownload,
+                        title = "Spotify Playlists",
+                        countBadge = spotifyPlaylistsCount,
+                        showVipBadge = !isUserSubscribed,
+                        isPrimaryAccentIcon = true,
+                        testTag = "library_row_spotify_playlists",
+                        onClick = { onNavigateSubScreen(LibrarySubScreen.SpotifyPlaylists) }
                     )
                 }
             }
@@ -510,6 +582,7 @@ private fun LibrarySongCollectionView(
     repeatMode: RepeatModeState = RepeatModeState.OFF,
     showPlaylistControls: Boolean = false,
     onCycleRepeatMode: () -> Unit = {},
+    onShareClick: (() -> Unit)? = null,
     onBack: () -> Unit,
     onSongClick: (Song, List<Song>) -> Unit,
     onSongMoreClick: (Song) -> Unit,
@@ -545,8 +618,24 @@ private fun LibrarySongCollectionView(
                     color = PrimaryWhite,
                     fontWeight = FontWeight.Bold
                 ),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f)
             )
+            if (onShareClick != null) {
+                IconButton(
+                    onClick = onShareClick,
+                    modifier = Modifier
+                        .size(48.dp)
+                        .testTag("playlist_detail_share_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Share,
+                        contentDescription = "Share Playlist",
+                        tint = SpotifyVibrantGreen
+                    )
+                }
+            }
         }
 
         // Play All & Repeat Controls for Playlists / Collections
@@ -714,7 +803,6 @@ private fun LibraryMyMusicView(
         }
 
         if (!hasAudioStoragePermission) {
-            // Permission Required Banner Card
             Surface(
                 color = SurfaceDarkCard,
                 shape = RoundedCornerShape(16.dp),
@@ -901,6 +989,7 @@ private fun LibraryPlaylistsListView(
     onOpenPlaylist: (PlaylistEntity) -> Unit,
     onCreatePlaylist: (String) -> Unit,
     onDeletePlaylist: (PlaylistEntity) -> Unit,
+    onSharePlaylist: (String, List<Song>) -> Unit,
     modifier: Modifier = Modifier
 ) {
     var showCreateDialog by remember { mutableStateOf(false) }
@@ -978,27 +1067,56 @@ private fun LibraryPlaylistsListView(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 items(items = playlists, key = { it.playlistId }) { playlist ->
-                    val trackCount = allPlaylistSongs.count { it.playlistId == playlist.playlistId }
+                    val songsInPlaylist = remember(allPlaylistSongs, playlist.playlistId) {
+                        allPlaylistSongs
+                            .filter { it.playlistId == playlist.playlistId }
+                            .sortedBy { it.addedAt }
+                            .map { it.toSong() }
+                    }
+                    val firstSong = songsInPlaylist.firstOrNull()
+                    val trackCount = songsInPlaylist.size
+
                     Surface(
                         color = SurfaceDarkCard,
-                        shape = RoundedCornerShape(12.dp),
+                        shape = RoundedCornerShape(14.dp),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
+                            .clip(RoundedCornerShape(14.dp))
                             .clickable { onOpenPlaylist(playlist) }
+                            .testTag("playlist_item_${playlist.playlistId}")
                     ) {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 14.dp),
+                                .padding(horizontal = 14.dp, vertical = 12.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.PlaylistPlay,
-                                contentDescription = null,
-                                tint = SpotifyVibrantGreen,
-                                modifier = Modifier.size(32.dp)
-                            )
+                            // First song cover image on the left of the playlist name!
+                            if (firstSong != null && (firstSong.highResBannerUrl.isNotBlank() || firstSong.cleanVideoId.isNotBlank())) {
+                                SongArtwork(
+                                    imageUrl = firstSong.highResBannerUrl,
+                                    contentDescription = playlist.name,
+                                    modifier = Modifier.size(54.dp),
+                                    cornerRadius = 10.dp,
+                                    fallbackVideoId = firstSong.cleanVideoId
+                                )
+                            } else {
+                                Box(
+                                    modifier = Modifier
+                                        .size(54.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(DeepCharcoal),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Filled.PlaylistPlay,
+                                        contentDescription = null,
+                                        tint = SpotifyVibrantGreen,
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                }
+                            }
+
                             Spacer(modifier = Modifier.width(14.dp))
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
@@ -1006,14 +1124,35 @@ private fun LibraryPlaylistsListView(
                                     style = MaterialTheme.typography.titleMedium.copy(
                                         color = PrimaryWhite,
                                         fontWeight = FontWeight.Bold
-                                    )
+                                    ),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                                 Text(
                                     text = "$trackCount songs",
                                     style = MaterialTheme.typography.bodyMedium.copy(color = MutedGray)
                                 )
                             }
-                            IconButton(onClick = { onDeletePlaylist(playlist) }) {
+                            if (songsInPlaylist.isNotEmpty()) {
+                                IconButton(
+                                    onClick = { onSharePlaylist(playlist.name, songsInPlaylist) },
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .testTag("share_playlist_${playlist.playlistId}")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Share,
+                                        contentDescription = "Share playlist link",
+                                        tint = SpotifyVibrantGreen
+                                    )
+                                }
+                            }
+                            IconButton(
+                                onClick = { onDeletePlaylist(playlist) },
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .testTag("delete_playlist_${playlist.playlistId}")
+                            ) {
                                 Icon(
                                     imageVector = Icons.Default.DeleteOutline,
                                     contentDescription = "Delete playlist",
@@ -1070,6 +1209,332 @@ private fun LibraryPlaylistsListView(
             },
             dismissButton = {
                 TextButton(onClick = { showCreateDialog = false }) {
+                    Text("Cancel", color = MutedGray)
+                }
+            }
+        )
+    }
+}
+
+@Composable
+private fun LibrarySpotifyPlaylistsListView(
+    spotifyPlaylists: List<SpotifyPlaylistEntity>,
+    allSpotifyPlaylistSongs: List<SpotifyPlaylistSongEntity>,
+    isImporting: Boolean,
+    onBack: () -> Unit,
+    onOpenSpotifyPlaylist: (SpotifyPlaylistEntity) -> Unit,
+    onImportSpotifyPlaylist: (String) -> Unit,
+    onDeleteSpotifyPlaylist: (SpotifyPlaylistEntity) -> Unit,
+    onSharePlaylist: (String, List<Song>) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var showImportDialog by remember { mutableStateOf(false) }
+    var spotifyLinkInput by remember { mutableStateOf("") }
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .background(PureBlack)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 14.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.weight(1f)
+            ) {
+                IconButton(onClick = onBack, modifier = Modifier.size(48.dp)) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "Back",
+                        tint = PrimaryWhite
+                    )
+                }
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "Spotify Playlists",
+                    style = MaterialTheme.typography.headlineSmall.copy(
+                        color = PrimaryWhite,
+                        fontWeight = FontWeight.Bold
+                    ),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            Button(
+                onClick = { showImportDialog = true },
+                enabled = !isImporting,
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = SpotifyVibrantGreen,
+                    contentColor = PureBlack
+                ),
+                modifier = Modifier.testTag("import_spotify_playlist_button")
+            ) {
+                if (isImporting) {
+                    CircularProgressIndicator(
+                        color = PureBlack,
+                        strokeWidth = 2.dp,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Importing...", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                } else {
+                    Icon(Icons.Default.CloudDownload, contentDescription = null)
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Import Playlist", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                }
+            }
+        }
+
+        if (spotifyPlaylists.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(24.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Surface(
+                    color = SurfaceDarkCard,
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(
+                            width = 1.dp,
+                            color = SpotifyGreenBorder.copy(alpha = 0.5f),
+                            shape = RoundedCornerShape(16.dp)
+                        )
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(60.dp)
+                                .background(SpotifyDarkGreenPill, CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.CloudDownload,
+                                contentDescription = null,
+                                tint = SpotifyVibrantGreen,
+                                modifier = Modifier.size(30.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(14.dp))
+                        Text(
+                            text = "Import Spotify Playlist or Song",
+                            style = MaterialTheme.typography.titleLarge.copy(
+                                color = PrimaryWhite,
+                                fontWeight = FontWeight.Bold
+                            ),
+                            textAlign = TextAlign.Center
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Upar \"Import Playlist\" par click karein aur kisi bhi Spotify Playlist ya Song ka link paste karein. Saare songs 100% Ad-Free play honge!",
+                            style = MaterialTheme.typography.bodyMedium.copy(color = MutedGray),
+                            textAlign = TextAlign.Center
+                        )
+                        Spacer(modifier = Modifier.height(18.dp))
+                        Button(
+                            onClick = { showImportDialog = true },
+                            shape = RoundedCornerShape(12.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = SpotifyVibrantGreen,
+                                contentColor = PureBlack
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                                .testTag("empty_state_import_spotify_button")
+                        ) {
+                            Icon(Icons.Default.CloudDownload, contentDescription = null)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Import Playlist", fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                items(items = spotifyPlaylists, key = { it.spotifyPlaylistId }) { spPlaylist ->
+                    val songsInSpotifyPlaylist = remember(allSpotifyPlaylistSongs, spPlaylist.spotifyPlaylistId) {
+                        allSpotifyPlaylistSongs
+                            .filter { it.spotifyPlaylistId == spPlaylist.spotifyPlaylistId }
+                            .sortedBy { it.addedAt }
+                            .map { it.toSong() }
+                    }
+                    val firstSong = songsInSpotifyPlaylist.firstOrNull()
+                    val coverImageUrl = firstSong?.highResBannerUrl?.ifBlank { spPlaylist.coverUrl }
+                        ?: spPlaylist.coverUrl
+                    val trackCount = songsInSpotifyPlaylist.size
+
+                    Surface(
+                        color = SurfaceDarkCard,
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .clickable { onOpenSpotifyPlaylist(spPlaylist) }
+                            .testTag("spotify_playlist_item_${spPlaylist.spotifyPlaylistId}")
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            if (coverImageUrl.isNotBlank() || firstSong?.cleanVideoId?.isNotBlank() == true) {
+                                SongArtwork(
+                                    imageUrl = coverImageUrl,
+                                    contentDescription = spPlaylist.name,
+                                    modifier = Modifier.size(54.dp),
+                                    cornerRadius = 10.dp,
+                                    fallbackVideoId = firstSong?.cleanVideoId.orEmpty()
+                                )
+                            } else {
+                                Box(
+                                    modifier = Modifier
+                                        .size(54.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(DeepCharcoal),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.CloudDownload,
+                                        contentDescription = null,
+                                        tint = SpotifyVibrantGreen,
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.width(14.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = spPlaylist.name,
+                                    style = MaterialTheme.typography.titleMedium.copy(
+                                        color = PrimaryWhite,
+                                        fontWeight = FontWeight.Bold
+                                    ),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = "$trackCount songs • Ad-Free",
+                                    style = MaterialTheme.typography.bodyMedium.copy(color = SpotifyVibrantGreen)
+                                )
+                            }
+                            if (songsInSpotifyPlaylist.isNotEmpty()) {
+                                IconButton(
+                                    onClick = { onSharePlaylist(spPlaylist.name, songsInSpotifyPlaylist) },
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .testTag("share_spotify_playlist_${spPlaylist.spotifyPlaylistId}")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Share,
+                                        contentDescription = "Share Spotify playlist",
+                                        tint = SpotifyVibrantGreen
+                                    )
+                                }
+                            }
+                            IconButton(
+                                onClick = { onDeleteSpotifyPlaylist(spPlaylist) },
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .testTag("delete_spotify_playlist_${spPlaylist.spotifyPlaylistId}")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.DeleteOutline,
+                                    contentDescription = "Delete Spotify playlist",
+                                    tint = ErrorRed
+                                )
+                            }
+                        }
+                    }
+                }
+                item {
+                    LibraryCreatorFooter()
+                }
+            }
+        }
+    }
+
+    if (showImportDialog) {
+        AlertDialog(
+            onDismissRequest = { showImportDialog = false },
+            containerColor = SurfaceDarkCard,
+            title = {
+                Text(
+                    text = "Import Playlist",
+                    color = PrimaryWhite,
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Column {
+                    Text(
+                        text = "Spotify Playlist, Song, ya Album ka link niche paste karein:",
+                        style = MaterialTheme.typography.bodyMedium.copy(color = MutedGray),
+                        modifier = Modifier.padding(bottom = 10.dp)
+                    )
+                    OutlinedTextField(
+                        value = spotifyLinkInput,
+                        onValueChange = { spotifyLinkInput = it },
+                        placeholder = {
+                            Text(
+                                text = "https://open.spotify.com/playlist/...",
+                                color = MutedGray
+                            )
+                        },
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = SpotifyVibrantGreen,
+                            unfocusedBorderColor = DividerDark,
+                            focusedTextColor = PrimaryWhite,
+                            unfocusedTextColor = PrimaryWhite
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("spotify_link_input")
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val trimmed = spotifyLinkInput.trim()
+                        if (trimmed.isNotEmpty()) {
+                            onImportSpotifyPlaylist(trimmed)
+                            spotifyLinkInput = ""
+                            showImportDialog = false
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = SpotifyVibrantGreen,
+                        contentColor = PureBlack
+                    ),
+                    modifier = Modifier.testTag("confirm_import_spotify_button")
+                ) {
+                    Text("Import", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showImportDialog = false }) {
                     Text("Cancel", color = MutedGray)
                 }
             }

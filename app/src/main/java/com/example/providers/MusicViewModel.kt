@@ -29,6 +29,8 @@ import com.example.models.PlaylistEntity
 import com.example.models.PlaylistSongEntity
 import com.example.models.SessionHistoryEntity
 import com.example.models.Song
+import com.example.models.SpotifyPlaylistEntity
+import com.example.models.SpotifyPlaylistSongEntity
 import com.example.models.SubscriptionPlanType
 import com.example.models.UserSubscriptionState
 import com.example.services.AudioStreamExtractor
@@ -37,6 +39,7 @@ import com.example.services.FamGatewayOrderSession
 import com.example.services.FamGatewayService
 import com.example.services.FirebaseSongsService
 import com.example.services.MusicPlaybackService
+import com.example.services.SpotifyPlaylistImportService
 import com.example.utils.CountryOption
 import com.example.utils.SUPPORTED_COUNTRIES
 import com.google.common.util.concurrent.ListenableFuture
@@ -86,6 +89,8 @@ sealed class LibrarySubScreen {
     data object MyMusic : LibrarySubScreen()
     data object Playlists : LibrarySubScreen()
     data class PlaylistDetail(val playlist: PlaylistEntity) : LibrarySubScreen()
+    data object SpotifyPlaylists : LibrarySubScreen()
+    data class SpotifyPlaylistDetail(val playlist: SpotifyPlaylistEntity) : LibrarySubScreen()
     data object NowPlaying : LibrarySubScreen()
     data object LastSession : LibrarySubScreen()
     data class ArtistAlbumView(val artistName: String) : LibrarySubScreen()
@@ -98,8 +103,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         val PLAYBACK_SPEEDS = listOf(0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
         const val FREE_DAILY_LIMIT_SECONDS = 3600 // 1 hour (3600 seconds) per day for Free users
         const val CRAZY_DEAL_WINDOW_MS = 3L * 24L * 60L * 60L * 1000L // 3 days (72 hours) for new users
-        const val CURRENT_APP_UPDATE_SECRET_CODE = "7419"
-        private const val CURRENT_SECRET_CODE_VERSION = 7
+        const val CURRENT_APP_UPDATE_SECRET_CODE = "8532"
+        private const val CURRENT_SECRET_CODE_VERSION = 8
     }
 
     private val appContext = application.applicationContext
@@ -242,9 +247,24 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                         saveSubscriptionStateLocally(UserSubscriptionState())
                     }
 
+                    // Preserve and merge today's daily listened seconds so logging out and logging back in
+                    // (or creating/switching accounts on the same device) NEVER resets the free daily limit!
+                    refreshDailyLimitBucketIfNeeded()
+                    val mergedTodaySeconds = maxOf(
+                        _dailyListenedSeconds.value,
+                        loadTodayListenedSeconds(),
+                        authRes.todayListenedSeconds
+                    )
+                    _dailyListenedSeconds.value = mergedTodaySeconds
+                    persistTodayListenedSecondsAntiBypass(mergedTodaySeconds, authRes.userName)
+                    if (!_subscriptionState.value.isActive(now) && mergedTodaySeconds >= currentFreeDailyLimitSeconds()) {
+                        pausePlaybackForDailyLimit()
+                    }
+
                     updateSubscriptionAndCrazyDealTimers()
                     firebaseService.resetAdminDeletionFlagForFreshLogin()
                     syncCurrentUserDataToAdminCloud(isExplicitLogin = true)
+                    syncCurrentUserTimeUsageToAdminCloud()
 
                     if (authRes.isNewAccount) {
                         emitSnackbar("Account created! Welcome to AADIFY, ${authRes.userName}! 🎉")
@@ -412,13 +432,13 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // Database (with non-destructive MIGRATION_1_2 so user's songs & playlists are preserved across updates!)
+    // Database (with non-destructive MIGRATION_1_2 and MIGRATION_2_3 so user's songs & playlists are preserved across updates!)
     private val db = Room.databaseBuilder(
         appContext,
         AKMusicDatabase::class.java,
         "ak_music_local.db"
     )
-        .addMigrations(AKMusicDatabase.MIGRATION_1_2)
+        .addMigrations(AKMusicDatabase.MIGRATION_1_2, AKMusicDatabase.MIGRATION_2_3)
         .fallbackToDestructiveMigration(true)
         .build()
     private val libraryDao = db.musicLibraryDao()
@@ -427,6 +447,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private val firebaseService = FirebaseSongsService(appContext)
     private val audioExtractor = AudioStreamExtractor()
     private val famGatewayService = FamGatewayService()
+    private val spotifyImportService = SpotifyPlaylistImportService()
 
     // Subscription & Daily Free Limit State (Admin-controllable globally and per-user)
     val subscriptionConfig: StateFlow<AdminSubscriptionConfig> = firebaseService.subscriptionConfig
@@ -752,6 +773,15 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     val allPlaylistSongs: StateFlow<List<PlaylistSongEntity>> = libraryDao.getAllPlaylistSongs()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    val spotifyPlaylists: StateFlow<List<SpotifyPlaylistEntity>> = libraryDao.getAllSpotifyPlaylists()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val allSpotifyPlaylistSongs: StateFlow<List<SpotifyPlaylistSongEntity>> = libraryDao.getAllSpotifyPlaylistSongs()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    private val _isImportingSpotifyPlaylist = MutableStateFlow(false)
+    val isImportingSpotifyPlaylist: StateFlow<Boolean> = _isImportingSpotifyPlaylist.asStateFlow()
+
     val downloadedSongs: StateFlow<List<DownloadedSongEntity>> = libraryDao.getAllDownloadedSongs()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
@@ -996,9 +1026,17 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         firebaseService.onAdminTimeUsageResetCallback = {
             viewModelScope.launch {
                 _dailyListenedSeconds.value = 0
+                val today = todayDateKey()
+                val normUser = _userName.value.trim().lowercase(Locale.US)
                 prefs.edit()
-                    .putString("daily_limit_date_key", todayDateKey())
+                    .putString("daily_limit_date_key", today)
                     .putInt("daily_listened_seconds", 0)
+                    .putInt("device_hard_daily_listened_seconds_$today", 0)
+                    .apply {
+                        if (normUser.isNotBlank()) {
+                            putInt("user_daily_listened_${normUser}_$today", 0)
+                        }
+                    }
                     .remove("daily_hourly_seconds_json")
                     .apply()
                 _isDailyLimitReachedModalOpen.value = false
@@ -1436,10 +1474,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     fun openLibrarySubScreen(subScreen: LibrarySubScreen) {
         if ((subScreen is LibrarySubScreen.Playlists ||
                 subScreen is LibrarySubScreen.PlaylistDetail ||
+                subScreen is LibrarySubScreen.SpotifyPlaylists ||
+                subScreen is LibrarySubScreen.SpotifyPlaylistDetail ||
                 subScreen is LibrarySubScreen.Favorites) &&
             !_subscriptionState.value.isActive()
         ) {
-            emitSnackbar("👑 VIP Subscription required! Buy a subscription to unlock Playlists & Favorites.")
+            emitSnackbar("👑 VIP Subscription required! Buy a subscription to unlock Playlists, Spotify Playlists & Favorites.")
             _isSubscriptionModalOpen.value = true
             return
         }
@@ -1611,6 +1651,20 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         } else {
             listOf(song) + currentList
         }
+        if (customQueue != null && customQueue.isNotEmpty()) {
+            val isFromCollectionScreen = _selectedTab.value == MainTab.LIBRARY && (
+                _librarySubScreen.value is LibrarySubScreen.PlaylistDetail ||
+                    _librarySubScreen.value is LibrarySubScreen.Playlists ||
+                    _librarySubScreen.value is LibrarySubScreen.SpotifyPlaylistDetail ||
+                    _librarySubScreen.value is LibrarySubScreen.SpotifyPlaylists ||
+                    _librarySubScreen.value is LibrarySubScreen.Favorites ||
+                    _librarySubScreen.value is LibrarySubScreen.MyMusic
+                )
+            val isSameCustomQueue = isCustomPlaylistQueueActive && customQueue == _queue.value
+            isCustomPlaylistQueueActive = isFromCollectionScreen || isSameCustomQueue || song.id.startsWith("spotify_")
+        } else {
+            isCustomPlaylistQueueActive = false
+        }
         _queue.value = resolvedQueue
 
         // Check whether the engine genuinely has this song loaded and ready
@@ -1706,7 +1760,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
 
-            // 3. Resolve playable YouTube Video ID (even if a legacy history/library row had a blank videoId)
+            // 3. Resolve playable YouTube Video ID (even if a legacy history/library or imported Spotify row had a blank videoId)
             var playableVideoId = song.cleanVideoId
             if (playableVideoId.isBlank()) {
                 val catalogMatch = allSongs.value.firstOrNull {
@@ -1715,6 +1769,17 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 playableVideoId = catalogMatch?.cleanVideoId.orEmpty()
                 if (playableVideoId.isBlank()) {
                     playableVideoId = audioExtractor.findPlayableVideoIdForSong(song).orEmpty()
+                }
+                if (playableVideoId.isNotBlank() && song.id.startsWith("spotify_")) {
+                    val resolvedCover = song.bannerUrl.ifBlank { "https://i.ytimg.com/vi/$playableVideoId/hqdefault.jpg" }
+                    try {
+                        libraryDao.updateSpotifyPlaylistSongVideoId(
+                            songId = song.id,
+                            videoId = playableVideoId,
+                            bannerUrl = resolvedCover
+                        )
+                    } catch (_: Exception) {
+                    }
                 }
             }
 
@@ -1982,6 +2047,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         return pool.first()
     }
 
+    private var isCustomPlaylistQueueActive: Boolean = false
+
     fun skipToNext() {
         val current = _currentSong.value ?: return
         val list = _queue.value.ifEmpty { allSongs.value }
@@ -1993,6 +2060,15 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         if (_isShuffleEnabled.value && list.size > 1) {
             val candidates = list.filterNot { it.id == current.id }
             playSong(candidates.random(), list)
+            return
+        }
+
+        // When playing inside a Playlist / Spotify Playlist OR when Repeat All is active,
+        // play all songs in the playlist sequentially and loop back to the first song!
+        if (isCustomPlaylistQueueActive || _repeatMode.value == RepeatModeState.ALL) {
+            val idx = list.indexOfFirst { it.id == current.id }
+            val nextIndex = if (idx in 0 until list.lastIndex) idx + 1 else 0
+            playSong(list[nextIndex], list, forceRestartFromBeginning = true)
             return
         }
 
@@ -2024,9 +2100,20 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             RepeatModeState.ONE -> {
                 playSong(current, list, forceRestartFromBeginning = true)
             }
-            RepeatModeState.ALL, RepeatModeState.OFF -> {
-                val nextSong = selectSmartNextSongByVibe(current, list)
-                playSong(nextSong, list, forceRestartFromBeginning = true)
+            RepeatModeState.ALL -> {
+                val idx = list.indexOfFirst { it.id == current.id }
+                val nextIndex = if (idx in 0 until list.lastIndex) idx + 1 else 0
+                playSong(list[nextIndex], list, forceRestartFromBeginning = true)
+            }
+            RepeatModeState.OFF -> {
+                if (isCustomPlaylistQueueActive) {
+                    val idx = list.indexOfFirst { it.id == current.id }
+                    val nextIndex = if (idx in 0 until list.lastIndex) idx + 1 else 0
+                    playSong(list[nextIndex], list, forceRestartFromBeginning = true)
+                } else {
+                    val nextSong = selectSmartNextSongByVibe(current, list)
+                    playSong(nextSong, list, forceRestartFromBeginning = true)
+                }
             }
         }
     }
@@ -2139,8 +2226,158 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     fun deletePlaylist(playlist: PlaylistEntity) {
         viewModelScope.launch {
+            libraryDao.deleteAllSongsInPlaylist(playlist.playlistId)
             libraryDao.deletePlaylist(playlist.playlistId)
             emitSnackbar("Deleted playlist \"${playlist.name}\"")
+        }
+    }
+
+    /**
+     * Imports a Spotify Playlist, Track/Song, or Album into the dedicated Spotify Playlists section
+     * (or imports an https://aadify.xo.je shared playlist link if pasted).
+     */
+    fun importSpotifyPlaylistOrSong(
+        rawUrlOrText: String,
+        onImportSuccess: () -> Unit = {}
+    ) {
+        if (!_subscriptionState.value.isActive()) {
+            emitSnackbar("👑 Spotify Playlist Import VIP users ke liye hai! Subscription lein.")
+            _isSubscriptionModalOpen.value = true
+            return
+        }
+        val trimmed = rawUrlOrText.trim()
+        if (trimmed.isEmpty()) {
+            emitSnackbar("Spotify playlist ya song ka link paste karein.")
+            return
+        }
+        if (_isImportingSpotifyPlaylist.value) return
+
+        viewModelScope.launch {
+            // Check if the user pasted an https://aadify.xo.je shared playlist link
+            val sharedPayload = spotifyImportService.decodeSharedPlaylistFromUrlOrText(trimmed)
+            if (sharedPayload != null) {
+                val newId = libraryDao.createSpotifyPlaylist(
+                    SpotifyPlaylistEntity(
+                        name = sharedPayload.name,
+                        coverUrl = sharedPayload.songs.firstOrNull()?.coverUrl.orEmpty(),
+                        spotifyUrl = SpotifyPlaylistImportService.OFFICIAL_SHARE_DOMAIN
+                    )
+                )
+                sharedPayload.songs.forEachIndexed { idx, track ->
+                    val songId = "spotify_${newId}_${idx}_${UUID.randomUUID().toString().take(6)}"
+                    libraryDao.addSongToSpotifyPlaylist(
+                        SpotifyPlaylistSongEntity(
+                            spotifyPlaylistId = newId,
+                            songId = songId,
+                            title = track.title,
+                            artist = track.artist,
+                            videoId = track.videoId,
+                            bannerUrl = track.coverUrl,
+                            timestamp = System.currentTimeMillis() - idx
+                        )
+                    )
+                }
+                emitSnackbar("Playlist \"${sharedPayload.name}\" (${sharedPayload.songs.size} songs) import ho gaya! 🎵")
+                onImportSuccess()
+                return@launch
+            }
+
+            _isImportingSpotifyPlaylist.value = true
+            emitSnackbar("Spotify se songs import ho rahe hain... ⏳")
+            val result = spotifyImportService.importFromSpotifyUrl(trimmed)
+            _isImportingSpotifyPlaylist.value = false
+
+            result.fold(
+                onSuccess = { collection ->
+                    val newPlaylistId = libraryDao.createSpotifyPlaylist(
+                        SpotifyPlaylistEntity(
+                            name = collection.title,
+                            coverUrl = collection.coverUrl.ifBlank {
+                                collection.tracks.firstOrNull()?.coverUrl.orEmpty()
+                            },
+                            spotifyUrl = collection.sourceUrl
+                        )
+                    )
+                    val now = System.currentTimeMillis()
+                    collection.tracks.forEachIndexed { index, track ->
+                        val songId = "spotify_${newPlaylistId}_${index}_${UUID.randomUUID().toString().take(6)}"
+                        libraryDao.addSongToSpotifyPlaylist(
+                            SpotifyPlaylistSongEntity(
+                                spotifyPlaylistId = newPlaylistId,
+                                songId = songId,
+                                title = track.title,
+                                artist = track.artist,
+                                videoId = track.videoId,
+                                bannerUrl = track.coverUrl.ifBlank { collection.coverUrl },
+                                timestamp = now - index
+                            )
+                        )
+                    }
+                    emitSnackbar("Spotify \"${collection.title}\" (${collection.tracks.size} songs) add ho gaya! 🎉")
+                    onImportSuccess()
+                },
+                onFailure = { err ->
+                    emitSnackbar(err.message ?: "Spotify link import nahi ho paya.")
+                }
+            )
+        }
+    }
+
+    fun deleteSpotifyPlaylist(playlist: SpotifyPlaylistEntity) {
+        viewModelScope.launch {
+            libraryDao.deleteAllSongsInSpotifyPlaylist(playlist.spotifyPlaylistId)
+            libraryDao.deleteSpotifyPlaylist(playlist.spotifyPlaylistId)
+            emitSnackbar("Deleted Spotify playlist \"${playlist.name}\"")
+        }
+    }
+
+    /**
+     * Generates a share message with an https://aadify.xo.je/?aadify_playlist=... link.
+     * Opens directly in AADIFY if installed on the user's phone, or opens https://aadify.xo.je in Chrome to download the app.
+     */
+    fun buildSharePlaylistText(playlistName: String, songs: List<Song>): String {
+        val shareUrl = spotifyImportService.encodeSharedPlaylistLink(playlistName, songs)
+        return buildString {
+            append("🎵 Listen to my playlist \"$playlistName\" (${songs.size} songs) on AADIFY!\n\n")
+            append("👉 Open / Import Playlist:\n$shareUrl\n\n")
+            append("📲 Agar aapke phone mein AADIFY app nahi hai, toh yahan se official app download karein: https://aadify.xo.je")
+        }
+    }
+
+    /**
+     * Handles incoming https://aadify.xo.je/?aadify_playlist=... deep links when clicked on a phone with AADIFY installed.
+     */
+    fun handleIncomingDeepLink(uri: Uri?) {
+        if (uri == null) return
+        val fullUrl = uri.toString()
+        if (!fullUrl.contains(SpotifyPlaylistImportService.SHARE_QUERY_PARAM, ignoreCase = true)) return
+
+        viewModelScope.launch {
+            val payload = spotifyImportService.decodeSharedPlaylistFromUrlOrText(fullUrl) ?: return@launch
+            val createdId = libraryDao.createPlaylist(PlaylistEntity(name = payload.name))
+            val now = System.currentTimeMillis()
+            payload.songs.forEachIndexed { idx, track ->
+                val songId = if (track.videoId.isNotBlank()) {
+                    "shared_${track.videoId}"
+                } else {
+                    "spotify_shared_${createdId}_${idx}_${UUID.randomUUID().toString().take(6)}"
+                }
+                libraryDao.addSongToPlaylist(
+                    PlaylistSongEntity(
+                        playlistId = createdId,
+                        songId = songId,
+                        title = track.title,
+                        artist = track.artist,
+                        videoId = track.videoId,
+                        bannerUrl = track.coverUrl,
+                        timestamp = now - idx
+                    )
+                )
+            }
+            val createdEntity = PlaylistEntity(playlistId = createdId, name = payload.name, createdAt = now)
+            _selectedTab.value = MainTab.LIBRARY
+            _librarySubScreen.value = LibrarySubScreen.PlaylistDetail(createdEntity)
+            emitSnackbar("Shared playlist \"${payload.name}\" (${payload.songs.size} songs) aapke Playlists mein add ho gaya! 🎉")
         }
     }
 
@@ -2331,18 +2568,46 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
+    private fun persistTodayListenedSecondsAntiBypass(seconds: Int, userName: String = _userName.value) {
+        val today = todayDateKey()
+        val normUser = userName.trim().lowercase(Locale.US)
+        val safeSecs = seconds.coerceAtLeast(0)
+        val prevDeviceSecs = prefs.getInt("device_hard_daily_listened_seconds_$today", 0).coerceAtLeast(0)
+        val bestSecs = maxOf(safeSecs, prevDeviceSecs)
+        prefs.edit()
+            .putString("daily_limit_date_key", today)
+            .putInt("daily_listened_seconds", bestSecs)
+            .putInt("device_hard_daily_listened_seconds_$today", bestSecs)
+            .apply {
+                if (normUser.isNotBlank()) {
+                    val prevUserSecs = prefs.getInt("user_daily_listened_${normUser}_$today", 0).coerceAtLeast(0)
+                    putInt("user_daily_listened_${normUser}_$today", maxOf(bestSecs, prevUserSecs))
+                }
+            }
+            .apply()
+    }
+
     private fun loadTodayListenedSeconds(): Int {
         val today = todayDateKey()
         val savedDay = prefs.getString("daily_limit_date_key", "") ?: ""
-        return if (savedDay == today) {
-            prefs.getInt("daily_listened_seconds", 0).coerceAtLeast(0)
+        val normUser = _userName.value.trim().lowercase(Locale.US)
+        val deviceHardToday = prefs.getInt("device_hard_daily_listened_seconds_$today", 0).coerceAtLeast(0)
+        val userHardToday = if (normUser.isNotBlank()) {
+            prefs.getInt("user_daily_listened_${normUser}_$today", 0).coerceAtLeast(0)
         } else {
+            0
+        }
+        return if (savedDay == today) {
+            val savedSecs = prefs.getInt("daily_listened_seconds", 0).coerceAtLeast(0)
+            maxOf(savedSecs, deviceHardToday, userHardToday)
+        } else {
+            val carryToday = maxOf(deviceHardToday, userHardToday)
             prefs.edit()
                 .putString("daily_limit_date_key", today)
-                .putInt("daily_listened_seconds", 0)
+                .putInt("daily_listened_seconds", carryToday)
                 .remove("daily_hourly_seconds_json")
                 .apply()
-            0
+            carryToday
         }
     }
 
@@ -2353,11 +2618,17 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             prefs.edit()
                 .putString("daily_limit_date_key", today)
                 .putInt("daily_listened_seconds", 0)
+                .putInt("device_hard_daily_listened_seconds_$today", 0)
                 .remove("daily_hourly_seconds_json")
                 .apply()
             _dailyListenedSeconds.value = 0
             _isDailyLimitReachedModalOpen.value = false
             syncCurrentUserTimeUsageToAdminCloud()
+        } else {
+            val persistedMax = loadTodayListenedSeconds()
+            if (persistedMax > _dailyListenedSeconds.value) {
+                _dailyListenedSeconds.value = persistedMax
+            }
         }
     }
 
@@ -2448,16 +2719,14 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     hourlyMap[hrSlot] = (hourlyMap[hrSlot] ?: 0) + 1
                     saveTodayHourlySecondsMap(hourlyMap)
 
-                    if (nextSec % 5 == 0 || nextSec >= limitSecs) {
-                        prefs.edit()
-                            .putString("daily_limit_date_key", todayDateKey())
-                            .putInt("daily_listened_seconds", nextSec)
-                            .apply()
+                    if (nextSec % 3 == 0 || nextSec >= limitSecs) {
+                        persistTodayListenedSecondsAntiBypass(nextSec)
                     }
                     if (nextSec % 15 == 0 || nextSec == 1 || nextSec >= limitSecs) {
                         syncCurrentUserTimeUsageToAdminCloud()
                     }
                     if (nextSec >= limitSecs) {
+                        persistTodayListenedSecondsAntiBypass(nextSec)
                         pausePlaybackForDailyLimit()
                     }
                 }

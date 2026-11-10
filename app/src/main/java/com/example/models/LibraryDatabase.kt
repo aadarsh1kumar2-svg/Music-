@@ -104,6 +104,39 @@ data class PlaylistSongEntity(
     )
 }
 
+@Entity(tableName = "spotify_playlists")
+data class SpotifyPlaylistEntity(
+    @PrimaryKey(autoGenerate = true) val spotifyPlaylistId: Long = 0,
+    val name: String,
+    val spotifyUrl: String = "",
+    val coverUrl: String = "",
+    val createdAt: Long = System.currentTimeMillis()
+)
+
+@Entity(
+    tableName = "spotify_playlist_songs",
+    primaryKeys = ["spotifyPlaylistId", "songId"]
+)
+data class SpotifyPlaylistSongEntity(
+    val spotifyPlaylistId: Long,
+    val songId: String,
+    val title: String,
+    val artist: String,
+    val videoId: String,
+    val bannerUrl: String,
+    val timestamp: Long,
+    val addedAt: Long = System.currentTimeMillis()
+) {
+    fun toSong() = Song(
+        id = songId,
+        title = title,
+        artist = artist,
+        videoId = videoId,
+        bannerUrl = bannerUrl,
+        timestamp = timestamp
+    )
+}
+
 @Entity(tableName = "downloaded_songs")
 data class DownloadedSongEntity(
     @PrimaryKey val id: String,
@@ -166,10 +199,13 @@ interface MusicLibraryDao {
     @Query("DELETE FROM playlists WHERE playlistId = :playlistId")
     suspend fun deletePlaylist(playlistId: Long)
 
-    @Query("SELECT * FROM playlist_songs WHERE playlistId = :playlistId ORDER BY addedAt DESC")
+    @Query("DELETE FROM playlist_songs WHERE playlistId = :playlistId")
+    suspend fun deleteAllSongsInPlaylist(playlistId: Long)
+
+    @Query("SELECT * FROM playlist_songs WHERE playlistId = :playlistId ORDER BY addedAt ASC")
     fun getSongsInPlaylist(playlistId: Long): Flow<List<PlaylistSongEntity>>
 
-    @Query("SELECT * FROM playlist_songs ORDER BY addedAt DESC")
+    @Query("SELECT * FROM playlist_songs ORDER BY addedAt ASC")
     fun getAllPlaylistSongs(): Flow<List<PlaylistSongEntity>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
@@ -177,6 +213,27 @@ interface MusicLibraryDao {
 
     @Query("DELETE FROM playlist_songs WHERE playlistId = :playlistId AND songId = :songId")
     suspend fun removeSongFromPlaylist(playlistId: Long, songId: String)
+
+    @Query("SELECT * FROM spotify_playlists ORDER BY createdAt DESC")
+    fun getAllSpotifyPlaylists(): Flow<List<SpotifyPlaylistEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun createSpotifyPlaylist(playlist: SpotifyPlaylistEntity): Long
+
+    @Query("DELETE FROM spotify_playlists WHERE spotifyPlaylistId = :spotifyPlaylistId")
+    suspend fun deleteSpotifyPlaylist(spotifyPlaylistId: Long)
+
+    @Query("DELETE FROM spotify_playlist_songs WHERE spotifyPlaylistId = :spotifyPlaylistId")
+    suspend fun deleteAllSongsInSpotifyPlaylist(spotifyPlaylistId: Long)
+
+    @Query("SELECT * FROM spotify_playlist_songs ORDER BY addedAt ASC")
+    fun getAllSpotifyPlaylistSongs(): Flow<List<SpotifyPlaylistSongEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun addSongToSpotifyPlaylist(entry: SpotifyPlaylistSongEntity)
+
+    @Query("UPDATE spotify_playlist_songs SET videoId = :videoId, bannerUrl = :bannerUrl WHERE songId = :songId")
+    suspend fun updateSpotifyPlaylistSongVideoId(songId: String, videoId: String, bannerUrl: String)
 
     @Query("SELECT * FROM downloaded_songs ORDER BY downloadedAt DESC")
     fun getAllDownloadedSongs(): Flow<List<DownloadedSongEntity>>
@@ -197,9 +254,11 @@ interface MusicLibraryDao {
         SessionHistoryEntity::class,
         PlaylistEntity::class,
         PlaylistSongEntity::class,
+        SpotifyPlaylistEntity::class,
+        SpotifyPlaylistSongEntity::class,
         DownloadedSongEntity::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 abstract class AKMusicDatabase : RoomDatabase() {
@@ -212,6 +271,33 @@ abstract class AKMusicDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE session_history ADD COLUMN localContentUri TEXT NOT NULL DEFAULT ''")
                 db.execSQL("ALTER TABLE playlist_songs ADD COLUMN localContentUri TEXT NOT NULL DEFAULT ''")
                 db.execSQL("ALTER TABLE downloaded_songs ADD COLUMN localContentUri TEXT NOT NULL DEFAULT ''")
+            }
+        }
+
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `spotify_playlists` (" +
+                        "`spotifyPlaylistId` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "`name` TEXT NOT NULL, " +
+                        "`spotifyUrl` TEXT NOT NULL DEFAULT '', " +
+                        "`coverUrl` TEXT NOT NULL DEFAULT '', " +
+                        "`createdAt` INTEGER NOT NULL" +
+                        ")"
+                )
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `spotify_playlist_songs` (" +
+                        "`spotifyPlaylistId` INTEGER NOT NULL, " +
+                        "`songId` TEXT NOT NULL, " +
+                        "`title` TEXT NOT NULL, " +
+                        "`artist` TEXT NOT NULL, " +
+                        "`videoId` TEXT NOT NULL, " +
+                        "`bannerUrl` TEXT NOT NULL, " +
+                        "`timestamp` INTEGER NOT NULL, " +
+                        "`addedAt` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`spotifyPlaylistId`, `songId`)" +
+                        ")"
+                )
             }
         }
     }

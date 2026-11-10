@@ -193,7 +193,7 @@ class BackstageYouTubePlayerController(
             } catch (_: Exception) {
             }
             if (currentLoadedVideoId.isNotBlank() && !hasFiredEndedForCurrentTrack) {
-                mainHandler.postDelayed(this, 1200L)
+                mainHandler.postDelayed(this, 850L)
             }
         }
     }
@@ -453,7 +453,7 @@ class BackstageYouTubePlayerController(
                 null
             )
             view.loadUrl(watchUrl)
-            mainHandler.postDelayed(nativeHeartbeatRunnable, 250L)
+            mainHandler.postDelayed(nativeHeartbeatRunnable, 100L)
         }
     }
 
@@ -1209,6 +1209,15 @@ class BackstageYouTubePlayerController(
                         }
                     });
 
+                    v.addEventListener('loadeddata', function() {
+                        v.loop = false;
+                        if (!isCurrentVideoMatchingTarget()) return;
+                        applyResumeSeekIfNeeded(v);
+                        if (!window.__akUserPaused && !window.__akExternalPaused && !window.__akTrackEndedFired) {
+                            tryPlayVideo(v);
+                        }
+                    });
+
                     v.addEventListener('playing', function() {
                         if (window.__akUserPaused || window.__akExternalPaused) {
                             try { v.pause(); } catch (e) {}
@@ -1217,7 +1226,7 @@ class BackstageYouTubePlayerController(
                         if (!isCurrentVideoMatchingTarget()) return;
                         applyResumeSeekIfNeeded(v);
                         var totalDur = getTrueDuration(v);
-                        var canMarkStarted = (v.currentTime >= 0.15) && (v.currentTime < 10.0 || (window.__akResumeTargetSeconds || 0) >= 1.0);
+                        var canMarkStarted = (v.currentTime >= 0.02) && (v.currentTime < 10.0 || (window.__akResumeTargetSeconds || 0) >= 1.0);
                         if (!isAdPlaying() && canMarkStarted && (totalDur <= 0 || v.currentTime < totalDur - 2.0)) {
                             window.__akHasSeenStartOfTrack = true;
                         }
@@ -1447,7 +1456,7 @@ class BackstageYouTubePlayerController(
                     if (typeof window.__akTick === 'function') {
                         window.__akTick();
                     }
-                }, 380);
+                }, 240);
             })();
         """.trimIndent()
         evaluateJs(script)
