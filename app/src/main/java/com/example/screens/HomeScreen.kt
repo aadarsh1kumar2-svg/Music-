@@ -154,7 +154,7 @@ fun HomeScreen(
                                 .testTag("home_top_vip_button")
                         ) {
                             Row(
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Icon(
@@ -165,19 +165,82 @@ fun HomeScreen(
                                 )
                                 Spacer(modifier = Modifier.width(5.dp))
                                 Text(
-                                    text = String.format("Free: %02dm %02ds", remMins, remSecs),
+                                    text = String.format("Free - %02dm %02ds", remMins, remSecs),
                                     maxLines = 1,
                                     style = MaterialTheme.typography.labelSmall.copy(
                                         color = if (isLowTime) ErrorRed else SpotifyVibrantGreen,
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 11.sp
+                                        fontWeight = FontWeight.ExtraBold,
+                                        fontSize = 11.5.sp
                                     )
                                 )
                             }
                         }
+                    } else {
+                        val isForeverPlan = subscriptionPlanName.contains("forever", ignoreCase = true) ||
+                            activeSubscriptionRemainingSeconds > 365L * 86_400L
+                        val planShortLabel = when {
+                            isForeverPlan -> "♾️ FOREVER 👑"
+                            subscriptionPlanName.contains("week", ignoreCase = true) ||
+                                subscriptionPlanName.contains("first", ignoreCase = true) ||
+                                subscriptionPlanName.contains("deal", ignoreCase = true) ->
+                                "Weekly - ${formatCountdownTimer(activeSubscriptionRemainingSeconds)}"
+                            subscriptionPlanName.contains("month", ignoreCase = true) ->
+                                "Monthly - ${formatCountdownTimer(activeSubscriptionRemainingSeconds)}"
+                            else ->
+                                "VIP - ${formatCountdownTimer(activeSubscriptionRemainingSeconds)}"
+                        }
 
-                        Spacer(modifier = Modifier.width(4.dp))
+                        Surface(
+                            color = if (isForeverPlan) {
+                                androidx.compose.ui.graphics.Color(0xFF241B05)
+                            } else {
+                                SpotifyDarkGreenPill
+                            },
+                            shape = RoundedCornerShape(50),
+                            modifier = Modifier
+                                .border(
+                                    width = 1.dp,
+                                    color = if (isForeverPlan) {
+                                        androidx.compose.ui.graphics.Color(0xFFFFD700)
+                                    } else {
+                                        SpotifyGreenBorder
+                                    },
+                                    shape = RoundedCornerShape(50)
+                                )
+                                .testTag("home_top_active_plan_pill")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                if (!isForeverPlan) {
+                                    Icon(
+                                        imageVector = Icons.Default.WorkspacePremium,
+                                        contentDescription = "Active VIP Plan",
+                                        tint = androidx.compose.ui.graphics.Color(0xFFFFD700),
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(5.dp))
+                                }
+                                Text(
+                                    text = planShortLabel,
+                                    maxLines = 1,
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        color = if (isForeverPlan) {
+                                            androidx.compose.ui.graphics.Color(0xFFFFD700)
+                                        } else {
+                                            SpotifyVibrantGreen
+                                        },
+                                        fontWeight = FontWeight.ExtraBold,
+                                        letterSpacing = if (isForeverPlan) 1.sp else 0.3.sp,
+                                        fontSize = 11.5.sp
+                                    )
+                                )
+                            }
+                        }
                     }
+
+                    Spacer(modifier = Modifier.width(4.dp))
 
                     IconButton(
                         onClick = onRefreshCatalog,
@@ -195,9 +258,20 @@ fun HomeScreen(
             }
         }
 
-        // Greeting: "Hi There," + Logged-in User's Name (Stylish Luxury Gradient for Premium Users)
+        // Greeting: "Hi There," + Logged-in User's Name (Executive Luxury Designer Look for Premium Users)
         item {
             val resolvedName = userName.ifBlank { stringResource(id = R.string.greeting_name) }
+            val luxuryDisplayFont = remember {
+                androidx.compose.ui.text.font.FontFamily(
+                    androidx.compose.ui.text.font.Font(R.font.outfit, FontWeight.ExtraBold)
+                )
+            }
+            val royalBadgeFont = remember {
+                androidx.compose.ui.text.font.FontFamily(
+                    androidx.compose.ui.text.font.Font(R.font.cinzel, FontWeight.Bold)
+                )
+            }
+
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -208,65 +282,97 @@ fun HomeScreen(
             ) {
                 Text(
                     text = stringResource(id = R.string.greeting_prefix),
-                    style = MaterialTheme.typography.displayLarge.copy(
+                    style = MaterialTheme.typography.titleMedium.copy(
                         color = SpotifyVibrantGreen,
-                        fontWeight = FontWeight.ExtraBold,
-                        fontSize = 36.sp
+                        fontFamily = luxuryDisplayFont,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 18.sp,
+                        letterSpacing = 0.8.sp
                     )
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 if (isUserSubscribed) {
-                    val accent = SpotifyVibrantGreen
-                    val premiumNameBrush = androidx.compose.ui.graphics.Brush.linearGradient(
+                    val metallicGoldBrush = androidx.compose.ui.graphics.Brush.linearGradient(
+                        colors = listOf(
+                            androidx.compose.ui.graphics.Color(0xFFFFF6D6),
+                            androidx.compose.ui.graphics.Color(0xFFFFD700),
+                            androidx.compose.ui.graphics.Color(0xFFE5A93C),
+                            androidx.compose.ui.graphics.Color(0xFFFFF2B2)
+                        )
+                    )
+                    val goldLineBrush = androidx.compose.ui.graphics.Brush.horizontalGradient(
                         colors = listOf(
                             androidx.compose.ui.graphics.Color(0xFFFFD700),
-                            accent,
-                            androidx.compose.ui.graphics.Color(0xFF00E5FF),
-                            androidx.compose.ui.graphics.Color(0xFFFFAB40)
+                            androidx.compose.ui.graphics.Color(0xFFD4AF37).copy(alpha = 0.6f),
+                            androidx.compose.ui.graphics.Color.Transparent
                         )
                     )
                     Row(
-                        verticalAlignment = Alignment.CenterVertically
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(
-                            text = "✦ $resolvedName ✦",
+                            text = resolvedName,
+                            maxLines = 1,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                             style = MaterialTheme.typography.displayMedium.copy(
-                                brush = premiumNameBrush,
-                                fontWeight = FontWeight.Black,
-                                fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
-                                fontSize = 29.sp,
-                                letterSpacing = 2.2.sp,
+                                brush = metallicGoldBrush,
+                                fontFamily = luxuryDisplayFont,
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 31.sp,
+                                letterSpacing = 0.6.sp,
                                 shadow = androidx.compose.ui.graphics.Shadow(
-                                    color = accent.copy(alpha = 0.65f),
-                                    offset = androidx.compose.ui.geometry.Offset(0f, 4f),
-                                    blurRadius = 18f
+                                    color = androidx.compose.ui.graphics.Color(0xFFFFD700).copy(alpha = 0.32f),
+                                    offset = androidx.compose.ui.geometry.Offset(0f, 3f),
+                                    blurRadius = 14f
                                 )
+                            ),
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Surface(
+                            color = androidx.compose.ui.graphics.Color(0xFF1F1704),
+                            shape = RoundedCornerShape(50),
+                            modifier = Modifier.border(
+                                width = 1.dp,
+                                brush = metallicGoldBrush,
+                                shape = RoundedCornerShape(50)
                             )
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Icon(
-                            imageVector = Icons.Default.Verified,
-                            contentDescription = "Premium Member",
-                            tint = androidx.compose.ui.graphics.Color(0xFFFFD700),
-                            modifier = Modifier.size(22.dp)
-                        )
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "👑 VIP",
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        color = androidx.compose.ui.graphics.Color(0xFFFFD700),
+                                        fontFamily = royalBadgeFont,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        fontSize = 10.sp,
+                                        letterSpacing = 1.1.sp
+                                    )
+                                )
+                            }
+                        }
                     }
-                    Spacer(modifier = Modifier.height(6.dp))
+                    Spacer(modifier = Modifier.height(7.dp))
                     Box(
                         modifier = Modifier
-                            .width(140.dp)
-                            .height(3.dp)
+                            .width(150.dp)
+                            .height(2.dp)
                             .clip(RoundedCornerShape(50))
-                            .background(premiumNameBrush)
+                            .background(goldLineBrush)
                     )
                 } else {
                     Text(
                         text = resolvedName,
                         style = MaterialTheme.typography.displayMedium.copy(
                             color = PrimaryWhite,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 26.sp,
-                            letterSpacing = 1.5.sp
+                            fontFamily = luxuryDisplayFont,
+                            fontWeight = FontWeight.ExtraBold,
+                            fontSize = 29.sp,
+                            letterSpacing = 0.5.sp
                         )
                     )
                 }

@@ -479,69 +479,140 @@ fun AKMusicAppRoot(
                                     .fillMaxWidth()
                                     .padding(24.dp)
                             ) {
-                                Image(
-                                    painter = painterResource(id = R.drawable.aadify_logo),
-                                    contentDescription = "AADIFY Logo",
-                                    contentScale = ContentScale.Fit,
-                                    modifier = Modifier
-                                        .size(56.dp)
-                                        .clip(RoundedCornerShape(12.dp))
-                                )
+                                val luxuryDrawerFont = remember {
+                                    FontFamily(Font(R.font.outfit, FontWeight.ExtraBold))
+                                }
+                                val royalDrawerBadgeFont = remember {
+                                    FontFamily(Font(R.font.cinzel, FontWeight.Bold))
+                                }
+
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Image(
+                                        painter = painterResource(id = R.drawable.aadify_logo),
+                                        contentDescription = "AADIFY Logo",
+                                        contentScale = ContentScale.Fit,
+                                        modifier = Modifier
+                                            .size(56.dp)
+                                            .clip(RoundedCornerShape(12.dp))
+                                    )
+                                }
                                 Spacer(modifier = Modifier.height(12.dp))
-                                Text(
-                                    text = "AADIFY",
-                                    style = MaterialTheme.typography.headlineMedium.copy(
-                                        color = PrimaryWhite,
-                                        fontWeight = FontWeight.ExtraBold
-                                    )
-                                )
-                                Spacer(modifier = Modifier.height(4.dp))
-                                if (subscriptionState.isActive()) {
-                                    val drawerNameBrush = androidx.compose.ui.graphics.Brush.linearGradient(
-                                        colors = listOf(
-                                            Color(0xFFFFD700),
-                                            SpotifyVibrantGreen,
-                                            Color(0xFF00E5FF)
-                                        )
-                                    )
+                                Row(
+                                    verticalAlignment = Alignment.Bottom
+                                ) {
                                     Text(
-                                        text = "Hi There, ✦ $userName ✦",
-                                        style = MaterialTheme.typography.bodyMedium.copy(
-                                            brush = drawerNameBrush,
-                                            fontWeight = FontWeight.Black,
-                                            fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
-                                            fontSize = 15.sp,
-                                            letterSpacing = 1.sp
+                                        text = "AADIFY",
+                                        style = MaterialTheme.typography.headlineMedium.copy(
+                                            color = PrimaryWhite,
+                                            fontFamily = luxuryDrawerFont,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            letterSpacing = 0.8.sp
                                         )
                                     )
-                                    val remainingText = if (subscriptionState.planType == SubscriptionPlanType.FOREVER || activeSubscriptionRemainingSeconds > 365L * 86_400L) {
-                                        "Forever Plan Active ♾️"
-                                    } else {
-                                        "${subscriptionState.planType.displayName} • ${formatCountdownTimer(activeSubscriptionRemainingSeconds)}"
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = "by Aadarsh",
+                                        style = MaterialTheme.typography.labelMedium.copy(
+                                            color = MutedGray,
+                                            fontFamily = luxuryDrawerFont,
+                                            fontWeight = FontWeight.SemiBold,
+                                            fontSize = 12.sp,
+                                            letterSpacing = 0.4.sp
+                                        ),
+                                        modifier = Modifier.padding(bottom = 4.dp)
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(6.dp))
+                                if (subscriptionState.isActive()) {
+                                    val metallicGoldBrush = androidx.compose.ui.graphics.Brush.linearGradient(
+                                        colors = listOf(
+                                            Color(0xFFFFF6D6),
+                                            Color(0xFFFFD700),
+                                            Color(0xFFE5A93C),
+                                            Color(0xFFFFF2B2)
+                                        )
+                                    )
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = userName,
+                                            maxLines = 1,
+                                            style = MaterialTheme.typography.titleMedium.copy(
+                                                brush = metallicGoldBrush,
+                                                fontFamily = luxuryDrawerFont,
+                                                fontWeight = FontWeight.ExtraBold,
+                                                fontSize = 18.sp,
+                                                letterSpacing = 0.5.sp
+                                            ),
+                                            modifier = Modifier.weight(1f, fill = false)
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Surface(
+                                            color = Color(0xFF1F1704),
+                                            shape = RoundedCornerShape(50),
+                                            modifier = Modifier.border(
+                                                width = 1.dp,
+                                                brush = metallicGoldBrush,
+                                                shape = RoundedCornerShape(50)
+                                            )
+                                        ) {
+                                            Text(
+                                                text = "👑 VIP",
+                                                style = MaterialTheme.typography.labelSmall.copy(
+                                                    color = Color(0xFFFFD700),
+                                                    fontFamily = royalDrawerBadgeFont,
+                                                    fontWeight = FontWeight.ExtraBold,
+                                                    fontSize = 9.sp,
+                                                    letterSpacing = 1.sp
+                                                ),
+                                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                                            )
+                                        }
+                                    }
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    val isForever = subscriptionState.planType == SubscriptionPlanType.FOREVER ||
+                                        activeSubscriptionRemainingSeconds > 365L * 86_400L
+                                    val remainingText = when {
+                                        isForever -> "♾️ FOREVER 👑"
+                                        subscriptionState.planType == SubscriptionPlanType.WEEKLY ||
+                                            subscriptionState.planType == SubscriptionPlanType.CRAZY_DEAL ->
+                                            "Weekly - ${formatCountdownTimer(activeSubscriptionRemainingSeconds)}"
+                                        subscriptionState.planType == SubscriptionPlanType.MONTHLY ->
+                                            "Monthly - ${formatCountdownTimer(activeSubscriptionRemainingSeconds)}"
+                                        else ->
+                                            "VIP - ${formatCountdownTimer(activeSubscriptionRemainingSeconds)}"
                                     }
                                     Text(
-                                        text = "✨ $remainingText",
+                                        text = remainingText,
                                         style = MaterialTheme.typography.labelSmall.copy(
-                                            color = SpotifyVibrantGreen,
-                                            fontWeight = FontWeight.SemiBold
+                                            color = if (isForever) Color(0xFFFFD700) else SpotifyVibrantGreen,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 12.sp
                                         )
                                     )
                                 } else {
                                     Text(
                                         text = "Hi There, $userName",
                                         style = MaterialTheme.typography.bodyMedium.copy(
-                                            color = SpotifyVibrantGreen,
-                                            fontWeight = FontWeight.SemiBold,
-                                            fontSize = 14.sp
+                                            color = PrimaryWhite,
+                                            fontFamily = luxuryDrawerFont,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 16.sp
                                         )
                                     )
-                                    val totalLimitMins = (freeDailyLimitSeconds.coerceAtLeast(60)) / 60
-                                    val remMins = ((freeDailyLimitSeconds.coerceAtLeast(60) - dailyListenedSeconds).coerceAtLeast(0)) / 60
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    val remFreeSecs = (freeDailyLimitSeconds.coerceAtLeast(60) - dailyListenedSeconds).coerceAtLeast(0)
+                                    val remMins = remFreeSecs / 60
+                                    val remSecs = remFreeSecs % 60
                                     Text(
-                                        text = "Free Plan • ${remMins}m / ${totalLimitMins}m left today",
+                                        text = String.format("Free - %02dm %02ds", remMins, remSecs),
                                         style = MaterialTheme.typography.labelSmall.copy(
-                                            color = MutedGray,
-                                            fontWeight = FontWeight.SemiBold
+                                            color = SpotifyVibrantGreen,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 12.sp
                                         )
                                     )
                                 }

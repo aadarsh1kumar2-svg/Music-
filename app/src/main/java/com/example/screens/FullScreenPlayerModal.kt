@@ -249,34 +249,6 @@ fun FullScreenPlayerModal(
                         )
                     }
 
-                    IconButton(
-                        onClick = {
-                            val shareUrl = if (song.cleanVideoId.isNotBlank()) {
-                                "https://www.youtube.com/watch?v=${song.cleanVideoId}"
-                            } else {
-                                song.title
-                            }
-                            val sendIntent = Intent(Intent.ACTION_SEND).apply {
-                                type = "text/plain"
-                                putExtra(
-                                    Intent.EXTRA_TEXT,
-                                    "Listen to ${song.title} by ${song.artist} on AADIFY: $shareUrl"
-                                )
-                            }
-                            context.startActivity(Intent.createChooser(sendIntent, "Share Song"))
-                        },
-                        modifier = Modifier
-                            .size(48.dp)
-                            .testTag("full_player_share_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Share,
-                            contentDescription = "Share Song",
-                            tint = PrimaryWhite,
-                            modifier = Modifier.size(24.dp)
-                        )
-                    }
-
                     // Top-Right 3-Lines Menu Button (opens bottom sheet with Add to Playlist & options)
                     IconButton(
                         onClick = { onOpenSongOptions(song) },
