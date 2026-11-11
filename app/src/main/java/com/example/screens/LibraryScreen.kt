@@ -117,6 +117,7 @@ fun LibraryScreen(
     onCreatePlaylist: (String) -> Unit,
     onDeletePlaylist: (PlaylistEntity) -> Unit,
     onImportSpotifyPlaylist: (String) -> Unit = {},
+    onImportSharedPlaylist: (String) -> Unit = {},
     onDeleteSpotifyPlaylist: (SpotifyPlaylistEntity) -> Unit = {},
     onSharePlaylist: (String, List<Song>) -> Unit = { _, _ -> },
     onDeleteDownloadedSong: (DownloadedSongEntity) -> Unit,
@@ -191,6 +192,7 @@ fun LibraryScreen(
                 onBack = { onNavigateSubScreen(LibrarySubScreen.Root) },
                 onOpenPlaylist = { onNavigateSubScreen(LibrarySubScreen.PlaylistDetail(it)) },
                 onCreatePlaylist = onCreatePlaylist,
+                onImportSharedPlaylist = onImportSharedPlaylist,
                 onDeletePlaylist = onDeletePlaylist,
                 onSharePlaylist = onSharePlaylist,
                 modifier = modifier
@@ -998,12 +1000,15 @@ private fun LibraryPlaylistsListView(
     onBack: () -> Unit,
     onOpenPlaylist: (PlaylistEntity) -> Unit,
     onCreatePlaylist: (String) -> Unit,
+    onImportSharedPlaylist: (String) -> Unit = {},
     onDeletePlaylist: (PlaylistEntity) -> Unit,
     onSharePlaylist: (String, List<Song>) -> Unit,
     modifier: Modifier = Modifier
 ) {
     var showCreateDialog by remember { mutableStateOf(false) }
     var playlistName by remember { mutableStateOf("") }
+    var showImportSharedDialog by remember { mutableStateOf(false) }
+    var sharedLinkOrCode by remember { mutableStateOf("") }
 
     Column(
         modifier = modifier
@@ -1017,7 +1022,10 @@ private fun LibraryPlaylistsListView(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.weight(1f)
+            ) {
                 IconButton(onClick = onBack, modifier = Modifier.size(48.dp)) {
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.ArrowBack,
@@ -1025,28 +1033,56 @@ private fun LibraryPlaylistsListView(
                         tint = PrimaryWhite
                     )
                 }
-                Spacer(modifier = Modifier.width(8.dp))
+                Spacer(modifier = Modifier.width(6.dp))
                 Text(
                     text = stringResource(id = R.string.library_playlists),
-                    style = MaterialTheme.typography.headlineMedium.copy(
+                    style = MaterialTheme.typography.headlineSmall.copy(
                         color = PrimaryWhite,
                         fontWeight = FontWeight.Bold
-                    )
+                    ),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
 
-            Button(
-                onClick = { showCreateDialog = true },
-                shape = RoundedCornerShape(12.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = SpotifyVibrantGreen,
-                    contentColor = PureBlack
-                ),
-                modifier = Modifier.testTag("create_playlist_button")
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(Icons.Default.Add, contentDescription = null)
-                Spacer(modifier = Modifier.width(6.dp))
-                Text("New", fontWeight = FontWeight.Bold)
+                OutlinedButton(
+                    onClick = { showImportSharedDialog = true },
+                    shape = RoundedCornerShape(12.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, SpotifyGreenBorder),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        containerColor = SpotifyDarkGreenPill,
+                        contentColor = SpotifyVibrantGreen
+                    ),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                    modifier = Modifier.testTag("import_shared_playlist_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.CloudDownload,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Import", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                }
+
+                Button(
+                    onClick = { showCreateDialog = true },
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = SpotifyVibrantGreen,
+                        contentColor = PureBlack
+                    ),
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                    modifier = Modifier.testTag("create_playlist_button")
+                ) {
+                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("New", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                }
             }
         }
 
@@ -1224,6 +1260,59 @@ private fun LibraryPlaylistsListView(
             }
         )
     }
+
+    if (showImportSharedDialog) {
+        AlertDialog(
+            onDismissRequest = { showImportSharedDialog = false },
+            containerColor = SurfaceDarkCard,
+            title = {
+                Text("Import Shared Playlist", color = PrimaryWhite, fontWeight = FontWeight.Bold)
+            },
+            text = {
+                Column {
+                    Text(
+                        text = "Apne dost ka share kiya hua AADIFY Playlist link (https://aadify.xo.je/?p=...) ya 6-digit code paste karein:",
+                        style = MaterialTheme.typography.bodySmall.copy(color = MutedGray)
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = sharedLinkOrCode,
+                        onValueChange = { sharedLinkOrCode = it },
+                        placeholder = { Text("https://aadify.xo.je/?p=...", color = MutedGray) },
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = SpotifyVibrantGreen,
+                            unfocusedBorderColor = DividerDark,
+                            focusedTextColor = PrimaryWhite,
+                            unfocusedTextColor = PrimaryWhite
+                        )
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (sharedLinkOrCode.isNotBlank()) {
+                            onImportSharedPlaylist(sharedLinkOrCode.trim())
+                            sharedLinkOrCode = ""
+                            showImportSharedDialog = false
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = SpotifyVibrantGreen,
+                        contentColor = PureBlack
+                    )
+                ) {
+                    Text("Import", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showImportSharedDialog = false }) {
+                    Text("Cancel", color = MutedGray)
+                }
+            }
+        )
+    }
 }
 
 @Composable
@@ -1388,8 +1477,10 @@ private fun LibrarySpotifyPlaylistsListView(
                             .map { it.toSong() }
                     }
                     val firstSong = songsInSpotifyPlaylist.firstOrNull()
-                    val coverImageUrl = firstSong?.highResBannerUrl?.ifBlank { spPlaylist.coverUrl }
-                        ?: spPlaylist.coverUrl
+                    // Always display the Spotify playlist's ORIGINAL cover image on the Spotify playlist card!
+                    val coverImageUrl = spPlaylist.coverUrl.ifBlank {
+                        firstSong?.highResBannerUrl.orEmpty()
+                    }
                     val trackCount = songsInSpotifyPlaylist.size
 
                     Surface(

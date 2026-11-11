@@ -8,12 +8,16 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.security.MessageDigest
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.zip.GZIPInputStream
@@ -37,6 +41,7 @@ data class ImportedSpotifyCollection(
 
 data class SharedPlaylistPayload(
     val name: String,
+    val coverUrl: String = "",
     val songs: List<ImportedSpotifyTrack>
 )
 
@@ -45,6 +50,7 @@ class SpotifyPlaylistImportService {
     companion object {
         const val OFFICIAL_SHARE_DOMAIN = "https://aadify.xo.je"
         const val SHARE_QUERY_PARAM = "aadify_playlist"
+        const val SHORT_SHARE_PARAM = "p"
     }
 
     private val httpClient = OkHttpClient.Builder()
@@ -57,38 +63,172 @@ class SpotifyPlaylistImportService {
     private val trackCoverCache = ConcurrentHashMap<String, String>()
 
     /**
-     * Generates a shareable link using https://aadify.xo.je/?aadify_playlist=<payload>
-     * If the recipient has AADIFY installed, Android opens AADIFY via intent-filter and imports the playlist.
-     * If the recipient does not have AADIFY installed, Chrome opens https://aadify.xo.je where they can download the app.
+     * Generates a deterministic 6-character lowercase alphanumeric code for a shared playlist
+     * and uploads the playlist data to Firebase Realtime Database (/sharedPlaylists/{shortCode}.json).
+     * Returns a clean, short 31-character URL: https://aadify.xo.je/?p=a7k9m2
      */
-    fun encodeSharedPlaylistLink(playlistName: String, songs: List<Song>): String {
-        val root = JSONObject()
-        root.put("n", playlistName.trim().ifBlank { "My Playlist" })
-        val arr = JSONArray()
-        songs.take(80).forEach { song ->
-            val item = JSONArray()
-            item.put(song.title.trim())
-            item.put(song.artist.trim())
-            item.put(song.videoId.trim())
-            item.put(song.bannerUrl.trim())
-            arr.put(item)
+    suspend fun publishSharedPlaylistToCloud(
+        databaseUrl: String,
+        playlistName: String,
+        coverUrl: String,
+        songs: List<Song>
+    ): String = withContext(Dispatchers.IO) {
+        val cleanName = playlistName.trim().ifBlank { "My Playlist" }
+        val signatureInput = buildString {
+            append(cleanName.lowercase(Locale.US))
+            append("|")
+            append(songs.size)
+            songs.take(25).forEach {
+                append("|").append(it.title.trim().lowercase(Locale.US))
+                append(":").append(it.cleanVideoId)
+            }
         }
-        root.put("s", arr)
+        val shortCode = generateShortAlphanumericCode(signatureInput, length = 6)
 
-        val jsonBytes = root.toString().toByteArray(Charsets.UTF_8)
-        val bos = ByteArrayOutputStream()
-        GZIPOutputStream(bos).use { gzip ->
-            gzip.write(jsonBytes)
+        val songsArr = JSONArray()
+        songs.take(150).forEach { song ->
+            songsArr.put(
+                JSONObject().apply {
+                    put("t", song.title.trim())
+                    put("a", song.artist.trim())
+                    put("v", song.videoId.trim())
+                    put("b", song.bannerUrl.trim())
+                }
+            )
         }
-        val encoded = Base64.encodeToString(
-            bos.toByteArray(),
-            Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING
-        )
-        return "$OFFICIAL_SHARE_DOMAIN/?$SHARE_QUERY_PARAM=$encoded"
+
+        val payload = JSONObject().apply {
+            put("id", shortCode)
+            put("n", cleanName)
+            put("c", coverUrl.trim().ifBlank { songs.firstOrNull()?.highResBannerUrl.orEmpty() })
+            put("updatedAt", System.currentTimeMillis())
+            put("s", songsArr)
+        }
+
+        try {
+            val body = payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+            val req = Request.Builder()
+                .url("${databaseUrl.trimEnd('/')}/sharedPlaylists/$shortCode.json")
+                .put(body)
+                .build()
+            httpClient.newCall(req).execute().close()
+        } catch (_: Exception) {
+        }
+
+        "$OFFICIAL_SHARE_DOMAIN/?$SHORT_SHARE_PARAM=$shortCode"
+    }
+
+    private fun generateShortAlphanumericCode(seed: String, length: Int = 6): String {
+        val alphabet = "abcdefghjkmnpqrstuvwxyz23456789"
+        return try {
+            val digest = MessageDigest.getInstance("SHA-256").digest(seed.toByteArray(Charsets.UTF_8))
+            val sb = StringBuilder(length)
+            for (i in 0 until length) {
+                val idx = (digest[i].toInt() and 0xFF) % alphabet.length
+                sb.append(alphabet[idx])
+            }
+            sb.toString()
+        } catch (_: Exception) {
+            "pl" + (seed.hashCode() and 0x7FFFFFFF).toString(36).take(4).padEnd(4, 'x')
+        }
     }
 
     /**
-     * Decodes a shared playlist from an https://aadify.xo.je/?aadify_playlist=... URL or share text.
+     * Resolves a shared playlist from either a short cloud link (https://aadify.xo.je/?p=a7k9m2,
+     * aadify://playlist/a7k9m2, or a 6-char code) OR a legacy encoded ?aadify_playlist= link.
+     */
+    suspend fun resolveSharedPlaylistFromCloudOrText(
+        databaseUrl: String,
+        rawInput: String
+    ): SharedPlaylistPayload? = withContext(Dispatchers.IO) {
+        val trimmed = rawInput.trim()
+        if (trimmed.isBlank()) return@withContext null
+
+        val shortCode = extractShortPlaylistCode(trimmed)
+        if (!shortCode.isNullOrBlank()) {
+            try {
+                val req = Request.Builder()
+                    .url("${databaseUrl.trimEnd('/')}/sharedPlaylists/$shortCode.json")
+                    .get()
+                    .build()
+                httpClient.newCall(req).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        val body = resp.body?.string()?.trim().orEmpty()
+                        if (body.isNotEmpty() && body != "null" && body.startsWith("{")) {
+                            val obj = JSONObject(body)
+                            val name = obj.optString("n", "Shared Playlist").trim().ifBlank { "Shared Playlist" }
+                            val cover = obj.optString("c", "").trim()
+                            val arr = obj.optJSONArray("s") ?: JSONArray()
+                            val tracks = mutableListOf<ImportedSpotifyTrack>()
+                            for (i in 0 until arr.length()) {
+                                val itemObj = arr.optJSONObject(i)
+                                if (itemObj != null) {
+                                    val title = itemObj.optString("t", "").trim()
+                                    val artist = itemObj.optString("a", "Unknown Artist").trim().ifBlank { "Unknown Artist" }
+                                    val videoId = itemObj.optString("v", "").trim()
+                                    val banner = itemObj.optString("b", "").trim().ifBlank {
+                                        if (videoId.isNotBlank()) "https://i.ytimg.com/vi/$videoId/hqdefault.jpg" else ""
+                                    }
+                                    if (title.isNotBlank()) {
+                                        tracks.add(
+                                            ImportedSpotifyTrack(
+                                                title = title,
+                                                artist = artist,
+                                                coverUrl = banner,
+                                                videoId = videoId
+                                            )
+                                        )
+                                    }
+                                }
+                            }
+                            if (tracks.isNotEmpty()) {
+                                return@withContext SharedPlaylistPayload(
+                                    name = name,
+                                    coverUrl = cover,
+                                    songs = tracks
+                                )
+                            }
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }
+
+        decodeSharedPlaylistFromUrlOrText(trimmed)
+    }
+
+    fun extractShortPlaylistCode(rawInput: String): String? {
+        val trimmed = rawInput.trim()
+        if (trimmed.isBlank()) return null
+
+        // Direct 6-8 char alphanumeric code pasted by user
+        if (Regex("^[a-zA-Z0-9]{5,10}$").matches(trimmed) && !trimmed.equals("spotify", ignoreCase = true)) {
+            return trimmed.lowercase(Locale.US)
+        }
+
+        // Custom scheme aadify://playlist/<code> or aadify://p/<code>
+        val schemeMatch = Regex("""aadify://(?:playlist|p)/([a-zA-Z0-9_-]{4,14})""", RegexOption.IGNORE_CASE).find(trimmed)
+        if (schemeMatch != null) {
+            return schemeMatch.groupValues[1].lowercase(Locale.US)
+        }
+
+        // URL query ?p=<code> or path /p/<code> on aadify.xo.je
+        val queryMatch = Regex("""[?&]p=([a-zA-Z0-9_-]{4,14})""", RegexOption.IGNORE_CASE).find(trimmed)
+        if (queryMatch != null) {
+            return queryMatch.groupValues[1].lowercase(Locale.US)
+        }
+
+        val pathMatch = Regex("""aadify\.xo\.je/(?:p|playlist)/([a-zA-Z0-9_-]{4,14})""", RegexOption.IGNORE_CASE).find(trimmed)
+        if (pathMatch != null) {
+            return pathMatch.groupValues[1].lowercase(Locale.US)
+        }
+
+        return null
+    }
+
+    /**
+     * Legacy fallback decoder for ?aadify_playlist=<base64> links.
      */
     fun decodeSharedPlaylistFromUrlOrText(rawInput: String): SharedPlaylistPayload? {
         return try {
@@ -149,6 +289,23 @@ class SpotifyPlaylistImportService {
             }
         }
         return null
+    }
+
+    /**
+     * Fetches the original cover image of a Spotify Playlist/Album/Track from Spotify oEmbed.
+     */
+    suspend fun fetchOriginalSpotifyEntityCoverUrl(spotifyUrl: String): String = withContext(Dispatchers.IO) {
+        val cleanUrl = extractSpotifyUrl(spotifyUrl) ?: return@withContext ""
+        return@withContext try {
+            val oembedJson = fetchHtml("https://open.spotify.com/oembed?url=$cleanUrl")
+            if (oembedJson.isNotBlank() && oembedJson.trim().startsWith("{")) {
+                JSONObject(oembedJson).optString("thumbnail_url").trim()
+            } else {
+                ""
+            }
+        } catch (_: Exception) {
+            ""
+        }
     }
 
     /**
@@ -231,9 +388,17 @@ class SpotifyPlaylistImportService {
             if (embedHtml.isNotBlank()) {
                 val parsedFromEmbed = parseFromEmbedHtml(embedHtml, entityType, canonicalUrl)
                 if (parsedFromEmbed != null && parsedFromEmbed.tracks.isNotEmpty()) {
-                    // Hydrate the first 16 songs' individual cover images immediately in parallel so they show right away!
+                    // Always guarantee we have the original Spotify playlist cover image!
+                    val originalPlaylistCover = parsedFromEmbed.coverUrl.ifBlank {
+                        fetchOriginalSpotifyEntityCoverUrl(canonicalUrl)
+                    }
                     val hydratedTracks = hydrateInitialTrackCovers(parsedFromEmbed.tracks)
-                    return@withContext Result.success(parsedFromEmbed.copy(tracks = hydratedTracks))
+                    return@withContext Result.success(
+                        parsedFromEmbed.copy(
+                            coverUrl = originalPlaylistCover,
+                            tracks = hydratedTracks
+                        )
+                    )
                 }
             }
 
@@ -241,8 +406,16 @@ class SpotifyPlaylistImportService {
             val mainHtml = fetchHtml(canonicalUrl)
             val parsedFromMain = parseFromMainHtmlAndOEmbed(mainHtml, entityType, entityId, canonicalUrl)
             if (parsedFromMain != null && parsedFromMain.tracks.isNotEmpty()) {
+                val originalPlaylistCover = parsedFromMain.coverUrl.ifBlank {
+                    fetchOriginalSpotifyEntityCoverUrl(canonicalUrl)
+                }
                 val hydratedTracks = hydrateInitialTrackCovers(parsedFromMain.tracks)
-                return@withContext Result.success(parsedFromMain.copy(tracks = hydratedTracks))
+                return@withContext Result.success(
+                    parsedFromMain.copy(
+                        coverUrl = originalPlaylistCover,
+                        tracks = hydratedTracks
+                    )
+                )
             }
 
             Result.failure(IllegalStateException("Is Spotify link se songs load nahi ho paaye. Make sure playlist Public hai."))
@@ -386,7 +559,6 @@ class SpotifyPlaylistImportService {
                 )
             }
 
-            // Note: For an album, all tracks genuinely share the album cover; for a playlist, each song has its own cover!
             val defaultTrackCover = if (entityType == "album") collectionCoverUrl else ""
 
             val trackList = entity.optJSONArray("trackList") ?: JSONArray()

@@ -3046,4 +3046,89 @@ class FirebaseSongsService(private val context: Context) {
             }
         }
     }
+
+    /**
+     * Backs up the user's full custom Playlists, Spotify Playlists (with original Spotify coverUrl
+     * and individual song covers), and Favorites to `/userPlaylistsBackup/{userId}` (and `/userPlaylistsBackupByName/{normKey}`)
+     * so logging in never loses or deletes old playlists.
+     */
+    fun syncUserPlaylistsBackupToCloud(
+        userId: String,
+        userName: String,
+        backupPayload: JSONObject
+    ) {
+        val cleanId = userId.trim()
+        if (cleanId.isEmpty() || isCurrentUserDeletedByAdmin) return
+        scope.launch {
+            try {
+                val bodyStr = backupPayload.toString()
+                val body = bodyStr.toRequestBody("application/json; charset=utf-8".toMediaType())
+                httpClient.newCall(
+                    Request.Builder()
+                        .url("$DATABASE_URL/userPlaylistsBackup/$cleanId.json")
+                        .patch(body)
+                        .build()
+                ).execute().close()
+
+                val normKey = normalizeUsernameKey(userName)
+                if (normKey.isNotBlank()) {
+                    val byNameBody = bodyStr.toRequestBody("application/json; charset=utf-8".toMediaType())
+                    httpClient.newCall(
+                        Request.Builder()
+                            .url("$DATABASE_URL/userPlaylistsBackupByName/$normKey.json")
+                            .patch(byNameBody)
+                            .build()
+                    ).execute().close()
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to sync user playlists backup to cloud", e)
+            }
+        }
+    }
+
+    /**
+     * Fetches the user's backed-up Playlists, Spotify Playlists, and Favorites from Firebase
+     * so they can be merged/restored into local Room storage upon login.
+     */
+    suspend fun fetchUserPlaylistsBackupFromCloud(
+        userId: String,
+        userName: String
+    ): JSONObject? = withContext(Dispatchers.IO) {
+        val cleanId = userId.trim()
+        val normKey = normalizeUsernameKey(userName)
+        val candidateUrls = buildList {
+            if (cleanId.isNotBlank()) {
+                add("$DATABASE_URL/userPlaylistsBackup/$cleanId.json")
+            }
+            if (normKey.isNotBlank()) {
+                add("$DATABASE_URL/userPlaylistsBackupByName/$normKey.json")
+            }
+            if (cleanId.isNotBlank()) {
+                add("$DATABASE_URL/users/$cleanId.json")
+            }
+        }
+
+        for (url in candidateUrls) {
+            try {
+                val req = Request.Builder().url(url).get().build()
+                httpClient.newCall(req).execute().use { res ->
+                    if (res.isSuccessful) {
+                        val str = res.body?.string()?.trim().orEmpty()
+                        if (str.isNotEmpty() && str != "null" && str.startsWith("{")) {
+                            val obj = JSONObject(str)
+                            val hasPlaylists = obj.optJSONArray("customPlaylists")?.length()?.let { it > 0 } == true ||
+                                obj.optJSONArray("spotifyPlaylists")?.length()?.let { it > 0 } == true ||
+                                obj.optJSONArray("playlists")?.length()?.let { it > 0 } == true ||
+                                obj.optJSONArray("favorites")?.length()?.let { it > 0 } == true
+                            if (hasPlaylists) {
+                                return@withContext obj
+                            }
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }
+        null
+    }
 }

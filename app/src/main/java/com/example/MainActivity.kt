@@ -358,6 +358,22 @@ fun AKMusicAppRoot(
             if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP || event == Lifecycle.Event.ON_RESUME) {
                 musicViewModel.keepEngineAwakeInBackground()
             }
+            if (event == Lifecycle.Event.ON_RESUME) {
+                // If user copied a shared playlist link (`https://aadify.xo.je/?p=<code>`) or opened the app after clicking a share link,
+                // automatically detect and import the shared playlist once!
+                try {
+                    val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+                    val clipText = clipboard?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString()?.trim().orEmpty()
+                    if (clipText.contains("aadify.xo.je", ignoreCase = true) || clipText.contains("aadify://", ignoreCase = true)) {
+                        musicViewModel.importSharedPlaylistFromUrlOrCode(
+                            rawText = clipText,
+                            silentIfNone = true,
+                            fromClipboard = true
+                        )
+                    }
+                } catch (_: Exception) {
+                }
+            }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
@@ -967,24 +983,35 @@ fun AKMusicAppRoot(
                                         onImportSpotifyPlaylist = { link ->
                                             musicViewModel.importSpotifyPlaylistOrSong(link)
                                         },
+                                        onImportSharedPlaylist = { linkOrCode ->
+                                            musicViewModel.importSharedPlaylistFromUrlOrCode(
+                                                rawText = linkOrCode,
+                                                silentIfNone = false,
+                                                fromClipboard = false
+                                            )
+                                        },
                                         onDeleteSpotifyPlaylist = { spPlaylist ->
                                             musicViewModel.deleteSpotifyPlaylist(spPlaylist)
                                         },
                                         onSharePlaylist = { playlistName, songsToShare ->
-                                            val shareText = musicViewModel.buildSharePlaylistText(playlistName, songsToShare)
-                                            try {
-                                                val sendIntent = Intent(Intent.ACTION_SEND).apply {
-                                                    type = "text/plain"
-                                                    putExtra(Intent.EXTRA_SUBJECT, "AADIFY Playlist: $playlistName")
-                                                    putExtra(Intent.EXTRA_TEXT, shareText)
+                                            musicViewModel.sharePlaylistViaShortLink(
+                                                playlistName = playlistName,
+                                                songs = songsToShare
+                                            ) { shareText ->
+                                                try {
+                                                    val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                                                        type = "text/plain"
+                                                        putExtra(Intent.EXTRA_SUBJECT, "AADIFY Playlist: $playlistName")
+                                                        putExtra(Intent.EXTRA_TEXT, shareText)
+                                                    }
+                                                    val chooser = Intent.createChooser(sendIntent, "Share Playlist ($playlistName)")
+                                                    if (context !is Activity) {
+                                                        chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                                    }
+                                                    context.startActivity(chooser)
+                                                } catch (_: Exception) {
+                                                    musicViewModel.emitSnackbar("Share sheet open nahi ho paya.")
                                                 }
-                                                val chooser = Intent.createChooser(sendIntent, "Share Playlist ($playlistName)")
-                                                if (context !is Activity) {
-                                                    chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                                }
-                                                context.startActivity(chooser)
-                                            } catch (_: Exception) {
-                                                musicViewModel.emitSnackbar("Share sheet open nahi ho paya.")
                                             }
                                         },
                                         onDeleteDownloadedSong = { musicViewModel.deleteDownloadedSong(it) },

@@ -103,8 +103,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         val PLAYBACK_SPEEDS = listOf(0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
         const val FREE_DAILY_LIMIT_SECONDS = 3600 // 1 hour (3600 seconds) per day for Free users
         const val CRAZY_DEAL_WINDOW_MS = 3L * 24L * 60L * 60L * 1000L // 3 days (72 hours) for new users
-        const val CURRENT_APP_UPDATE_SECRET_CODE = "9641"
-        private const val CURRENT_SECRET_CODE_VERSION = 9
+        const val CURRENT_APP_UPDATE_SECRET_CODE = "4826"
+        private const val CURRENT_SECRET_CODE_VERSION = 10
     }
 
     private val appContext = application.applicationContext
@@ -263,6 +263,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
                     updateSubscriptionAndCrazyDealTimers()
                     firebaseService.resetAdminDeletionFlagForFreshLogin()
+                    // Restore any existing Playlists, Spotify Playlists, and Favorites from cloud BEFORE syncing so login never deletes old playlists!
+                    restoreUserPlaylistsFromCloud(authRes.userId, authRes.userName)
                     syncCurrentUserDataToAdminCloud(isExplicitLogin = true)
                     syncCurrentUserTimeUsageToAdminCloud()
 
@@ -760,30 +762,30 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     val filteredSongs: StateFlow<List<Song>> = firebaseService.songs
 
-    // Local Room Flows
+    // Local Room Flows (SharingStarted.Eagerly ensures playlists & favorites are always loaded in memory even during Login/Home screens)
     val favoriteEntities: StateFlow<List<FavoriteSongEntity>> = libraryDao.getAllFavorites()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     val sessionHistoryEntities: StateFlow<List<SessionHistoryEntity>> = libraryDao.getRecentSessionHistory()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     val playlists: StateFlow<List<PlaylistEntity>> = libraryDao.getAllPlaylists()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     val allPlaylistSongs: StateFlow<List<PlaylistSongEntity>> = libraryDao.getAllPlaylistSongs()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     val spotifyPlaylists: StateFlow<List<SpotifyPlaylistEntity>> = libraryDao.getAllSpotifyPlaylists()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     val allSpotifyPlaylistSongs: StateFlow<List<SpotifyPlaylistSongEntity>> = libraryDao.getAllSpotifyPlaylistSongs()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     private val _isImportingSpotifyPlaylist = MutableStateFlow(false)
     val isImportingSpotifyPlaylist: StateFlow<Boolean> = _isImportingSpotifyPlaylist.asStateFlow()
 
     val downloadedSongs: StateFlow<List<DownloadedSongEntity>> = libraryDao.getAllDownloadedSongs()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     // Charts Computed List (Strict Admin Ranking Order: 1, 2, 3...)
     val chartSongs: StateFlow<List<Song>> = combine(
@@ -1055,40 +1057,81 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        // Initial cloud sync if user is already logged in with their name:
-        // Pass isExplicitLogin = false so we FIRST check if Admin deleted this user while the app was closed!
+        // Initial cloud restore & sync if user is already logged in with their name:
         if (_userName.value.isNotBlank()) {
-            syncCurrentUserDataToAdminCloud(isExplicitLogin = false)
+            viewModelScope.launch {
+                val currentName = _userName.value.trim()
+                val uid = getOrCreateCloudUserId(currentName)
+                restoreUserPlaylistsFromCloud(uid, currentName)
+                syncCurrentUserDataToAdminCloud(isExplicitLogin = false)
+            }
         }
 
-        // Automatically sync user's live data (favorites, playlists, downloads, session history, current song) to Admin Panel
+        // Automatically sync user's live data (favorites, playlists, Spotify playlists, downloads, session history) to Cloud
         viewModelScope.launch {
             combine(
                 _userName,
                 favoriteEntities,
                 playlists,
-                downloadedSongs,
-                sessionHistoryEntities
-            ) { name, favs, lists, downloads, history ->
-                "${name}|${favs.size}|${lists.size}|${downloads.size}|${history.size}|${history.sumOf { it.playCount }}"
+                allPlaylistSongs,
+                spotifyPlaylists
+            ) { name, favs, lists, listSongs, spLists ->
+                "${name}|${favs.size}|${lists.size}|${listSongs.size}|${spLists.size}"
             }.collect {
-                if (_userName.value.isNotBlank()) {
+                if (_userName.value.isNotBlank() && !isRestoringCloudPlaylists) {
                     scheduleDebouncedUserCloudSync()
                 }
             }
         }
 
-        // Automatically repair/hydrate individual song covers for any imported Spotify playlist
-        // where songs were previously assigned the playlist's cover image or have blank covers!
+        viewModelScope.launch {
+            combine(
+                allSpotifyPlaylistSongs,
+                downloadedSongs,
+                sessionHistoryEntities
+            ) { spSongs, downloads, history ->
+                "${spSongs.size}|${downloads.size}|${history.size}|${history.sumOf { it.playCount }}"
+            }.collect {
+                if (_userName.value.isNotBlank() && !isRestoringCloudPlaylists) {
+                    scheduleDebouncedUserCloudSync()
+                }
+            }
+        }
+
+        // Automatically repair/hydrate:
+        // 1) Original Spotify playlist cover (`spPlaylist.coverUrl`) from Spotify oEmbed if missing or overwritten
+        // 2) Individual song covers (`songEntity.bannerUrl`) for each song inside imported Spotify playlists
         viewModelScope.launch(Dispatchers.IO) {
+            val repairedPlaylistCovers = mutableSetOf<Long>()
             val repairedSongIds = mutableSetOf<String>()
             combine(spotifyPlaylists, allSpotifyPlaylistSongs) { spLists, spSongs ->
                 spLists to spSongs
             }.collect { (spLists, spSongs) ->
-                if (spSongs.isEmpty()) return@collect
+                if (spLists.isEmpty() && spSongs.isEmpty()) return@collect
                 val playlistMap = spLists.associateBy { it.spotifyPlaylistId }
                 val songsByPlaylist = spSongs.groupBy { it.spotifyPlaylistId }
 
+                // Step A: Ensure each Spotify Playlist has its ORIGINAL Spotify coverUrl
+                for (spPl in spLists) {
+                    if (!repairedPlaylistCovers.contains(spPl.spotifyPlaylistId)) {
+                        repairedPlaylistCovers.add(spPl.spotifyPlaylistId)
+                        val srcUrl = spPl.spotifyUrl.trim()
+                        if (srcUrl.contains("spotify.com", ignoreCase = true)) {
+                            val origCover = spotifyImportService.fetchOriginalSpotifyEntityCoverUrl(srcUrl)
+                            if (origCover.isNotBlank() && origCover != spPl.coverUrl.trim()) {
+                                try {
+                                    libraryDao.updateSpotifyPlaylistCoverUrl(
+                                        spotifyPlaylistId = spPl.spotifyPlaylistId,
+                                        coverUrl = origCover
+                                    )
+                                } catch (_: Exception) {
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Step B: Ensure each song inside the Spotify Playlist has its own individual song cover
                 for ((playlistId, songsInPl) in songsByPlaylist) {
                     val parentPl = playlistMap[playlistId]
                     val parentCover = parentPl?.coverUrl?.trim().orEmpty()
@@ -1343,8 +1386,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             put("playlistNames", playlistList.joinToString(", ") { it.name }.ifBlank { "None" })
             put("downloadedSongs", downloadList.joinToString(", ") { it.title }.ifBlank { "None" })
             put("recentSongsSummary", historyList.take(10).joinToString(", ") { "${it.title} (${it.playCount}x)" }.ifBlank { "None" })
-            put("favorites", favJsonArray)
-            put("playlists", playlistsJsonArray)
+            if (favJsonArray.length() > 0) {
+                put("favorites", favJsonArray)
+            }
+            if (playlistsJsonArray.length() > 0) {
+                put("playlists", playlistsJsonArray)
+            }
             put("downloads", downloadsJsonArray)
             put("recentSongs", historyJsonArray)
 
@@ -1376,6 +1423,259 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         )
         if (historyJsonArray.length() > 0) {
             firebaseService.syncSongHistoryToCloud(userId, historyJsonArray)
+        }
+
+        // Also back up full custom Playlists, Spotify Playlists (with original Spotify cover + individual song covers),
+        // and Favorites to `/userPlaylistsBackup/{userId}` whenever local data is present so login never loses playlists!
+        val spLists = spotifyPlaylists.value
+        val spSongsList = allSpotifyPlaylistSongs.value
+        if (!isRestoringCloudPlaylists && (playlistList.isNotEmpty() || spLists.isNotEmpty() || favList.isNotEmpty())) {
+            val customPlaylistsBackupArr = JSONArray()
+            for (pl in playlistList) {
+                val songsInPl = playlistSongsList
+                    .filter { it.playlistId == pl.playlistId }
+                    .sortedBy { it.addedAt }
+                val songsArr = JSONArray()
+                for (s in songsInPl) {
+                    songsArr.put(
+                        JSONObject().apply {
+                            put("songId", s.songId)
+                            put("title", s.title)
+                            put("artist", s.artist)
+                            put("videoId", s.videoId)
+                            put("bannerUrl", s.bannerUrl)
+                            put("timestamp", s.timestamp)
+                        }
+                    )
+                }
+                customPlaylistsBackupArr.put(
+                    JSONObject().apply {
+                        put("name", pl.name)
+                        put("createdAt", pl.createdAt)
+                        put("songs", songsArr)
+                    }
+                )
+            }
+
+            val spotifyPlaylistsBackupArr = JSONArray()
+            for (sp in spLists) {
+                val songsInSp = spSongsList
+                    .filter { it.spotifyPlaylistId == sp.spotifyPlaylistId }
+                    .sortedBy { it.addedAt }
+                val songsArr = JSONArray()
+                for (s in songsInSp) {
+                    songsArr.put(
+                        JSONObject().apply {
+                            put("songId", s.songId)
+                            put("title", s.title)
+                            put("artist", s.artist)
+                            put("videoId", s.videoId)
+                            put("bannerUrl", s.bannerUrl)
+                            put("timestamp", s.timestamp)
+                        }
+                    )
+                }
+                spotifyPlaylistsBackupArr.put(
+                    JSONObject().apply {
+                        put("name", sp.name)
+                        put("coverUrl", sp.coverUrl)
+                        put("spotifyUrl", sp.spotifyUrl)
+                        put("createdAt", sp.createdAt)
+                        put("songs", songsArr)
+                    }
+                )
+            }
+
+            val favBackupArr = JSONArray()
+            for (fav in favList) {
+                favBackupArr.put(
+                    JSONObject().apply {
+                        put("id", fav.id)
+                        put("title", fav.title)
+                        put("artist", fav.artist)
+                        put("videoId", fav.videoId)
+                        put("bannerUrl", fav.bannerUrl)
+                        put("timestamp", fav.timestamp)
+                    }
+                )
+            }
+
+            val backupPayload = JSONObject().apply {
+                put("userId", userId)
+                put("userName", currentName)
+                put("updatedAt", nowMs)
+                if (customPlaylistsBackupArr.length() > 0) {
+                    put("customPlaylists", customPlaylistsBackupArr)
+                }
+                if (spotifyPlaylistsBackupArr.length() > 0) {
+                    put("spotifyPlaylists", spotifyPlaylistsBackupArr)
+                }
+                if (favBackupArr.length() > 0) {
+                    put("favorites", favBackupArr)
+                }
+            }
+            firebaseService.syncUserPlaylistsBackupToCloud(userId, currentName, backupPayload)
+        }
+    }
+
+    @Volatile
+    private var isRestoringCloudPlaylists: Boolean = false
+
+    /**
+     * Restores and merges the user's Playlists, Spotify Playlists (with original Spotify coverUrl),
+     * and Favorites from Firebase when the user logs in, without ever deleting local playlists!
+     */
+    private suspend fun restoreUserPlaylistsFromCloud(userId: String, userName: String) {
+        if (isRestoringCloudPlaylists) return
+        isRestoringCloudPlaylists = true
+        try {
+            val backupObj = firebaseService.fetchUserPlaylistsBackupFromCloud(userId, userName) ?: return
+            val now = System.currentTimeMillis()
+
+            // 1. Restore Custom Playlists
+            val existingPlaylists = playlists.value
+            val existingPlaylistNames = existingPlaylists.map { it.name.trim().lowercase(Locale.US) }.toMutableSet()
+            val customArr = backupObj.optJSONArray("customPlaylists")
+            if (customArr != null && customArr.length() > 0) {
+                for (i in 0 until customArr.length()) {
+                    val plObj = customArr.optJSONObject(i) ?: continue
+                    val plName = plObj.optString("name").trim()
+                    if (plName.isEmpty() || existingPlaylistNames.contains(plName.lowercase(Locale.US))) continue
+                    existingPlaylistNames.add(plName.lowercase(Locale.US))
+                    val createdId = libraryDao.createPlaylist(
+                        PlaylistEntity(
+                            name = plName,
+                            createdAt = plObj.optLong("createdAt", now)
+                        )
+                    )
+                    val songsArr = plObj.optJSONArray("songs") ?: continue
+                    for (j in 0 until songsArr.length()) {
+                        val sObj = songsArr.optJSONObject(j) ?: continue
+                        val title = sObj.optString("title").trim()
+                        if (title.isEmpty()) continue
+                        val videoId = sObj.optString("videoId").trim()
+                        val sId = sObj.optString("songId").trim().ifBlank {
+                            if (videoId.isNotBlank()) "restored_$videoId" else "restored_${createdId}_$j"
+                        }
+                        libraryDao.addSongToPlaylist(
+                            PlaylistSongEntity(
+                                playlistId = createdId,
+                                songId = sId,
+                                title = title,
+                                artist = sObj.optString("artist", "Unknown Artist"),
+                                videoId = videoId,
+                                bannerUrl = sObj.optString("bannerUrl"),
+                                timestamp = sObj.optLong("timestamp", now - j),
+                                addedAt = now + j
+                            )
+                        )
+                    }
+                }
+            } else {
+                // Fallback: if only summary `playlists` exists in `/users/{userId}`, restore playlist shells
+                val legacyArr = backupObj.optJSONArray("playlists")
+                if (legacyArr != null && legacyArr.length() > 0) {
+                    val catalogPool = allSongs.value
+                    for (i in 0 until legacyArr.length()) {
+                        val plObj = legacyArr.optJSONObject(i) ?: continue
+                        val plName = plObj.optString("name").trim()
+                        if (plName.isEmpty() || existingPlaylistNames.contains(plName.lowercase(Locale.US))) continue
+                        existingPlaylistNames.add(plName.lowercase(Locale.US))
+                        val createdId = libraryDao.createPlaylist(PlaylistEntity(name = plName, createdAt = now))
+                        val songTitlesCsv = plObj.optString("songs").trim()
+                        if (songTitlesCsv.isNotEmpty()) {
+                            val titles = songTitlesCsv.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+                            titles.forEachIndexed { idx, t ->
+                                val matched = catalogPool.firstOrNull { it.title.equals(t, ignoreCase = true) }
+                                libraryDao.addSongToPlaylist(
+                                    PlaylistSongEntity(
+                                        playlistId = createdId,
+                                        songId = matched?.id ?: "legacy_${createdId}_$idx",
+                                        title = matched?.title ?: t,
+                                        artist = matched?.artist ?: "AADIFY",
+                                        videoId = matched?.videoId ?: "",
+                                        bannerUrl = matched?.bannerUrl ?: "",
+                                        timestamp = now - idx,
+                                        addedAt = now + idx
+                                    )
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 2. Restore Spotify Playlists (preserving original Spotify playlist coverUrl + each song's cover)
+            val existingSpNames = spotifyPlaylists.value.map { it.name.trim().lowercase(Locale.US) }.toMutableSet()
+            val spArr = backupObj.optJSONArray("spotifyPlaylists")
+            if (spArr != null && spArr.length() > 0) {
+                for (i in 0 until spArr.length()) {
+                    val spObj = spArr.optJSONObject(i) ?: continue
+                    val spName = spObj.optString("name").trim()
+                    if (spName.isEmpty() || existingSpNames.contains(spName.lowercase(Locale.US))) continue
+                    existingSpNames.add(spName.lowercase(Locale.US))
+                    val newSpId = libraryDao.createSpotifyPlaylist(
+                        SpotifyPlaylistEntity(
+                            name = spName,
+                            coverUrl = spObj.optString("coverUrl"),
+                            spotifyUrl = spObj.optString("spotifyUrl"),
+                            createdAt = spObj.optLong("createdAt", now)
+                        )
+                    )
+                    val songsArr = spObj.optJSONArray("songs") ?: continue
+                    for (j in 0 until songsArr.length()) {
+                        val sObj = songsArr.optJSONObject(j) ?: continue
+                        val title = sObj.optString("title").trim()
+                        if (title.isEmpty()) continue
+                        val sId = sObj.optString("songId").trim().ifBlank {
+                            "spotify_restored_${newSpId}_$j"
+                        }
+                        libraryDao.addSongToSpotifyPlaylist(
+                            SpotifyPlaylistSongEntity(
+                                spotifyPlaylistId = newSpId,
+                                songId = sId,
+                                title = title,
+                                artist = sObj.optString("artist", "Spotify Artist"),
+                                videoId = sObj.optString("videoId"),
+                                bannerUrl = sObj.optString("bannerUrl"),
+                                timestamp = sObj.optLong("timestamp", now - j),
+                                addedAt = now + j
+                            )
+                        )
+                    }
+                }
+            }
+
+            // 3. Restore Favorites
+            val existingFavIds = favoriteEntities.value.map { it.id }.toMutableSet()
+            val favArr = backupObj.optJSONArray("favorites")
+            if (favArr != null && favArr.length() > 0) {
+                for (i in 0 until favArr.length()) {
+                    val fObj = favArr.optJSONObject(i) ?: continue
+                    val fId = fObj.optString("id").trim()
+                    val title = fObj.optString("title").trim()
+                    if (fId.isEmpty() || title.isEmpty() || existingFavIds.contains(fId)) continue
+                    existingFavIds.add(fId)
+                    val videoId = fObj.optString("videoId").trim()
+                    val bannerUrl = fObj.optString("bannerUrl").trim().ifBlank {
+                        if (videoId.isNotBlank()) "https://img.youtube.com/vi/$videoId/hqdefault.jpg" else ""
+                    }
+                    libraryDao.insertFavorite(
+                        FavoriteSongEntity(
+                            id = fId,
+                            title = title,
+                            artist = fObj.optString("artist", "Unknown Artist"),
+                            videoId = videoId,
+                            bannerUrl = bannerUrl,
+                            timestamp = fObj.optLong("timestamp", now)
+                        )
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Error restoring user playlists from cloud", e)
+        } finally {
+            isRestoringCloudPlaylists = false
         }
     }
 
@@ -2330,13 +2630,18 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         if (_isImportingSpotifyPlaylist.value) return
 
         viewModelScope.launch {
-            // Check if the user pasted an https://aadify.xo.je shared playlist link
-            val sharedPayload = spotifyImportService.decodeSharedPlaylistFromUrlOrText(trimmed)
+            // Check if the user pasted an https://aadify.xo.je/?p=<code> shared playlist link
+            val sharedPayload = spotifyImportService.resolveSharedPlaylistFromCloudOrText(
+                databaseUrl = FirebaseSongsService.DATABASE_URL,
+                rawInput = trimmed
+            )
             if (sharedPayload != null) {
                 val newId = libraryDao.createSpotifyPlaylist(
                     SpotifyPlaylistEntity(
                         name = sharedPayload.name,
-                        coverUrl = sharedPayload.songs.firstOrNull()?.coverUrl.orEmpty(),
+                        coverUrl = sharedPayload.coverUrl.ifBlank {
+                            sharedPayload.songs.firstOrNull()?.coverUrl.orEmpty()
+                        },
                         spotifyUrl = SpotifyPlaylistImportService.OFFICIAL_SHARE_DOMAIN
                     )
                 )
@@ -2366,12 +2671,17 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
             result.fold(
                 onSuccess = { collection ->
+                    // Always save the ORIGINAL Spotify playlist cover in `coverUrl`!
+                    val originalPlaylistCover = collection.coverUrl.trim().ifBlank {
+                        spotifyImportService.fetchOriginalSpotifyEntityCoverUrl(collection.sourceUrl)
+                    }.ifBlank {
+                        collection.tracks.firstOrNull()?.coverUrl.orEmpty()
+                    }
+
                     val newPlaylistId = libraryDao.createSpotifyPlaylist(
                         SpotifyPlaylistEntity(
                             name = collection.title,
-                            coverUrl = collection.coverUrl.ifBlank {
-                                collection.tracks.firstOrNull()?.coverUrl.orEmpty()
-                            },
+                            coverUrl = originalPlaylistCover,
                             spotifyUrl = collection.sourceUrl
                         )
                     )
@@ -2380,7 +2690,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     collection.tracks.forEachIndexed { index, track ->
                         val songId = "spotify_${newPlaylistId}_${index}_${UUID.randomUUID().toString().take(6)}"
                         val initialTrackCover = if (collection.tracks.size == 1) {
-                            track.coverUrl.ifBlank { collection.coverUrl }
+                            track.coverUrl.ifBlank { originalPlaylistCover }
                         } else {
                             track.coverUrl
                         }
@@ -2439,28 +2749,91 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Generates a share message with an https://aadify.xo.je/?aadify_playlist=... link.
-     * Opens directly in AADIFY if installed on the user's phone, or opens https://aadify.xo.je in Chrome to download the app.
+     * Publishes the playlist to Firebase (`/sharedPlaylists/{code}`) and creates a short, clean
+     * 31-character share link (`https://aadify.xo.je/?p=<code>`) so the link is super short and never scares users!
      */
-    fun buildSharePlaylistText(playlistName: String, songs: List<Song>): String {
-        val shareUrl = spotifyImportService.encodeSharedPlaylistLink(playlistName, songs)
-        return buildString {
-            append("🎵 Listen to my playlist \"$playlistName\" (${songs.size} songs) on AADIFY!\n\n")
-            append("👉 Open / Import Playlist:\n$shareUrl\n\n")
-            append("📲 Agar aapke phone mein AADIFY app nahi hai, toh yahan se official app download karein: https://aadify.xo.je")
+    fun sharePlaylistViaShortLink(
+        playlistName: String,
+        coverUrl: String = "",
+        songs: List<Song>,
+        onShareTextReady: (String) -> Unit
+    ) {
+        viewModelScope.launch {
+            val resolvedCover = coverUrl.ifBlank { songs.firstOrNull()?.highResBannerUrl.orEmpty() }
+            val shortUrl = spotifyImportService.publishSharedPlaylistToCloud(
+                databaseUrl = FirebaseSongsService.DATABASE_URL,
+                playlistName = playlistName,
+                coverUrl = resolvedCover,
+                songs = songs
+            )
+            val shareText = buildString {
+                append("🎵 AADIFY Playlist: \"$playlistName\" (${songs.size} songs)\n")
+                append("👉 $shortUrl")
+            }
+            onShareTextReady(shareText)
         }
     }
 
     /**
-     * Handles incoming https://aadify.xo.je/?aadify_playlist=... deep links when clicked on a phone with AADIFY installed.
+     * Handles incoming https://aadify.xo.je/?p=<code> or aadify://playlist/<code> deep links
+     * when clicked on a phone with AADIFY installed.
      */
     fun handleIncomingDeepLink(uri: Uri?) {
         if (uri == null) return
         val fullUrl = uri.toString()
-        if (!fullUrl.contains(SpotifyPlaylistImportService.SHARE_QUERY_PARAM, ignoreCase = true)) return
+        importSharedPlaylistFromUrlOrCode(fullUrl, silentIfNone = true)
+    }
+
+    /**
+     * Imports a shared AADIFY playlist from a short link (`https://aadify.xo.je/?p=<code>`),
+     * `aadify://playlist/<code>`, a 6-character share code, or a clipboard link.
+     */
+    fun importSharedPlaylistFromUrlOrCode(
+        rawText: String,
+        silentIfNone: Boolean = false,
+        fromClipboard: Boolean = false
+    ) {
+        val trimmed = rawText.trim()
+        if (trimmed.isEmpty()) return
+
+        val shortCode = spotifyImportService.extractShortPlaylistCode(trimmed)
+        val hasLegacyParam = trimmed.contains(SpotifyPlaylistImportService.SHARE_QUERY_PARAM, ignoreCase = true)
+        if (shortCode == null && !hasLegacyParam) {
+            if (!silentIfNone) {
+                emitSnackbar("Valid AADIFY playlist link ya code daalein.")
+            }
+            return
+        }
+
+        if (fromClipboard && shortCode != null) {
+            val lastClipImported = prefs.getString("last_clipboard_imported_share_code", "")
+            if (lastClipImported == shortCode) return
+        }
 
         viewModelScope.launch {
-            val payload = spotifyImportService.decodeSharedPlaylistFromUrlOrText(fullUrl) ?: return@launch
+            val payload = spotifyImportService.resolveSharedPlaylistFromCloudOrText(
+                databaseUrl = FirebaseSongsService.DATABASE_URL,
+                rawInput = trimmed
+            )
+            if (payload == null || payload.songs.isEmpty()) {
+                if (!silentIfNone) {
+                    emitSnackbar("Shared playlist nahi mila ya link invalid hai.")
+                }
+                return@launch
+            }
+
+            if (shortCode != null) {
+                prefs.edit().putString("last_clipboard_imported_share_code", shortCode).apply()
+            }
+
+            // Avoid duplicate import if a playlist with the exact same name already exists
+            val existingPl = playlists.value.firstOrNull {
+                it.name.equals(payload.name.trim(), ignoreCase = true)
+            }
+            if (existingPl != null && fromClipboard) {
+                return@launch
+            }
+
             val createdId = libraryDao.createPlaylist(PlaylistEntity(name = payload.name))
             val now = System.currentTimeMillis()
             payload.songs.forEachIndexed { idx, track ->
@@ -2484,7 +2857,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             val createdEntity = PlaylistEntity(playlistId = createdId, name = payload.name, createdAt = now)
             _selectedTab.value = MainTab.LIBRARY
             _librarySubScreen.value = LibrarySubScreen.PlaylistDetail(createdEntity)
-            emitSnackbar("Shared playlist \"${payload.name}\" (${payload.songs.size} songs) aapke Playlists mein add ho gaya! 🎉")
+            emitSnackbar("Shared playlist \"${payload.name}\" (${payload.songs.size} songs) aapke Playlists mein खुल gaya! 🎉")
         }
     }
 
