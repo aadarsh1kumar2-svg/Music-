@@ -871,24 +871,6 @@ fun AKMusicAppRoot(
                                 modifier = Modifier.padding(horizontal = 12.dp)
                             )
 
-                            NavigationDrawerItem(
-                                label = { Text("Sleep Timer") },
-                                icon = { Icon(Icons.Default.Timer, contentDescription = null) },
-                                selected = sleepTimerRemainingSeconds != null,
-                                onClick = {
-                                    coroutineScope.launch { drawerState.close() }
-                                    musicViewModel.setSleepTimerDialogOpen(true)
-                                },
-                                colors = NavigationDrawerItemDefaults.colors(
-                                    selectedContainerColor = SpotifyDarkGreenPill,
-                                    selectedIconColor = SpotifyVibrantGreen,
-                                    selectedTextColor = SpotifyVibrantGreen,
-                                    unselectedIconColor = MutedGray,
-                                    unselectedTextColor = PrimaryWhite
-                                ),
-                                modifier = Modifier.padding(horizontal = 12.dp)
-                            )
-
                             // Developer Section in Left 3-Lines Drawer
                             NavigationDrawerItem(
                                 label = { Text("Developer") },

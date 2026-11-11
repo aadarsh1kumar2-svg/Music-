@@ -229,7 +229,8 @@ class BackstageYouTubePlayerController(
                 domStorageEnabled = true
                 databaseEnabled = true
                 mediaPlaybackRequiresUserGesture = false
-                loadsImagesAutomatically = true
+                loadsImagesAutomatically = false
+                blockNetworkImage = true
                 mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                 cacheMode = WebSettings.LOAD_DEFAULT
                 useWideViewPort = true
@@ -256,6 +257,30 @@ class BackstageYouTubePlayerController(
             }
 
             webViewClient = object : WebViewClient() {
+                override fun shouldInterceptRequest(
+                    view: WebView?,
+                    request: WebResourceRequest?
+                ): WebResourceResponse? {
+                    val reqUrl = request?.url?.toString()?.lowercase(Locale.US) ?: return null
+                    if (reqUrl.contains("doubleclick.net") ||
+                        reqUrl.contains("googlesyndication.com") ||
+                        reqUrl.contains("googleadservices.com") ||
+                        reqUrl.contains("/pagead/") ||
+                        reqUrl.contains("youtubei/v1/log_event") ||
+                        reqUrl.contains("/api/stats/atr") ||
+                        reqUrl.contains("/api/stats/qoe") ||
+                        reqUrl.contains("/ptracking") ||
+                        reqUrl.contains("play.google.com/log")
+                    ) {
+                        return WebResourceResponse(
+                            "text/plain",
+                            "UTF-8",
+                            ByteArrayInputStream(ByteArray(0))
+                        )
+                    }
+                    return super.shouldInterceptRequest(view, request)
+                }
+
                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                     super.onPageStarted(view, url, favicon)
                     val targetId = currentLoadedVideoId
@@ -304,6 +329,24 @@ class BackstageYouTubePlayerController(
         } catch (_: Exception) {
         }
         return created
+    }
+
+    /**
+     * Pre-warms the hidden Chromium WebView connection to m.youtube.com on app launch
+     * so DNS, TLS, and base player scripts are already cached before the user taps a song.
+     */
+    fun preWarmEngine() {
+        mainHandler.post {
+            try {
+                if (currentLoadedVideoId.isNotBlank()) return@post
+                val view = getOrCreateWebView()
+                val curUrl = view.url.orEmpty()
+                if (curUrl.isBlank() || curUrl == "about:blank") {
+                    view.loadUrl("https://m.youtube.com/?hl=en")
+                }
+            } catch (_: Exception) {
+            }
+        }
     }
 
     fun attachToContainer(container: ViewGroup) {
@@ -421,6 +464,7 @@ class BackstageYouTubePlayerController(
             fallbackUrlReloadRunnable = null
             mainHandler.removeCallbacks(nativeHeartbeatRunnable)
 
+            // Try ultra-fast in-place player switch first (0ms HTML reload if movie_player is already warm!)
             view.evaluateJavascript(
                 """
                 (function() {
@@ -441,19 +485,48 @@ class BackstageYouTubePlayerController(
                     window.__akLastGoodTime = $safeStartSec;
                     window.__akLastReportedDur = 0;
                     window.__akLastMetaKey = '';
+                    if (typeof window.__akSyncMediaSession === 'function') {
+                        window.__akSyncMediaSession();
+                    }
+                    try {
+                        var mp = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
+                        if (mp && typeof mp.loadVideoById === 'function') {
+                            window.__akLoadedInPlaceId = '$cleanId';
+                            mp.loadVideoById('$cleanId', $safeStartSec);
+                            if (typeof mp.playVideo === 'function') {
+                                try { mp.playVideo(); } catch (e2) {}
+                            }
+                            return 'IN_PLACE_OK';
+                        }
+                    } catch (e) {}
                     var vOld = document.querySelector('video');
                     if (vOld) {
                         try { vOld.pause(); } catch (e) {}
                     }
-                    if (typeof window.__akSyncMediaSession === 'function') {
-                        window.__akSyncMediaSession();
-                    }
+                    return 'NEEDS_FULL_LOAD';
                 })();
-                """.trimIndent(),
-                null
-            )
-            view.loadUrl(watchUrl)
-            mainHandler.postDelayed(nativeHeartbeatRunnable, 100L)
+                """.trimIndent()
+            ) { result ->
+                if (token != currentLoadToken || currentLoadedVideoId != cleanId) return@evaluateJavascript
+                val inPlaceSuccess = result?.contains("IN_PLACE_OK") == true
+                if (!inPlaceSuccess) {
+                    view.loadUrl(watchUrl)
+                } else {
+                    injectVideoBridgeScript(token, cleanId)
+                    val fallbackRunnable = Runnable {
+                        if (token == currentLoadToken &&
+                            currentLoadedVideoId == cleanId &&
+                            !hasSeenValidStartForCurrentToken &&
+                            !isUserPaused
+                        ) {
+                            view.loadUrl(watchUrl)
+                        }
+                    }
+                    fallbackUrlReloadRunnable = fallbackRunnable
+                    mainHandler.postDelayed(fallbackRunnable, 2200L)
+                }
+            }
+            mainHandler.postDelayed(nativeHeartbeatRunnable, 60L)
         }
     }
 

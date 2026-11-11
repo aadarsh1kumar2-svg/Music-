@@ -103,8 +103,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         val PLAYBACK_SPEEDS = listOf(0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
         const val FREE_DAILY_LIMIT_SECONDS = 3600 // 1 hour (3600 seconds) per day for Free users
         const val CRAZY_DEAL_WINDOW_MS = 3L * 24L * 60L * 60L * 1000L // 3 days (72 hours) for new users
-        const val CURRENT_APP_UPDATE_SECRET_CODE = "4826"
-        private const val CURRENT_SECRET_CODE_VERSION = 10
+        const val CURRENT_APP_UPDATE_SECRET_CODE = "6394"
+        private const val CURRENT_SECRET_CODE_VERSION = 11
     }
 
     private val appContext = application.applicationContext
@@ -658,6 +658,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     fun attachBackstagePlayer(container: ViewGroup) {
         backstagePlayer.attachToContainer(container)
+        backstagePlayer.preWarmEngine()
     }
 
     fun keepEngineAwakeInBackground() {
@@ -1354,6 +1355,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             put("platform", "Android")
             put("deviceName", "$deviceLabel • Secret: $secretNo")
             put("device", "$deviceLabel • Secret: $secretNo")
+            put("manufacturer", Build.MANUFACTURER ?: "Android")
+            put("brand", Build.BRAND ?: "Android")
+            put("model", Build.MODEL ?: "Android")
             put("deviceModel", Build.MODEL ?: "Android")
             put("androidVersion", "Android ${Build.VERSION.RELEASE}")
             put("country", "${country.flagEmoji} ${country.name}")

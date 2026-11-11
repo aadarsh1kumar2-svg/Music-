@@ -338,6 +338,11 @@ fun CrazyDealsPopupDialog(
                         .height(155.dp)
                         .clip(RoundedCornerShape(18.dp))
                         .background(SurfaceDarkCard)
+                        .border(
+                            width = 1.2.dp,
+                            color = Color(0xFFFFAB40).copy(alpha = 0.7f),
+                            shape = RoundedCornerShape(18.dp)
+                        )
                 ) {
                     AsyncImage(
                         model = config.crazyDealBannerUrl,
@@ -345,50 +350,64 @@ fun CrazyDealsPopupDialog(
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize()
                     )
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(
-                                Brush.verticalGradient(
-                                    colors = listOf(
-                                        Color.Transparent,
-                                        PureBlack.copy(alpha = 0.82f)
+                    if (config.crazyDealBannerUrl.isBlank()) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(
+                                    Brush.verticalGradient(
+                                        colors = listOf(
+                                            Color.Transparent,
+                                            PureBlack.copy(alpha = 0.82f)
+                                        )
                                     )
                                 )
-                            )
-                    )
-                    Column(
-                        modifier = Modifier
-                            .align(Alignment.BottomStart)
-                            .padding(14.dp)
-                    ) {
-                        Surface(
-                            color = SpotifyVibrantGreen,
-                            shape = RoundedCornerShape(6.dp)
+                        )
+                        Column(
+                            modifier = Modifier
+                                .align(Alignment.BottomStart)
+                                .padding(14.dp)
                         ) {
+                            Surface(
+                                color = SpotifyVibrantGreen,
+                                shape = RoundedCornerShape(6.dp)
+                            ) {
+                                Text(
+                                    text = "CHEAPEST NEW USER OFFER",
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        color = PureBlack,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        fontSize = 10.sp
+                                    ),
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                text = "CHEAPEST NEW USER OFFER",
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    color = PureBlack,
+                                text = config.crazyDealTitle,
+                                style = MaterialTheme.typography.titleLarge.copy(
+                                    color = PrimaryWhite,
                                     fontWeight = FontWeight.ExtraBold,
-                                    fontSize = 10.sp
-                                ),
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                    fontSize = 20.sp
+                                )
                             )
                         }
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = config.crazyDealTitle,
-                            style = MaterialTheme.typography.titleLarge.copy(
-                                color = PrimaryWhite,
-                                fontWeight = FontWeight.ExtraBold,
-                                fontSize = 20.sp
-                            )
-                        )
                     }
                 }
 
-                Spacer(modifier = Modifier.height(14.dp))
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Text(
+                    text = "🔥 ${config.crazyDealTitle}",
+                    style = MaterialTheme.typography.titleLarge.copy(
+                        color = PrimaryWhite,
+                        fontWeight = FontWeight.ExtraBold,
+                        fontSize = 20.sp
+                    ),
+                    textAlign = TextAlign.Center
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
 
                 // 3-Day Countdown Timer Pill
                 if (remainingWindowSeconds > 0L) {
@@ -665,78 +684,173 @@ fun SubscriptionPlansDialog(
     onDismiss: () -> Unit
 ) {
     val isCurrentlySubscribed = subscriptionState.isActive()
+    val royalGold = Color(0xFFFFD700)
+    val deepGold = Color(0xFFFFAB00)
+    val vipBorderBrush = Brush.linearGradient(
+        colors = listOf(
+            royalGold,
+            SpotifyVibrantGreen,
+            royalGold
+        )
+    )
 
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
         Surface(
-            color = DeepCharcoal,
-            shape = RoundedCornerShape(26.dp),
+            color = Color(0xFF0B0E11),
+            shape = RoundedCornerShape(28.dp),
             modifier = Modifier
-                .fillMaxWidth(0.94f)
+                .fillMaxWidth(0.95f)
                 .border(
-                    width = 1.5.dp,
-                    color = SpotifyGreenBorder,
-                    shape = RoundedCornerShape(26.dp)
+                    width = 1.8.dp,
+                    brush = vipBorderBrush,
+                    shape = RoundedCornerShape(28.dp)
                 )
                 .testTag("subscription_plans_dialog")
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .background(
+                        Brush.verticalGradient(
+                            colors = listOf(
+                                Color(0xFF171307),
+                                Color(0xFF0C120F),
+                                Color(0xFF080A0C)
+                            )
+                        )
+                    )
                     .verticalScroll(rememberScrollState())
-                    .padding(20.dp)
+                    .padding(horizontal = 18.dp, vertical = 18.dp)
             ) {
-                // Header
+                // Luxury Royal VIP Header
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.WorkspacePremium,
-                            contentDescription = null,
-                            tint = SpotifyVibrantGreen,
-                            modifier = Modifier.size(28.dp)
-                        )
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Column {
-                            Text(
-                                text = config.premiumTitle,
-                                style = MaterialTheme.typography.headlineMedium.copy(
-                                    color = PrimaryWhite,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    fontSize = 22.sp
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(46.dp)
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(
+                                    Brush.linearGradient(
+                                        colors = listOf(
+                                            Color(0xFF3A2B07),
+                                            Color(0xFF1E1604)
+                                        )
+                                    )
                                 )
-                            )
+                                .border(
+                                    width = 1.2.dp,
+                                    brush = Brush.linearGradient(
+                                        colors = listOf(Color(0xFFFFF3B0), royalGold, deepGold)
+                                    ),
+                                    shape = RoundedCornerShape(14.dp)
+                                ),
+                            contentAlignment = Alignment.Center
+                        ) {
                             Text(
-                                text = config.premiumSubtitle,
-                                style = MaterialTheme.typography.bodySmall.copy(color = MutedGray)
+                                text = "👑",
+                                fontSize = 22.sp
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Text(
+                                    text = "AADIFY VIP",
+                                    style = MaterialTheme.typography.headlineSmall.copy(
+                                        brush = Brush.linearGradient(
+                                            colors = listOf(
+                                                Color(0xFFFFF6C3),
+                                                royalGold,
+                                                Color(0xFFFFB300)
+                                            )
+                                        ),
+                                        fontWeight = FontWeight.ExtraBold,
+                                        fontSize = 21.sp,
+                                        letterSpacing = 0.8.sp
+                                    ),
+                                    maxLines = 1
+                                )
+                                Surface(
+                                    color = royalGold.copy(alpha = 0.16f),
+                                    shape = RoundedCornerShape(50),
+                                    modifier = Modifier.border(
+                                        width = 0.8.dp,
+                                        color = royalGold.copy(alpha = 0.7f),
+                                        shape = RoundedCornerShape(50)
+                                    )
+                                ) {
+                                    Text(
+                                        text = "by Aadarsh",
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            color = Color(0xFFFFE57F),
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 9.5.sp
+                                        ),
+                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
+                                        maxLines = 1
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "🚫 100% Ads-Free • 🟢 Spotify Import • ♾️ Unlimited VIP",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    color = SpotifyVibrantGreen,
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 11.sp
+                                ),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
 
-                    IconButton(onClick = onDismiss) {
+                    IconButton(
+                        onClick = onDismiss,
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(CircleShape)
+                            .background(SurfaceDarkCard)
+                    ) {
                         Icon(
                             imageVector = Icons.Default.Close,
                             contentDescription = "Close",
-                            tint = MutedGray
+                            tint = PrimaryWhite,
+                            modifier = Modifier.size(18.dp)
                         )
                     }
                 }
 
                 Spacer(modifier = Modifier.height(14.dp))
 
-                // Banner (only shown if enabled by Admin in /premiumBanners/premium)
+                // Banner (shown cleanly without ugly overlapping text covering Admin's custom artwork!)
                 if (config.premiumEnabled) {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(125.dp)
-                            .clip(RoundedCornerShape(16.dp))
+                            .height(152.dp)
+                            .clip(RoundedCornerShape(18.dp))
                             .background(SurfaceDarkCard)
+                            .border(
+                                width = 1.2.dp,
+                                brush = Brush.linearGradient(
+                                    colors = listOf(royalGold.copy(alpha = 0.8f), SpotifyVibrantGreen.copy(alpha = 0.8f))
+                                ),
+                                shape = RoundedCornerShape(18.dp)
+                            )
                     ) {
                         AsyncImage(
                             model = config.premiumBannerUrl,
@@ -744,86 +858,85 @@ fun SubscriptionPlansDialog(
                             contentScale = ContentScale.Crop,
                             modifier = Modifier.fillMaxSize()
                         )
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .background(
-                                    Brush.verticalGradient(
-                                        colors = listOf(
-                                            Color.Transparent,
-                                            PureBlack.copy(alpha = 0.85f)
+                        if (config.premiumBannerUrl.isBlank()) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(
+                                        Brush.verticalGradient(
+                                            colors = listOf(
+                                                Color.Transparent,
+                                                PureBlack.copy(alpha = 0.88f)
+                                            )
                                         )
                                     )
-                                )
-                        )
-                        Column(
-                            modifier = Modifier
-                                .align(Alignment.BottomStart)
-                                .padding(14.dp)
-                        ) {
-                            Text(
-                                text = config.premiumHeading,
-                                style = MaterialTheme.typography.titleMedium.copy(
-                                    color = PrimaryWhite,
-                                    fontWeight = FontWeight.ExtraBold
-                                )
                             )
-                            Text(
-                                text = config.premiumDescription,
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    color = SpotifyVibrantGreen
+                            Column(
+                                modifier = Modifier
+                                    .align(Alignment.BottomStart)
+                                    .padding(14.dp)
+                            ) {
+                                Text(
+                                    text = config.premiumHeading,
+                                    style = MaterialTheme.typography.titleMedium.copy(
+                                        color = PrimaryWhite,
+                                        fontWeight = FontWeight.ExtraBold
+                                    )
                                 )
-                            )
+                                Text(
+                                    text = config.premiumDescription,
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        color = SpotifyVibrantGreen
+                                    )
+                                )
+                            }
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(14.dp))
+                    Spacer(modifier = Modifier.height(12.dp))
                 }
 
-                // Active Subscription Status OR Free Daily Limit Status
+                // Active Subscription Status OR Clean Single-Line Free Daily Limit Status
                 if (isCurrentlySubscribed) {
                     Surface(
-                        color = SpotifyDarkGreenPill,
-                        shape = RoundedCornerShape(14.dp),
+                        color = Color(0xFF191405),
+                        shape = RoundedCornerShape(16.dp),
                         modifier = Modifier
                             .fillMaxWidth()
                             .border(
-                                width = 1.dp,
-                                color = SpotifyVibrantGreen,
-                                shape = RoundedCornerShape(14.dp)
+                                width = 1.2.dp,
+                                brush = Brush.linearGradient(
+                                    colors = listOf(royalGold, SpotifyVibrantGreen)
+                                ),
+                                shape = RoundedCornerShape(16.dp)
                             )
                     ) {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(14.dp),
+                                .padding(horizontal = 14.dp, vertical = 12.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.Verified,
-                                contentDescription = null,
-                                tint = SpotifyVibrantGreen,
-                                modifier = Modifier.size(26.dp)
-                            )
-                            Spacer(modifier = Modifier.width(12.dp))
+                            Text(text = "👑", fontSize = 22.sp)
+                            Spacer(modifier = Modifier.width(10.dp))
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = "Active Plan: ${subscriptionState.planType.displayName}",
+                                    text = "VIP Active: ${subscriptionState.planType.displayName}",
                                     style = MaterialTheme.typography.titleSmall.copy(
-                                        color = PrimaryWhite,
+                                        color = Color(0xFFFFF3B0),
                                         fontWeight = FontWeight.ExtraBold
                                     )
                                 )
                                 val timerLabel = if (subscriptionState.planType == SubscriptionPlanType.FOREVER) {
-                                    "Lifetime Forever Access Active ♾️"
+                                    "♾️ FOREVER 👑 • Lifetime VIP Unlocked"
                                 } else {
-                                    "Time Remaining: ${formatCountdownTimer(activeSubscriptionRemainingSeconds)}"
+                                    "⏳ Time Remaining: ${formatCountdownTimer(activeSubscriptionRemainingSeconds)}"
                                 }
                                 Text(
                                     text = timerLabel,
                                     style = MaterialTheme.typography.bodySmall.copy(
                                         color = SpotifyVibrantGreen,
-                                        fontWeight = FontWeight.SemiBold
+                                        fontWeight = FontWeight.Bold
                                     )
                                 )
                             }
@@ -836,50 +949,216 @@ fun SubscriptionPlansDialog(
                     val remainingMins = remainingFreeSeconds / 60
                     val remainingSecs = remainingFreeSeconds % 60
                     Surface(
-                        color = SurfaceDarkCard,
+                        color = Color(0xFF14181D),
                         shape = RoundedCornerShape(14.dp),
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .border(
+                                width = 1.dp,
+                                color = DividerDark,
+                                shape = RoundedCornerShape(14.dp)
+                            )
                     ) {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(horizontal = 14.dp, vertical = 12.dp),
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.weight(1f)
+                            ) {
                                 Icon(
                                     imageVector = Icons.Default.AccessTime,
                                     contentDescription = null,
                                     tint = if (remainingFreeSeconds > 300) SpotifyVibrantGreen else ErrorRed,
-                                    modifier = Modifier.size(20.dp)
+                                    modifier = Modifier.size(18.dp)
                                 )
-                                Spacer(modifier = Modifier.width(8.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
                                 Text(
-                                    text = "Free Daily Limit Remaining:",
-                                    style = MaterialTheme.typography.bodySmall.copy(color = MutedGray)
+                                    text = "Free Daily Limit Left:",
+                                    style = MaterialTheme.typography.bodySmall.copy(
+                                        color = MutedGray,
+                                        fontWeight = FontWeight.Medium,
+                                        fontSize = 12.sp
+                                    ),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Surface(
+                                color = if (remainingFreeSeconds > 300) SpotifyDarkGreenPill else ErrorRed.copy(alpha = 0.18f),
+                                shape = RoundedCornerShape(50),
+                                modifier = Modifier.border(
+                                    width = 1.dp,
+                                    color = if (remainingFreeSeconds > 300) SpotifyGreenBorder else ErrorRed,
+                                    shape = RoundedCornerShape(50)
+                                )
+                            ) {
+                                Text(
+                                    text = String.format("%02dm %02ds / %dm", remainingMins, remainingSecs, totalLimitMins),
+                                    style = MaterialTheme.typography.labelMedium.copy(
+                                        color = if (remainingFreeSeconds > 300) SpotifyVibrantGreen else ErrorRed,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        fontSize = 11.5.sp
+                                    ),
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // 👑 INCLUDED IN ALL PREMIUM PLANS — MOVED TO THE TOP WITH POINT-WISE EMOJIS!
+                Surface(
+                    color = Color(0xFF12161A),
+                    shape = RoundedCornerShape(18.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(
+                            width = 1.3.dp,
+                            brush = Brush.linearGradient(
+                                colors = listOf(
+                                    royalGold.copy(alpha = 0.85f),
+                                    SpotifyVibrantGreen.copy(alpha = 0.75f),
+                                    royalGold.copy(alpha = 0.85f)
+                                )
+                            ),
+                            shape = RoundedCornerShape(18.dp)
+                        )
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(
+                                Brush.verticalGradient(
+                                    colors = listOf(
+                                        Color(0xFF1F1908).copy(alpha = 0.75f),
+                                        Color(0xFF101614)
+                                    )
+                                )
+                            )
+                            .padding(horizontal = 14.dp, vertical = 14.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Surface(
+                                color = royalGold.copy(alpha = 0.2f),
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.border(
+                                    width = 1.dp,
+                                    color = royalGold.copy(alpha = 0.75f),
+                                    shape = RoundedCornerShape(8.dp)
+                                )
+                            ) {
+                                Text(
+                                    text = "👑 ALL-IN-ONE VIP PASS",
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        color = Color(0xFFFFE57F),
+                                        fontWeight = FontWeight.ExtraBold,
+                                        fontSize = 10.sp,
+                                        letterSpacing = 0.6.sp
+                                    ),
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                                 )
                             }
                             Text(
-                                text = String.format("%02dm %02ds / %dm", remainingMins, remainingSecs, totalLimitMins),
-                                style = MaterialTheme.typography.bodyMedium.copy(
-                                    color = if (remainingFreeSeconds > 300) PrimaryWhite else ErrorRed,
-                                    fontWeight = FontWeight.Bold
-                                )
+                                text = "Included in All Premium Plans:",
+                                style = MaterialTheme.typography.titleSmall.copy(
+                                    color = PrimaryWhite,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    fontSize = 13.5.sp
+                                ),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
+
+                        HorizontalDivider(color = DividerDark.copy(alpha = 0.6f))
+
+                        BenefitRow(
+                            emoji = "🚫",
+                            title = "100% Ads-Free Music Experience",
+                            subtitle = "Zero ads, zero interruptions — pure non-stop HD music"
+                        )
+                        BenefitRow(
+                            emoji = "🟢",
+                            title = "Import Spotify Playlists & Songs",
+                            subtitle = "Paste any Spotify playlist or song link & play instantly"
+                        )
+                        BenefitRow(
+                            emoji = "♾️",
+                            title = "Unlimited 24/7 Music Streaming",
+                            subtitle = "No daily free time limit — listen all day & night"
+                        )
+                        BenefitRow(
+                            emoji = "👑",
+                            title = "Royal VIP Gold Name & Crown Badge",
+                            subtitle = "Luxury golden designer profile on Home & Drawer"
+                        )
+                        BenefitRow(
+                            emoji = "📂",
+                            title = "Unlimited Custom Playlists + Cloud Backup",
+                            subtitle = "Auto-saved to your account & restored anytime you login"
+                        )
+                        BenefitRow(
+                            emoji = "🔗",
+                            title = "1-Tap Short Playlist Share Links",
+                            subtitle = "Share your playlists with friends via aadify.xo.je"
+                        )
+                        BenefitRow(
+                            emoji = "🔁",
+                            title = "Unlock Repeat One, Repeat All & Play All",
+                            subtitle = "Full loop control + background gaming audio support"
+                        )
+                        BenefitRow(
+                            emoji = "🎨",
+                            title = "Unlock All 6 Exclusive Prime App Themes",
+                            subtitle = "Switch between 6 neon & royal themes anytime"
+                        )
+                        BenefitRow(
+                            emoji = "❤️",
+                            title = "Unlimited Favorites & Offline Downloads",
+                            subtitle = "Save unlimited favorite tracks & listen offline"
+                        )
+                        BenefitRow(
+                            emoji = "⚡",
+                            title = "Instant Activation via AadarshPay UPI",
+                            subtitle = "100% automated real-time VIP unlock in seconds"
+                        )
                     }
                 }
 
                 Spacer(modifier = Modifier.height(16.dp))
 
+                Text(
+                    text = "✨ CHOOSE YOUR VIP PLAN",
+                    style = MaterialTheme.typography.labelLarge.copy(
+                        color = Color(0xFFFFE57F),
+                        fontWeight = FontWeight.ExtraBold,
+                        letterSpacing = 1.1.sp,
+                        fontSize = 12.sp
+                    ),
+                    modifier = Modifier.padding(start = 4.dp, bottom = 10.dp)
+                )
+
                 // If user is within new-user window and deal is enabled by Admin, show Crazy Deal card at top
                 if (crazyDealRemainingSeconds > 0L && config.crazyDealEnabled) {
                     PlanOptionCard(
                         title = "🔥 ${config.crazyDealTitle}",
-                        subtitle = "${config.crazyDealDurationDays} Days Full Access • Ends in ${formatCountdownTimer(crazyDealRemainingSeconds)}",
+                        subtitle = "🚫 Ads-Free + 🟢 Spotify Import + ♾️ ${config.crazyDealDurationDays} Days Full VIP • Ends in ${formatCountdownTimer(crazyDealRemainingSeconds)}",
                         priceInr = config.crazyDealPriceInr,
-                        badgeText = "SPECIAL OFFER",
+                        badgeText = "⚡ SPECIAL NEW USER OFFER",
                         highlightColor = Color(0xFFFF9100),
                         isCurrentPlan = isCurrentlySubscribed && subscriptionState.planType == SubscriptionPlanType.CRAZY_DEAL,
                         onClick = { onSelectPlanToBuy(SubscriptionPlanType.CRAZY_DEAL) }
@@ -889,10 +1168,10 @@ fun SubscriptionPlansDialog(
 
                 // 1. Weekly Plan
                 PlanOptionCard(
-                    title = "Weekly Plan",
-                    subtitle = "7 Days Unlimited Music + Playlists + Repeat Mode",
+                    title = "⚡ Weekly VIP Plan",
+                    subtitle = "7 Days 100% Ads-Free • Spotify Import • Unlimited Playlists & Repeat",
                     priceInr = config.weeklyPriceInr,
-                    badgeText = "7 DAYS",
+                    badgeText = "7 DAYS VIP",
                     highlightColor = SpotifyVibrantGreen,
                     isCurrentPlan = isCurrentlySubscribed && subscriptionState.planType == SubscriptionPlanType.WEEKLY,
                     onClick = { onSelectPlanToBuy(SubscriptionPlanType.WEEKLY) }
@@ -902,10 +1181,10 @@ fun SubscriptionPlansDialog(
 
                 // 2. Monthly Plan
                 PlanOptionCard(
-                    title = "Monthly Plan",
-                    subtitle = "30 Days Unlimited Music + Playlists + Repeat Mode",
+                    title = "💎 Monthly VIP Plan",
+                    subtitle = "30 Days 100% Ads-Free • Spotify Import • Cloud Backup & All 6 Themes",
                     priceInr = config.monthlyPriceInr,
-                    badgeText = "MOST POPULAR",
+                    badgeText = "🔥 MOST POPULAR",
                     highlightColor = SpotifyVibrantGreen,
                     isCurrentPlan = isCurrentlySubscribed && subscriptionState.planType == SubscriptionPlanType.MONTHLY,
                     onClick = { onSelectPlanToBuy(SubscriptionPlanType.MONTHLY) }
@@ -915,61 +1194,73 @@ fun SubscriptionPlansDialog(
 
                 // 3. Forever Plan
                 PlanOptionCard(
-                    title = "Forever Plan (Lifetime)",
-                    subtitle = "Lifetime Unlimited Access • Pay Once, Enjoy Forever",
+                    title = "👑 Forever Plan (Lifetime)",
+                    subtitle = "♾️ FOREVER 👑 Lifetime Ads-Free VIP • Pay Once, Enjoy Forever",
                     priceInr = config.foreverPriceInr,
-                    badgeText = "BEST VALUE ♾️",
-                    highlightColor = SpotifyVibrantGreen,
+                    badgeText = "👑 BEST VALUE • LIFETIME ♾️",
+                    highlightColor = royalGold,
                     isCurrentPlan = isCurrentlySubscribed && subscriptionState.planType == SubscriptionPlanType.FOREVER,
                     onClick = { onSelectPlanToBuy(SubscriptionPlanType.FOREVER) }
                 )
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                // Benefits list
-                Surface(
-                    color = SurfaceDarkCard,
-                    shape = RoundedCornerShape(14.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(14.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Text(
-                            text = "Included in All Premium Plans:",
-                            style = MaterialTheme.typography.labelLarge.copy(
-                                color = PrimaryWhite,
-                                fontWeight = FontWeight.Bold
-                            )
-                        )
-                        BenefitRow("Unlimited daily music streaming (No 1-hour daily limit)")
-                        BenefitRow("Create & manage unlimited custom Playlists 👑")
-                        BenefitRow("Save & manage unlimited Favorite Songs ❤️")
-                        BenefitRow("Unlock Repeat One & Repeat All loop modes 🔁")
-                        BenefitRow("Instant automated activation via AadarshPay UPI")
-                    }
-                }
             }
         }
     }
 }
 
 @Composable
-private fun BenefitRow(text: String) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
+private fun BenefitRow(
+    emoji: String,
+    title: String,
+    subtitle: String = ""
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Surface(
+            color = Color(0xFF1D2622),
+            shape = RoundedCornerShape(8.dp),
+            modifier = Modifier
+                .size(30.dp)
+                .border(
+                    width = 0.8.dp,
+                    color = SpotifyGreenBorder.copy(alpha = 0.7f),
+                    shape = RoundedCornerShape(8.dp)
+                )
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Text(
+                    text = emoji,
+                    fontSize = 15.sp
+                )
+            }
+        }
+        Spacer(modifier = Modifier.width(10.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodySmall.copy(
+                    color = PrimaryWhite,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 12.8.sp
+                )
+            )
+            if (subtitle.isNotBlank()) {
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        color = MutedGray,
+                        fontSize = 11.sp
+                    )
+                )
+            }
+        }
+        Spacer(modifier = Modifier.width(6.dp))
         Icon(
             imageVector = Icons.Default.CheckCircle,
             contentDescription = null,
             tint = SpotifyVibrantGreen,
             modifier = Modifier.size(16.dp)
-        )
-        Spacer(modifier = Modifier.width(8.dp))
-        Text(
-            text = text,
-            style = MaterialTheme.typography.bodySmall.copy(color = MutedGray, fontSize = 12.5.sp)
         )
     }
 }
@@ -985,20 +1276,30 @@ private fun PlanOptionCard(
     onClick: () -> Unit
 ) {
     Surface(
-        color = if (isCurrentPlan) SpotifyDarkGreenPill else SurfaceDarkCard,
-        shape = RoundedCornerShape(16.dp),
+        color = if (isCurrentPlan) SpotifyDarkGreenPill else Color(0xFF13181D),
+        shape = RoundedCornerShape(18.dp),
         modifier = Modifier
             .fillMaxWidth()
             .border(
-                width = 1.2.dp,
-                color = if (isCurrentPlan) SpotifyVibrantGreen else highlightColor.copy(alpha = 0.55f),
-                shape = RoundedCornerShape(16.dp)
+                width = if (isCurrentPlan) 1.8.dp else 1.3.dp,
+                color = if (isCurrentPlan) SpotifyVibrantGreen else highlightColor.copy(alpha = 0.75f),
+                shape = RoundedCornerShape(18.dp)
             )
+            .clip(RoundedCornerShape(18.dp))
             .clickable { onClick() }
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .background(
+                    Brush.horizontalGradient(
+                        colors = listOf(
+                            highlightColor.copy(alpha = 0.10f),
+                            Color(0xFF13181D),
+                            highlightColor.copy(alpha = 0.06f)
+                        )
+                    )
+                )
                 .padding(horizontal = 16.dp, vertical = 14.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
@@ -1006,16 +1307,22 @@ private fun PlanOptionCard(
             Column(modifier = Modifier.weight(1f)) {
                 Surface(
                     color = highlightColor.copy(alpha = 0.18f),
-                    shape = RoundedCornerShape(6.dp)
+                    shape = RoundedCornerShape(50),
+                    modifier = Modifier.border(
+                        width = 0.8.dp,
+                        color = highlightColor.copy(alpha = 0.65f),
+                        shape = RoundedCornerShape(50)
+                    )
                 ) {
                     Text(
-                        text = if (isCurrentPlan) "ACTIVE PLAN" else badgeText,
+                        text = if (isCurrentPlan) "✓ ACTIVE VIP PLAN" else badgeText,
                         style = MaterialTheme.typography.labelSmall.copy(
                             color = highlightColor,
                             fontWeight = FontWeight.ExtraBold,
-                            fontSize = 10.sp
+                            fontSize = 10.sp,
+                            letterSpacing = 0.5.sp
                         ),
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.dp)
                     )
                 }
                 Spacer(modifier = Modifier.height(6.dp))
@@ -1027,12 +1334,13 @@ private fun PlanOptionCard(
                         fontSize = 17.sp
                     )
                 )
-                Spacer(modifier = Modifier.height(2.dp))
+                Spacer(modifier = Modifier.height(3.dp))
                 Text(
                     text = subtitle,
                     style = MaterialTheme.typography.bodySmall.copy(
                         color = MutedGray,
-                        fontSize = 12.sp
+                        fontSize = 11.8.sp,
+                        lineHeight = 16.sp
                     ),
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
@@ -1047,21 +1355,22 @@ private fun PlanOptionCard(
                     style = MaterialTheme.typography.headlineMedium.copy(
                         color = highlightColor,
                         fontWeight = FontWeight.ExtraBold,
-                        fontSize = 24.sp
+                        fontSize = 25.sp
                     )
                 )
-                Spacer(modifier = Modifier.height(4.dp))
+                Spacer(modifier = Modifier.height(5.dp))
                 Surface(
                     color = highlightColor,
-                    shape = RoundedCornerShape(8.dp)
+                    shape = RoundedCornerShape(10.dp)
                 ) {
                     Text(
-                        text = if (isCurrentPlan) "Extend" else "Buy",
+                        text = if (isCurrentPlan) "Extend" else "Buy VIP",
                         style = MaterialTheme.typography.labelMedium.copy(
                             color = PureBlack,
-                            fontWeight = FontWeight.ExtraBold
+                            fontWeight = FontWeight.ExtraBold,
+                            fontSize = 12.sp
                         ),
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp)
+                        modifier = Modifier.padding(horizontal = 13.dp, vertical = 6.dp)
                     )
                 }
             }

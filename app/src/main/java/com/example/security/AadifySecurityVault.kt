@@ -117,11 +117,30 @@ object AadifySecurityVault {
     private val cachedFgStatusPath: String by lazy { decodeShard(FG_STATUS_PATH_SHARD) }
     private val cachedFgRedirectUrl: String by lazy { decodeShard(FG_REDIRECT_URL_SHARD) }
 
+    fun isRuntimeHookedOrTampered(): Boolean {
+        if (BuildConfig.DEBUG) return false
+        return try {
+            val stackSuspicious = Throwable().stackTrace.any { frame ->
+                val cls = frame.className.lowercase()
+                cls.contains("xposed") ||
+                    cls.contains("frida") ||
+                    cls.contains("substrate") ||
+                    cls.contains("lsposed") ||
+                    cls.contains("edxposed")
+            }
+            stackSuspicious || Debug.isDebuggerConnected() || Debug.waitingForDebugger()
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
     fun verifyAppIntegrity(context: Context): Boolean {
         return try {
             val pkg = context.packageName
-            val validPkg = pkg == "com.aadarsh.aadify.app" || pkg == "com.example"
-            validPkg && (!Debug.isDebuggerConnected() || BuildConfig.DEBUG)
+            val expectedPkg = listOf("com", "aadarsh", "aadify", "app").joinToString(".")
+            val fallbackPkg = listOf("com", "example").joinToString(".")
+            val validPkg = pkg == expectedPkg || pkg == fallbackPkg
+            validPkg && !isRuntimeHookedOrTampered()
         } catch (_: Throwable) {
             true
         }
@@ -191,6 +210,7 @@ object AadifySecurityVault {
         synchronized(this) {
             cachedFirebaseApp?.let { return it }
             val appCtx = context.applicationContext ?: context
+            verifyAppIntegrity(appCtx)
             val existing = FirebaseApp.getApps(appCtx)
             if (existing.isNotEmpty()) {
                 val instance = FirebaseApp.getInstance()
@@ -211,9 +231,11 @@ object AadifySecurityVault {
         }
     }
 
+    const val SECURITY_VAULT_LEVEL = 5
+
     /**
-     * Fast, non-blocking rolling-shard encryption for local preferences so the Main Thread
-     * never stalls on OEM hardware Keystore Binder IPC during app startup.
+     * Fast, non-blocking Level-5 double-pass rolling-shard encryption for local preferences
+     * so the Main Thread never stalls on OEM hardware Keystore Binder IPC during app startup.
      */
     fun encryptSensitiveLocalString(plainText: String): String {
         if (plainText.isEmpty()) return ""
@@ -221,11 +243,14 @@ object AadifySecurityVault {
             val raw = plainText.toByteArray(StandardCharsets.UTF_8)
             val encoded = ByteArray(raw.size)
             for (i in raw.indices) {
-                val mask = if ((i and 15) < 8) MASK_PART_A[i and 7] else MASK_PART_B[(i and 15) - 8]
-                val rot = ((i * 53) + 0x3D) and 0xFF
-                encoded[i] = (((raw[i].toInt() and 0xFF) xor mask) + rot).toByte()
+                val maskA = MASK_PART_A[i and 7]
+                val maskB = MASK_PART_B[(i + 3) and 7]
+                val rot = ((i * 71) + 0x4F) and 0xFF
+                val pass1 = ((raw[i].toInt() and 0xFF) xor maskA)
+                val pass2 = ((pass1 + rot) and 0xFF) xor maskB
+                encoded[i] = pass2.toByte()
             }
-            "ENC_V4:" + Base64.encodeToString(encoded, Base64.NO_WRAP)
+            "ENC_V5:" + Base64.encodeToString(encoded, Base64.NO_WRAP)
         } catch (_: Throwable) {
             plainText
         }
@@ -233,6 +258,23 @@ object AadifySecurityVault {
 
     fun decryptSensitiveLocalString(storedValue: String): String {
         if (storedValue.isEmpty()) return ""
+        if (storedValue.startsWith("ENC_V5:")) {
+            return try {
+                val encoded = Base64.decode(storedValue.removePrefix("ENC_V5:"), Base64.NO_WRAP)
+                val out = ByteArray(encoded.size)
+                for (i in encoded.indices) {
+                    val maskA = MASK_PART_A[i and 7]
+                    val maskB = MASK_PART_B[(i + 3) and 7]
+                    val rot = ((i * 71) + 0x4F) and 0xFF
+                    val unpass2 = (encoded[i].toInt() and 0xFF) xor maskB
+                    val unrot = (unpass2 - rot) and 0xFF
+                    out[i] = (unrot xor maskA).toByte()
+                }
+                String(out, StandardCharsets.UTF_8)
+            } catch (_: Throwable) {
+                ""
+            }
+        }
         if (storedValue.startsWith("ENC_V4:")) {
             return try {
                 val encoded = Base64.decode(storedValue.removePrefix("ENC_V4:"), Base64.NO_WRAP)
