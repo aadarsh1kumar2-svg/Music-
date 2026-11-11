@@ -307,7 +307,26 @@ class AudioStreamExtractor {
         resolvedVideoIdCache[cacheKey]?.takeIf { it.isNotBlank() && it != song.cleanVideoId }?.let {
             return@withContext it
         }
-        val ids = searchPlayableVideoIds("$q official audio")
+        val ids = coroutineScope {
+            val ch = Channel<List<String>>(Channel.UNLIMITED)
+            val j1 = launch(Dispatchers.IO) {
+                ch.trySend(searchPlayableVideoIdsViaYtMusic("$q song"))
+            }
+            val j2 = launch(Dispatchers.IO) {
+                ch.trySend(searchPlayableVideoIds("$q official audio"))
+            }
+            var firstNonEmpty: List<String> = emptyList()
+            repeat(2) {
+                val res = ch.receive()
+                if (res.isNotEmpty() && firstNonEmpty.isEmpty()) {
+                    firstNonEmpty = res
+                    j1.cancel()
+                    j2.cancel()
+                    return@repeat
+                }
+            }
+            firstNonEmpty
+        }
         val picked = ids.firstOrNull { it != song.cleanVideoId } ?: ids.firstOrNull()
         if (!picked.isNullOrBlank()) {
             resolvedVideoIdCache[cacheKey] = picked
@@ -733,6 +752,43 @@ class AudioStreamExtractor {
 
     private fun isStreamUrlReachable(streamUrl: String, userAgent: String): Boolean {
         return streamUrl.startsWith("http", ignoreCase = true) && userAgent.isNotBlank()
+    }
+
+    private fun searchPlayableVideoIdsViaYtMusic(query: String): List<String> {
+        return try {
+            val clientObj = JSONObject().apply {
+                put("clientName", "WEB_REMIX")
+                put("clientVersion", "1.20241118.01.00")
+                put("hl", "en")
+                put("gl", "IN")
+            }
+            val payload = JSONObject().apply {
+                put("context", JSONObject().put("client", clientObj))
+                put("query", query)
+                // Filter specifically to Songs in YouTube Music for smaller, faster, audio-only matches
+                put("params", "EgWKAQIIAWoKEAMQBBAJEAoQBQ%3D%3D")
+            }
+            val request = Request.Builder()
+                .url("https://music.youtube.com/youtubei/v1/search?prettyPrint=false")
+                .header("Content-Type", "application/json")
+                .header("User-Agent", EXOPLAYER_USER_AGENT)
+                .header("Origin", "https://music.youtube.com")
+                .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+                .build()
+
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return emptyList()
+                val body = response.body?.string() ?: return emptyList()
+                val regex = Regex("\"videoId\"\\s*:\\s*\"([a-zA-Z0-9_-]{11})\"")
+                regex.findAll(body)
+                    .map { it.groupValues[1] }
+                    .distinct()
+                    .take(4)
+                    .toList()
+            }
+        } catch (e: Exception) {
+            emptyList()
+        }
     }
 
     private fun searchPlayableVideoIds(query: String): List<String> {

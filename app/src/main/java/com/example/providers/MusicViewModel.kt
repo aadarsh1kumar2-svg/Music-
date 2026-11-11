@@ -568,6 +568,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         context = appContext,
         onProgressUpdate = { posMs ->
             if (!isUsingExoPlayerFallback && !hasHandledEndForCurrentSong) {
+                if (posMs >= 100L && _isBuffering.value) {
+                    _isBuffering.value = false
+                    _isPlaying.value = true
+                    MusicPlaybackService.syncPlayState(true)
+                }
                 _currentPositionMs.value = posMs
                 val totalDur = _durationMs.value
                 MusicPlaybackService.syncOnlineProgressAndDuration(posMs, totalDur)
@@ -1115,19 +1120,28 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         // Automatically repair/hydrate:
         // 1) Original Spotify playlist cover (`spPlaylist.coverUrl`) from Spotify oEmbed if missing or overwritten
         // 2) Individual song covers (`songEntity.bannerUrl`) for each song inside imported Spotify playlists
+        // Deferred & paused whenever a song is actively buffering so 100% of bandwidth goes to song playback!
         viewModelScope.launch(Dispatchers.IO) {
+            delay(6000L)
             val repairedPlaylistCovers = mutableSetOf<Long>()
             val repairedSongIds = mutableSetOf<String>()
+            val resolvedVideoSongIds = mutableSetOf<String>()
             combine(spotifyPlaylists, allSpotifyPlaylistSongs) { spLists, spSongs ->
                 spLists to spSongs
             }.collect { (spLists, spSongs) ->
                 if (spLists.isEmpty() && spSongs.isEmpty()) return@collect
+                while (_isBuffering.value) {
+                    delay(1200L)
+                }
                 val playlistMap = spLists.associateBy { it.spotifyPlaylistId }
                 val songsByPlaylist = spSongs.groupBy { it.spotifyPlaylistId }
 
                 // Step A: Ensure each Spotify Playlist has its ORIGINAL Spotify coverUrl
                 for (spPl in spLists) {
                     if (!repairedPlaylistCovers.contains(spPl.spotifyPlaylistId)) {
+                        while (_isBuffering.value) {
+                            delay(1200L)
+                        }
                         repairedPlaylistCovers.add(spPl.spotifyPlaylistId)
                         val srcUrl = spPl.spotifyUrl.trim()
                         if (srcUrl.contains("spotify.com", ignoreCase = true)) {
@@ -1145,7 +1159,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
 
-                // Step B: Ensure each song inside the Spotify Playlist has its own individual song cover
+                // Step B: Ensure each song inside the Spotify Playlist has its own individual song cover & pre-cached videoId
                 for ((playlistId, songsInPl) in songsByPlaylist) {
                     val parentPl = playlistMap[playlistId]
                     val parentCover = parentPl?.coverUrl?.trim().orEmpty()
@@ -1159,34 +1173,40 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     }
 
                     for (songEntity in songsInPl) {
-                        if (repairedSongIds.contains(songEntity.songId)) continue
-                        val currentBanner = songEntity.bannerUrl.trim()
-                        val needsOwnCover = currentBanner.isBlank() ||
-                            (songsInPl.size > 1 && currentBanner == parentCover) ||
-                            duplicateCoverUrls.contains(currentBanner)
-
-                        if (needsOwnCover) {
+                        while (_isBuffering.value) {
+                            delay(1200L)
+                        }
+                        if (!repairedSongIds.contains(songEntity.songId)) {
                             repairedSongIds.add(songEntity.songId)
-                            val realCover = spotifyImportService.resolveIndividualTrackCoverUrl(
-                                spotifyTrackId = "",
-                                title = songEntity.title,
-                                artist = songEntity.artist
-                            )
-                            if (realCover.isNotBlank() && realCover != currentBanner) {
-                                try {
-                                    libraryDao.updateSpotifyPlaylistSongBannerUrl(
-                                        songId = songEntity.songId,
-                                        bannerUrl = realCover
-                                    )
-                                } catch (_: Exception) {
+                            val currentBanner = songEntity.bannerUrl.trim()
+                            val needsOwnCover = currentBanner.isBlank() ||
+                                (songsInPl.size > 1 && currentBanner == parentCover) ||
+                                duplicateCoverUrls.contains(currentBanner)
+
+                            if (needsOwnCover) {
+                                val realCover = spotifyImportService.resolveIndividualTrackCoverUrl(
+                                    spotifyTrackId = "",
+                                    title = songEntity.title,
+                                    artist = songEntity.artist
+                                )
+                                if (realCover.isNotBlank() && realCover != currentBanner) {
+                                    try {
+                                        libraryDao.updateSpotifyPlaylistSongBannerUrl(
+                                            songId = songEntity.songId,
+                                            bannerUrl = realCover
+                                        )
+                                    } catch (_: Exception) {
+                                    }
                                 }
                             }
-                        } else {
-                            repairedSongIds.add(songEntity.songId)
                         }
 
-                        // Step C: Pre-resolve playable YouTube videoId in the background so tapping the song starts in 0ms!
-                        if (songEntity.videoId.isBlank()) {
+                        // Step C: Pre-resolve playable YouTube videoId in the background when idle so tapping starts in 0ms!
+                        if (songEntity.videoId.isBlank() && !resolvedVideoSongIds.contains(songEntity.songId)) {
+                            while (_isBuffering.value) {
+                                delay(1200L)
+                            }
+                            resolvedVideoSongIds.add(songEntity.songId)
                             val resolvedVid = audioExtractor.findPlayableVideoIdForSong(songEntity.toSong()).orEmpty()
                             if (resolvedVid.isNotBlank()) {
                                 val updatedBanner = songEntity.bannerUrl.ifBlank {
@@ -2170,17 +2190,28 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
 
-            // 3. Resolve playable YouTube Video ID (fast in-memory / catalog lookup first, then InnerTube VR search)
+            // 3. Resolve playable YouTube Video ID (fast in-memory / catalog / Room lookup first, then parallel YT Music + VR search)
             var playableVideoId = song.cleanVideoId
             var activeSongToPlay = song
             if (playableVideoId.isBlank()) {
                 val catalogMatch = allSongs.value.firstOrNull {
-                    it.id == song.id || it.title.equals(song.title, ignoreCase = true)
+                    it.cleanVideoId.isNotBlank() && (it.id == song.id || it.title.equals(song.title, ignoreCase = true))
                 }
-                playableVideoId = catalogMatch?.cleanVideoId.orEmpty()
-                if (playableVideoId.isBlank()) {
-                    playableVideoId = audioExtractor.findPlayableVideoIdForSong(song).orEmpty()
+                val spotifySavedMatch = allSpotifyPlaylistSongs.value.firstOrNull {
+                    it.videoId.isNotBlank() && (it.songId == song.id || it.title.equals(song.title, ignoreCase = true))
                 }
+                val playlistSavedMatch = allPlaylistSongs.value.firstOrNull {
+                    it.videoId.isNotBlank() && (it.songId == song.id || it.title.equals(song.title, ignoreCase = true))
+                }
+                val historySavedMatch = sessionHistoryEntities.value.firstOrNull {
+                    it.videoId.isNotBlank() && (it.id == song.id || it.title.equals(song.title, ignoreCase = true))
+                }
+                playableVideoId = catalogMatch?.cleanVideoId
+                    ?: Song.extractYoutubeVideoId(spotifySavedMatch?.videoId.orEmpty()).takeIf { it.isNotBlank() }
+                    ?: Song.extractYoutubeVideoId(playlistSavedMatch?.videoId.orEmpty()).takeIf { it.isNotBlank() }
+                    ?: Song.extractYoutubeVideoId(historySavedMatch?.videoId.orEmpty()).takeIf { it.isNotBlank() }
+                    ?: audioExtractor.findPlayableVideoIdForSong(song).orEmpty()
+
                 if (playableVideoId.isNotBlank()) {
                     val fastFallbackBanner = song.bannerUrl.ifBlank {
                         "https://i.ytimg.com/vi/$playableVideoId/hqdefault.jpg"
@@ -2223,9 +2254,24 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
 
-            // 5. Non-blocking background cover hydration & upcoming queue videoId pre-fetching (0ms impact on playback start!)
+            // 5. Deferred background cover hydration & upcoming queue videoId pre-fetching
+            // Wait until the current song has finished buffering and started playing so ZERO network requests compete with startup!
             val resolvedVidForAsync = playableVideoId
             viewModelScope.launch(Dispatchers.IO) {
+                if (song.id.startsWith("spotify_") && song.cleanVideoId.isBlank()) {
+                    try {
+                        libraryDao.updateSpotifyPlaylistSongVideoId(
+                            songId = song.id,
+                            videoId = resolvedVidForAsync,
+                            bannerUrl = activeSongToPlay.bannerUrl
+                        )
+                    } catch (_: Exception) {
+                    }
+                }
+                delay(4500L)
+                while (_isBuffering.value) {
+                    delay(1000L)
+                }
                 if (song.id.startsWith("spotify_")) {
                     val isPlaylistCoverUsed = spotifyPlaylists.value.any {
                         it.coverUrl.isNotBlank() && it.coverUrl == song.bannerUrl &&
@@ -2251,22 +2297,17 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     if (_currentSong.value?.id == song.id && individualCover.isNotBlank() && individualCover != _currentSong.value?.bannerUrl) {
                         val updatedSong = activeSongToPlay.copy(videoId = resolvedVidForAsync, bannerUrl = individualCover)
                         _currentSong.value = updatedSong
-                        MusicPlaybackService.syncNowPlaying(
-                            context = appContext,
-                            song = updatedSong,
-                            isPlaying = _isPlaying.value,
-                            directStreamUri = null,
-                            playbackSpeed = _playbackSpeed.value,
-                            startPositionMs = _currentPositionMs.value
-                        )
                     }
                 }
 
-                // Pre-resolve videoIds for the next 3 tracks in the queue so skipping to next song is instant!
+                // Pre-resolve videoIds for the next 3 tracks in the queue once current song is playing smoothly
                 val currentIdx = resolvedQueue.indexOfFirst { it.id == song.id }
                 if (currentIdx >= 0) {
                     val upcoming = resolvedQueue.drop(currentIdx + 1).take(3)
                     for (nextTrack in upcoming) {
+                        while (_isBuffering.value) {
+                            delay(1000L)
+                        }
                         if (nextTrack.cleanVideoId.isBlank() && nextTrack.resolvedLocalUri.isBlank()) {
                             val nextVid = audioExtractor.findPlayableVideoIdForSong(nextTrack).orEmpty()
                             if (nextVid.isNotBlank() && nextTrack.id.startsWith("spotify_")) {
@@ -2846,7 +2887,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                         )
                     )
                     val now = System.currentTimeMillis()
-                    val pendingCoverResolution = mutableListOf<Pair<String, com.example.services.ImportedSpotifyTrack>>()
+                    val pendingResolution = mutableListOf<Pair<String, com.example.services.ImportedSpotifyTrack>>()
                     collection.tracks.forEachIndexed { index, track ->
                         val songId = "spotify_${newPlaylistId}_${index}_${UUID.randomUUID().toString().take(6)}"
                         val initialTrackCover = if (collection.tracks.size == 1) {
@@ -2865,24 +2906,56 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                                 timestamp = now - index
                             )
                         )
-                        if (initialTrackCover.isBlank()) {
-                            pendingCoverResolution.add(songId to track)
+                        if (initialTrackCover.isBlank() || track.videoId.isBlank()) {
+                            pendingResolution.add(songId to track)
                         }
                     }
-                    // Hydrate remaining songs' individual covers in the background so every song shows its own artwork!
-                    if (pendingCoverResolution.isNotEmpty()) {
+                    // Hydrate remaining songs' individual covers & playable videoIds in the background when player is not buffering!
+                    if (pendingResolution.isNotEmpty()) {
                         viewModelScope.launch(Dispatchers.IO) {
-                            for ((songId, track) in pendingCoverResolution) {
-                                val resolvedCover = spotifyImportService.resolveIndividualTrackCoverUrl(
-                                    spotifyTrackId = track.spotifyTrackId,
-                                    title = track.title,
-                                    artist = track.artist
-                                )
-                                if (resolvedCover.isNotBlank()) {
+                            for ((songId, track) in pendingResolution) {
+                                while (_isBuffering.value) {
+                                    delay(1200L)
+                                }
+                                val resolvedCover = if (track.coverUrl.isBlank()) {
+                                    spotifyImportService.resolveIndividualTrackCoverUrl(
+                                        spotifyTrackId = track.spotifyTrackId,
+                                        title = track.title,
+                                        artist = track.artist
+                                    )
+                                } else {
+                                    track.coverUrl
+                                }
+                                val resolvedVid = if (track.videoId.isBlank()) {
+                                    audioExtractor.findPlayableVideoIdForSong(
+                                        Song(
+                                            id = songId,
+                                            title = track.title,
+                                            artist = track.artist,
+                                            videoId = "",
+                                            bannerUrl = resolvedCover
+                                        )
+                                    ).orEmpty()
+                                } else {
+                                    track.videoId
+                                }
+                                val finalCover = resolvedCover.ifBlank {
+                                    if (resolvedVid.isNotBlank()) "https://i.ytimg.com/vi/$resolvedVid/hqdefault.jpg" else ""
+                                }
+                                if (resolvedVid.isNotBlank()) {
+                                    try {
+                                        libraryDao.updateSpotifyPlaylistSongVideoId(
+                                            songId = songId,
+                                            videoId = resolvedVid,
+                                            bannerUrl = finalCover
+                                        )
+                                    } catch (_: Exception) {
+                                    }
+                                } else if (finalCover.isNotBlank()) {
                                     try {
                                         libraryDao.updateSpotifyPlaylistSongBannerUrl(
                                             songId = songId,
-                                            bannerUrl = resolvedCover
+                                            bannerUrl = finalCover
                                         )
                                     } catch (_: Exception) {
                                     }
