@@ -361,10 +361,14 @@ class MusicPlaybackService : MediaSessionService() {
          * to keep the Foreground MediaSession, WakeLock, WifiLock, Quick Settings Media Tile, Lock Screen,
          * and Notification Bar media controls active while BackstageYouTubePlayerController streams online audio.
          */
+        @Volatile
+        private var cachedSilentWavUri: String? = null
+
         fun getOrCreateSilentWavUri(context: Context): String {
+            cachedSilentWavUri?.let { return it }
             val file = File(context.cacheDir, "aadify_keepalive_16bit_600s_v2.wav")
             if (file.exists() && file.length() > 4_000_000L) {
-                return Uri.fromFile(file).toString()
+                return Uri.fromFile(file).toString().also { cachedSilentWavUri = it }
             }
             try {
                 val sampleRate = 4000
@@ -403,12 +407,13 @@ class MusicPlaybackService : MediaSessionService() {
                 }
             } catch (_: Exception) {
             }
-            return Uri.fromFile(file).toString()
+            return Uri.fromFile(file).toString().also { cachedSilentWavUri = it }
         }
     }
 
     private var mediaSession: MediaSession? = null
     private var exoPlayerInstance: ExoPlayer? = null
+    private var defaultLogoBitmap: Bitmap? = null
     private var currentActiveMetadata: MediaMetadata = MediaMetadata.EMPTY
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
@@ -1002,7 +1007,9 @@ class MusicPlaybackService : MediaSessionService() {
                 if (bytes != null && bytes.isNotEmpty()) {
                     BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                 } else {
-                    BitmapFactory.decodeResource(resources, R.drawable.aadify_logo)
+                    defaultLogoBitmap ?: BitmapFactory.decodeResource(resources, R.drawable.aadify_logo)?.also {
+                        defaultLogoBitmap = it
+                    }
                 }
             } catch (_: Exception) {
                 null
@@ -1391,6 +1398,8 @@ class MusicPlaybackService : MediaSessionService() {
         silentUri: String
     ) {
         ioScope.launch {
+            kotlinx.coroutines.delay(2500L)
+            if (pendingSync?.song?.id != song.id) return@launch
             val fallbackYtBanner = if (song.cleanVideoId.isNotBlank()) {
                 "https://img.youtube.com/vi/${song.cleanVideoId}/hqdefault.jpg"
             } else {

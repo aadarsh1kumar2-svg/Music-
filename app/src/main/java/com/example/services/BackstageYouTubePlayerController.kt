@@ -193,7 +193,8 @@ class BackstageYouTubePlayerController(
             } catch (_: Exception) {
             }
             if (currentLoadedVideoId.isNotBlank() && !hasFiredEndedForCurrentTrack) {
-                mainHandler.postDelayed(this, 600L)
+                val nextDelay = if (hasSeenValidStartForCurrentToken) 600L else 180L
+                mainHandler.postDelayed(this, nextDelay)
             }
         }
     }
@@ -270,13 +271,7 @@ class BackstageYouTubePlayerController(
                         reqUrl.contains("/api/stats/atr") ||
                         reqUrl.contains("/api/stats/qoe") ||
                         reqUrl.contains("/ptracking") ||
-                        reqUrl.contains("play.google.com/log") ||
-                        reqUrl.contains("i.ytimg.com") ||
-                        reqUrl.contains("yt3.ggpht.com") ||
-                        reqUrl.contains("fonts.gstatic.com") ||
-                        reqUrl.contains(".woff2") ||
-                        reqUrl.contains(".woff") ||
-                        reqUrl.contains(".ttf")
+                        reqUrl.contains("play.google.com/log")
                     ) {
                         return WebResourceResponse(
                             "text/plain",
@@ -293,8 +288,6 @@ class BackstageYouTubePlayerController(
                     val token = currentLoadToken
                     if (targetId.isNotBlank()) {
                         injectVideoBridgeScript(token, targetId)
-                    } else {
-                        muteAndPausePreWarmPage()
                     }
                 }
 
@@ -304,8 +297,6 @@ class BackstageYouTubePlayerController(
                     val token = currentLoadToken
                     if (targetId.isNotBlank()) {
                         injectVideoBridgeScript(token, targetId)
-                    } else {
-                        muteAndPausePreWarmPage()
                     }
                 }
 
@@ -313,10 +304,7 @@ class BackstageYouTubePlayerController(
                     super.doUpdateVisitedHistory(view, url, isReload)
                     val targetId = currentLoadedVideoId
                     val token = currentLoadToken
-                    if (targetId.isBlank()) {
-                        muteAndPausePreWarmPage()
-                        return
-                    }
+                    if (targetId.isBlank()) return
                     injectVideoBridgeScript(token, targetId)
                 }
 
@@ -344,29 +332,9 @@ class BackstageYouTubePlayerController(
         return created
     }
 
-    private fun muteAndPausePreWarmPage() {
-        evaluateJs(
-            """
-            (function() {
-                window.__akUserPaused = true;
-                var v = document.querySelector('video');
-                if (v) {
-                    v.muted = true;
-                    try { v.pause(); } catch(e) {}
-                }
-                var mp = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
-                if (mp) {
-                    if (typeof mp.mute === 'function') { try { mp.mute(); } catch(e) {} }
-                    if (typeof mp.pauseVideo === 'function') { try { mp.pauseVideo(); } catch(e) {} }
-                }
-            })();
-            """.trimIndent()
-        )
-    }
-
     /**
-     * Pre-warms the hidden Chromium WebView directly on an m.youtube.com/watch page on app launch
-     * so #movie_player, base.js, DNS, and TLS are 100% initialized in memory before the user taps a song.
+     * Pre-warms the hidden Chromium WebView connection to m.youtube.com on app launch
+     * so DNS, TLS, and base player scripts are already cached before the user taps a song.
      */
     fun preWarmEngine() {
         mainHandler.post {
@@ -374,9 +342,8 @@ class BackstageYouTubePlayerController(
                 if (currentLoadedVideoId.isNotBlank()) return@post
                 val view = getOrCreateWebView()
                 val curUrl = view.url.orEmpty()
-                if (curUrl.isBlank() || curUrl == "about:blank" || !curUrl.contains("/watch")) {
-                    isUserPaused = true
-                    view.loadUrl("https://m.youtube.com/watch?v=BddP6PYo2gs&hl=en")
+                if (curUrl.isBlank() || curUrl == "about:blank") {
+                    view.loadUrl("https://m.youtube.com/?hl=en")
                 }
             } catch (_: Exception) {
             }
@@ -498,7 +465,7 @@ class BackstageYouTubePlayerController(
             fallbackUrlReloadRunnable = null
             mainHandler.removeCallbacks(nativeHeartbeatRunnable)
 
-            // Try ultra-fast in-place player switch ONLY if we are already on a /watch page with #movie_player warm
+            // Synchronously silence any old video and immediately load watchUrl in 0ms (no callback wait!)
             view.evaluateJavascript(
                 """
                 (function() {
@@ -524,90 +491,19 @@ class BackstageYouTubePlayerController(
                     window.__akLastReportedDur = 0;
                     window.__akLastReportedState = 3;
                     window.__akLastMetaKey = '';
-                    if (typeof window.__akSyncMediaSession === 'function') {
-                        window.__akSyncMediaSession();
-                    }
-                    try {
-                        var isWatchPage = (window.location.pathname || '').indexOf('/watch') === 0;
-                        var mp = document.getElementById('movie_player') || (isWatchPage ? document.querySelector('.html5-video-player') : null);
-                        if (isWatchPage && mp && typeof mp.loadVideoById === 'function') {
-                            window.__akLoadedInPlaceId = '$cleanId';
-                            if (typeof mp.unMute === 'function') { try { mp.unMute(); } catch (e0) {} }
-                            if (typeof mp.setVolume === 'function') { try { mp.setVolume(100); } catch (e1) {} }
-                            mp.loadVideoById('$cleanId', $safeStartSec);
-                            if (typeof mp.playVideo === 'function') {
-                                try { mp.playVideo(); } catch (e2) {}
-                            }
-                            return 'IN_PLACE_OK';
-                        }
-                    } catch (e) {}
                     var vOld = document.querySelector('video');
                     if (vOld) {
                         try { vOld.pause(); } catch (e) {}
                     }
-                    return 'NEEDS_FULL_LOAD';
-                })();
-                """.trimIndent()
-            ) { result ->
-                if (token != currentLoadToken || currentLoadedVideoId != cleanId) return@evaluateJavascript
-                val inPlaceSuccess = result?.contains("IN_PLACE_OK") == true
-                if (!inPlaceSuccess) {
-                    view.loadUrl(watchUrl)
-                } else {
-                    injectVideoBridgeScript(token, cleanId)
-                    val fallbackRunnable = Runnable {
-                        if (token == currentLoadToken &&
-                            currentLoadedVideoId == cleanId &&
-                            !hasSeenValidStartForCurrentToken &&
-                            !isUserPaused
-                        ) {
-                            view.evaluateJavascript(
-                                """
-                                (function() {
-                                    var mp = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
-                                    var v = document.querySelector('video');
-                                    var mpState = -1;
-                                    try {
-                                        if (mp && typeof mp.getPlayerState === 'function') {
-                                            mpState = mp.getPlayerState();
-                                        }
-                                    } catch (e) {}
-                                    if (mpState === 1 || mpState === 3) {
-                                        if (v) {
-                                            v.muted = false;
-                                            v.volume = 1.0;
-                                            if (v.paused && mpState === 1) {
-                                                try { v.play(); } catch(e) {}
-                                            }
-                                        }
-                                        return 'BUFFERING_OK';
-                                    }
-                                    if (v && (v.readyState >= 2 || (!v.paused && v.currentTime > 0))) {
-                                        v.muted = false;
-                                        v.volume = 1.0;
-                                        try { v.play(); } catch(e) {}
-                                        return 'BUFFERING_OK';
-                                    }
-                                    return 'NEEDS_RELOAD';
-                                })();
-                                """.trimIndent()
-                            ) { checkRes ->
-                                if (checkRes?.contains("NEEDS_RELOAD") == true &&
-                                    token == currentLoadToken &&
-                                    currentLoadedVideoId == cleanId &&
-                                    !hasSeenValidStartForCurrentToken &&
-                                    !isUserPaused
-                                ) {
-                                    view.loadUrl(watchUrl)
-                                }
-                            }
-                        }
+                    if (typeof window.__akSyncMediaSession === 'function') {
+                        window.__akSyncMediaSession();
                     }
-                    fallbackUrlReloadRunnable = fallbackRunnable
-                    mainHandler.postDelayed(fallbackRunnable, 2200L)
-                }
-            }
-            mainHandler.postDelayed(nativeHeartbeatRunnable, 30L)
+                })();
+                """.trimIndent(),
+                null
+            )
+            view.loadUrl(watchUrl)
+            mainHandler.postDelayed(nativeHeartbeatRunnable, 40L)
         }
     }
 
@@ -1151,7 +1047,8 @@ class BackstageYouTubePlayerController(
                 function isCurrentVideoMatchingTarget() {
                     var target = window.__akTargetVideoId || '';
                     if (!target) return false;
-                    if (window.__akLoadedInPlaceId === target) return true;
+                    var href = window.location.href || '';
+                    if (href.indexOf(target) !== -1) return true;
                     try {
                         var mp = getMoviePlayer();
                         if (mp && typeof mp.getVideoData === 'function') {
@@ -1161,8 +1058,6 @@ class BackstageYouTubePlayerController(
                             }
                         }
                     } catch (e) {}
-                    var href = window.location.href || '';
-                    if (href.indexOf(target) !== -1) return true;
                     return false;
                 }
 
@@ -1310,19 +1205,8 @@ class BackstageYouTubePlayerController(
                         notifyTrackEnded(v);
                         return;
                     }
-                    var mp = getMoviePlayer();
-                    try {
-                        if (mp && typeof mp.getPlayerState === 'function') {
-                            var st = mp.getPlayerState();
-                            // Do not spam playVideo() while YouTube player is actively buffering (state 3) and readyState < 2
-                            if (st === 3 && v.readyState < 2) {
-                                return;
-                            }
-                        }
-                    } catch (e0) {}
-
                     var now = Date.now();
-                    if (now - (window.__akLastPlayAttempt || 0) < 650) return;
+                    if (now - (window.__akLastPlayAttempt || 0) < 40) return;
                     window.__akLastPlayAttempt = now;
 
                     dismissContinueWatchingDialog();
@@ -1331,24 +1215,23 @@ class BackstageYouTubePlayerController(
                     v.volume = 1.0;
 
                     try {
+                        var mp = getMoviePlayer();
                         if (mp && typeof mp.unMute === 'function') {
                             try { mp.unMute(); } catch (e0) {}
                         }
                         if (mp && typeof mp.playVideo === 'function') {
                             try { mp.playVideo(); } catch (e1) {}
                         }
-                        if (v.readyState >= 1) {
-                            var p = v.play();
-                            if (p && typeof p.catch === 'function') {
-                                p.catch(function() {
-                                    if (mp && typeof mp.playVideo === 'function') {
-                                        try { mp.playVideo(); } catch (e2) {}
-                                    } else {
-                                        var largeBtn = document.querySelector('.ytp-large-play-button, button.ytp-large-play-button');
-                                        if (largeBtn) { largeBtn.click(); }
-                                    }
-                                });
-                            }
+                        var p = v.play();
+                        if (p && typeof p.catch === 'function') {
+                            p.catch(function() {
+                                if (mp && typeof mp.playVideo === 'function') {
+                                    try { mp.playVideo(); } catch (e2) {}
+                                } else {
+                                    var largeBtn = document.querySelector('.ytp-large-play-button, button.ytp-large-play-button');
+                                    if (largeBtn) { largeBtn.click(); }
+                                }
+                            });
                         }
                     } catch (e) {}
                 }
@@ -1373,7 +1256,6 @@ class BackstageYouTubePlayerController(
                         if (!isCurrentVideoMatchingTarget()) return;
                         applyResumeSeekIfNeeded(v);
                         if (!window.__akUserPaused && !window.__akExternalPaused && !window.__akTrackEndedFired && v.paused) {
-                            window.__akLastPlayAttempt = 0;
                             tryPlayVideo(v);
                         }
                     });
@@ -1382,8 +1264,7 @@ class BackstageYouTubePlayerController(
                         v.loop = false;
                         if (!isCurrentVideoMatchingTarget()) return;
                         applyResumeSeekIfNeeded(v);
-                        if (!window.__akUserPaused && !window.__akExternalPaused && !window.__akTrackEndedFired && v.paused) {
-                            window.__akLastPlayAttempt = 0;
+                        if (!window.__akUserPaused && !window.__akExternalPaused && !window.__akTrackEndedFired) {
                             tryPlayVideo(v);
                         }
                     });
@@ -1404,20 +1285,18 @@ class BackstageYouTubePlayerController(
                         }
                         applyResumeSeekIfNeeded(v);
                         var totalDur = getTrueDuration(v);
-                        var canMarkStarted = (v.currentTime >= 0.02) && (v.currentTime < 10.0 || (window.__akResumeTargetSeconds || 0) >= 1.0);
+                        var canMarkStarted = (v.currentTime >= 0.01) && (v.currentTime < 10.0 || (window.__akResumeTargetSeconds || 0) >= 1.0);
                         if (canMarkStarted && (totalDur <= 0 || v.currentTime < totalDur - 2.0)) {
                             window.__akHasSeenStartOfTrack = true;
                         }
-                        if (v.readyState >= 2) {
-                            window.__akLastReportedState = 1;
-                            if (typeof window.__akSyncMediaSession === 'function') {
-                                window.__akSyncMediaSession(v);
-                            }
-                            if (window.AndroidBridge) {
-                                window.AndroidBridge.onStateChange(1);
-                                if (totalDur > 0) {
-                                    window.AndroidBridge.onDuration(totalDur);
-                                }
+                        window.__akLastReportedState = 1;
+                        if (typeof window.__akSyncMediaSession === 'function') {
+                            window.__akSyncMediaSession(v);
+                        }
+                        if (window.AndroidBridge) {
+                            window.AndroidBridge.onStateChange(1);
+                            if (totalDur > 0) {
+                                window.AndroidBridge.onDuration(totalDur);
                             }
                         }
                     });
@@ -1432,7 +1311,6 @@ class BackstageYouTubePlayerController(
                         if (typeof window.__akSyncMediaSession === 'function') {
                             window.__akSyncMediaSession(v);
                         }
-                        // Only report STATE_PLAYING on 'play' if audio data is ALREADY buffered and ready (prevents Load -> Play -> Load flicker!)
                         if (v.readyState >= 3 && v.currentTime > 0.05) {
                             if (window.__akWaitingTimer) {
                                 clearTimeout(window.__akWaitingTimer);
