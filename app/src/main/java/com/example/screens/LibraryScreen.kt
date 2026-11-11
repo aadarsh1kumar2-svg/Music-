@@ -116,9 +116,11 @@ fun LibraryScreen(
     onSongMoreClick: (Song) -> Unit,
     onCreatePlaylist: (String) -> Unit,
     onDeletePlaylist: (PlaylistEntity) -> Unit,
+    onRemoveSongFromPlaylist: (PlaylistEntity, Song) -> Unit = { _, _ -> },
     onImportSpotifyPlaylist: (String) -> Unit = {},
     onImportSharedPlaylist: (String) -> Unit = {},
     onDeleteSpotifyPlaylist: (SpotifyPlaylistEntity) -> Unit = {},
+    onRemoveSongFromSpotifyPlaylist: (SpotifyPlaylistEntity, Song) -> Unit = { _, _ -> },
     onSharePlaylist: (String, List<Song>) -> Unit = { _, _ -> },
     onDeleteDownloadedSong: (DownloadedSongEntity) -> Unit,
     onRequestStoragePermission: () -> Unit = {},
@@ -220,6 +222,9 @@ fun LibraryScreen(
                 onBack = { onNavigateSubScreen(LibrarySubScreen.Playlists) },
                 onSongClick = onSongClick,
                 onSongMoreClick = onSongMoreClick,
+                onDeleteSongClick = { song ->
+                    onRemoveSongFromPlaylist(subScreen.playlist, song)
+                },
                 modifier = modifier
             )
         }
@@ -258,6 +263,9 @@ fun LibraryScreen(
                 onBack = { onNavigateSubScreen(LibrarySubScreen.SpotifyPlaylists) },
                 onSongClick = onSongClick,
                 onSongMoreClick = onSongMoreClick,
+                onDeleteSongClick = { song ->
+                    onRemoveSongFromSpotifyPlaylist(subScreen.playlist, song)
+                },
                 modifier = modifier
             )
         }
@@ -598,6 +606,7 @@ private fun LibrarySongCollectionView(
     onBack: () -> Unit,
     onSongClick: (Song, List<Song>) -> Unit,
     onSongMoreClick: (Song) -> Unit,
+    onDeleteSongClick: ((Song) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     Column(
@@ -753,7 +762,12 @@ private fun LibrarySongCollectionView(
                         isCurrentSong = currentSong?.id == song.id,
                         isPlaying = isPlaying,
                         onSongClick = { onSongClick(song, songs) },
-                        onMoreClick = { onSongMoreClick(song) }
+                        onMoreClick = { onSongMoreClick(song) },
+                        onDeleteClick = if (onDeleteSongClick != null) {
+                            { onDeleteSongClick(song) }
+                        } else {
+                            null
+                        }
                     )
                 }
                 item {

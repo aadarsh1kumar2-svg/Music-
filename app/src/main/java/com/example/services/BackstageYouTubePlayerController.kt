@@ -193,7 +193,7 @@ class BackstageYouTubePlayerController(
             } catch (_: Exception) {
             }
             if (currentLoadedVideoId.isNotBlank() && !hasFiredEndedForCurrentTrack) {
-                mainHandler.postDelayed(this, 850L)
+                mainHandler.postDelayed(this, 600L)
             }
         }
     }
@@ -519,14 +519,34 @@ class BackstageYouTubePlayerController(
                             !hasSeenValidStartForCurrentToken &&
                             !isUserPaused
                         ) {
-                            view.loadUrl(watchUrl)
+                            view.evaluateJavascript(
+                                """
+                                (function() {
+                                    var v = document.querySelector('video');
+                                    if (v && (v.readyState >= 2 || (!v.paused && v.currentTime > 0) || (v.src && v.src.length > 0))) {
+                                        try { v.play(); } catch(e) {}
+                                        return 'BUFFERING_OK';
+                                    }
+                                    return 'NEEDS_RELOAD';
+                                })();
+                                """.trimIndent()
+                            ) { checkRes ->
+                                if (checkRes?.contains("NEEDS_RELOAD") == true &&
+                                    token == currentLoadToken &&
+                                    currentLoadedVideoId == cleanId &&
+                                    !hasSeenValidStartForCurrentToken &&
+                                    !isUserPaused
+                                ) {
+                                    view.loadUrl(watchUrl)
+                                }
+                            }
                         }
                     }
                     fallbackUrlReloadRunnable = fallbackRunnable
-                    mainHandler.postDelayed(fallbackRunnable, 2200L)
+                    mainHandler.postDelayed(fallbackRunnable, 6000L)
                 }
             }
-            mainHandler.postDelayed(nativeHeartbeatRunnable, 60L)
+            mainHandler.postDelayed(nativeHeartbeatRunnable, 30L)
         }
     }
 

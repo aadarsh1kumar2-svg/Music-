@@ -298,11 +298,21 @@ class AudioStreamExtractor {
         }
     }
 
+    private val resolvedVideoIdCache = ConcurrentHashMap<String, String>()
+
     suspend fun findPlayableVideoIdForSong(song: Song): String? = withContext(Dispatchers.IO) {
         val q = "${song.title} ${song.artist}".trim()
         if (q.isBlank()) return@withContext null
+        val cacheKey = q.lowercase()
+        resolvedVideoIdCache[cacheKey]?.takeIf { it.isNotBlank() && it != song.cleanVideoId }?.let {
+            return@withContext it
+        }
         val ids = searchPlayableVideoIds("$q official audio")
-        ids.firstOrNull { it != song.cleanVideoId } ?: ids.firstOrNull()
+        val picked = ids.firstOrNull { it != song.cleanVideoId } ?: ids.firstOrNull()
+        if (!picked.isNullOrBlank()) {
+            resolvedVideoIdCache[cacheKey] = picked
+        }
+        picked
     }
 
     suspend fun extractBestAudioStream(

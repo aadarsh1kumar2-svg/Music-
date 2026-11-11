@@ -232,6 +232,9 @@ interface MusicLibraryDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun addSongToSpotifyPlaylist(entry: SpotifyPlaylistSongEntity)
 
+    @Query("DELETE FROM spotify_playlist_songs WHERE spotifyPlaylistId = :spotifyPlaylistId AND songId = :songId")
+    suspend fun removeSongFromSpotifyPlaylist(spotifyPlaylistId: Long, songId: String)
+
     @Query("UPDATE spotify_playlist_songs SET videoId = :videoId, bannerUrl = :bannerUrl WHERE songId = :songId")
     suspend fun updateSpotifyPlaylistSongVideoId(songId: String, videoId: String, bannerUrl: String)
 

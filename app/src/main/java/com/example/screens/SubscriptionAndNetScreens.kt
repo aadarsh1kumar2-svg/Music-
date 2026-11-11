@@ -1107,9 +1107,14 @@ fun SubscriptionPlansDialog(
                             subtitle = "Luxury golden designer profile on Home & Drawer"
                         )
                         BenefitRow(
+                            emoji = "☁️",
+                            title = "Permanent Cloud Data Save (Only for VIP Users)",
+                            subtitle = "Free user ka koi bhi data save nahi hota — Only Premium VIP users ka playlist & library data save rehta hai"
+                        )
+                        BenefitRow(
                             emoji = "📂",
-                            title = "Unlimited Custom Playlists + Cloud Backup",
-                            subtitle = "Auto-saved to your account & restored anytime you login"
+                            title = "Unlimited Aadify & Spotify Playlists (Add / Delete Songs)",
+                            subtitle = "Add or delete individual songs in both Aadify & Spotify playlists"
                         )
                         BenefitRow(
                             emoji = "🔗",

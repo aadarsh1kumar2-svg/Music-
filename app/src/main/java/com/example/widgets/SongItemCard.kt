@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MusicNote
@@ -45,6 +46,7 @@ import coil.compose.rememberAsyncImagePainter
 import coil.request.ImageRequest
 import com.example.models.Song
 import com.example.ui.theme.DeepCharcoal
+import com.example.ui.theme.ErrorRed
 import com.example.ui.theme.MutedGray
 import com.example.ui.theme.PrimaryWhite
 import com.example.ui.theme.SpotifyVibrantGreen
@@ -151,7 +153,8 @@ fun SongListRow(
     onMoreClick: () -> Unit,
     modifier: Modifier = Modifier,
     rankNumber: Int? = null,
-    subtitlePrefix: String = "Song • "
+    subtitlePrefix: String = "Song • ",
+    onDeleteClick: (() -> Unit)? = null
 ) {
     Row(
         modifier = modifier
@@ -219,6 +222,21 @@ fun SongListRow(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
+        }
+
+        if (onDeleteClick != null) {
+            IconButton(
+                onClick = onDeleteClick,
+                modifier = Modifier
+                    .size(44.dp)
+                    .testTag("song_delete_${song.id}")
+            ) {
+                Icon(
+                    imageVector = Icons.Default.DeleteOutline,
+                    contentDescription = "Delete Song from Playlist",
+                    tint = ErrorRed
+                )
+            }
         }
 
         IconButton(

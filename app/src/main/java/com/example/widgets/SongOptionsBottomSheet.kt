@@ -3,6 +3,7 @@ package com.example.widgets
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -22,6 +23,7 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Album
+import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.SmartDisplay
@@ -59,10 +61,13 @@ import androidx.compose.ui.unit.sp
 import com.example.R
 import com.example.models.PlaylistEntity
 import com.example.models.Song
+import com.example.models.SpotifyPlaylistEntity
 import com.example.ui.theme.DeepCharcoal
 import com.example.ui.theme.DividerDark
 import com.example.ui.theme.ErrorRed
 import com.example.ui.theme.MutedGray
+import com.example.ui.theme.SpotifyDarkGreenPill
+import com.example.ui.theme.SpotifyGreenBorder
 import com.example.ui.theme.PrimaryWhite
 import com.example.ui.theme.PureBlack
 import com.example.ui.theme.SpotifyVibrantGreen
@@ -327,11 +332,18 @@ fun SleepTimerDialog(
 fun AddToPlaylistDialog(
     song: Song,
     playlists: List<PlaylistEntity>,
+    spotifyPlaylists: List<SpotifyPlaylistEntity> = emptyList(),
     onCreateAndAdd: (String, Song) -> Unit,
     onAddToExisting: (PlaylistEntity, Song) -> Unit,
+    onCreateAndAddSpotify: (String, Song) -> Unit = { _, _ -> },
+    onAddToExistingSpotify: (SpotifyPlaylistEntity, Song) -> Unit = { _, _ -> },
     onDismiss: () -> Unit
 ) {
     var newPlaylistName by remember { mutableStateOf("") }
+    // false = Aadify Playlist, true = Spotify Playlist
+    var isSpotifyCategorySelected by remember {
+        mutableStateOf(playlists.isEmpty() && spotifyPlaylists.isNotEmpty())
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -339,7 +351,10 @@ fun AddToPlaylistDialog(
         title = {
             Text(
                 text = "Add to Playlist",
-                style = MaterialTheme.typography.headlineMedium.copy(color = PrimaryWhite)
+                style = MaterialTheme.typography.headlineMedium.copy(
+                    color = PrimaryWhite,
+                    fontWeight = FontWeight.Bold
+                )
             )
         },
         text = {
@@ -349,10 +364,75 @@ fun AddToPlaylistDialog(
             ) {
                 Text(
                     text = song.title,
-                    style = MaterialTheme.typography.bodyMedium.copy(color = SpotifyVibrantGreen),
+                    style = MaterialTheme.typography.bodyMedium.copy(
+                        color = SpotifyVibrantGreen,
+                        fontWeight = FontWeight.SemiBold
+                    ),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
+
+                // Top 2-Option Selector: "Aadify Playlist" vs "Spotify Playlist"
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    val aadifySelected = !isSpotifyCategorySelected
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (aadifySelected) SpotifyVibrantGreen else DeepCharcoal)
+                            .border(
+                                width = 1.dp,
+                                color = if (aadifySelected) SpotifyVibrantGreen else SpotifyGreenBorder.copy(alpha = 0.5f),
+                                shape = RoundedCornerShape(12.dp)
+                            )
+                            .clickable { isSpotifyCategorySelected = false }
+                            .padding(vertical = 10.dp, horizontal = 8.dp)
+                            .testTag("select_aadify_playlist_tab"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "🎵 Aadify Playlist (${playlists.size})",
+                            style = MaterialTheme.typography.labelLarge.copy(
+                                color = if (aadifySelected) PureBlack else PrimaryWhite,
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 12.sp
+                            ),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    val spotifySelected = isSpotifyCategorySelected
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (spotifySelected) SpotifyVibrantGreen else DeepCharcoal)
+                            .border(
+                                width = 1.dp,
+                                color = if (spotifySelected) SpotifyVibrantGreen else SpotifyGreenBorder.copy(alpha = 0.5f),
+                                shape = RoundedCornerShape(12.dp)
+                            )
+                            .clickable { isSpotifyCategorySelected = true }
+                            .padding(vertical = 10.dp, horizontal = 8.dp)
+                            .testTag("select_spotify_playlist_tab"),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "🟢 Spotify Playlist (${spotifyPlaylists.size})",
+                            style = MaterialTheme.typography.labelLarge.copy(
+                                color = if (spotifySelected) PureBlack else PrimaryWhite,
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 12.sp
+                            ),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
 
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -361,7 +441,16 @@ fun AddToPlaylistDialog(
                     OutlinedTextField(
                         value = newPlaylistName,
                         onValueChange = { newPlaylistName = it },
-                        placeholder = { Text("New playlist name", color = MutedGray) },
+                        placeholder = {
+                            Text(
+                                text = if (isSpotifyCategorySelected) {
+                                    "New Spotify playlist name"
+                                } else {
+                                    "New Aadify playlist name"
+                                },
+                                color = MutedGray
+                            )
+                        },
                         singleLine = true,
                         modifier = Modifier.weight(1f),
                         colors = OutlinedTextFieldDefaults.colors(
@@ -374,7 +463,11 @@ fun AddToPlaylistDialog(
                     Button(
                         onClick = {
                             if (newPlaylistName.isNotBlank()) {
-                                onCreateAndAdd(newPlaylistName, song)
+                                if (isSpotifyCategorySelected) {
+                                    onCreateAndAddSpotify(newPlaylistName, song)
+                                } else {
+                                    onCreateAndAdd(newPlaylistName, song)
+                                }
                                 onDismiss()
                             }
                         },
@@ -387,49 +480,112 @@ fun AddToPlaylistDialog(
                     }
                 }
 
-                if (playlists.isNotEmpty()) {
-                    Text(
-                        text = "Tap any playlist to add song:",
-                        style = MaterialTheme.typography.labelLarge.copy(color = MutedGray)
-                    )
-                    LazyColumn(
-                        modifier = Modifier.height(200.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        items(playlists, key = { it.playlistId }) { playlist ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .background(DeepCharcoal)
-                                    .clickable {
-                                        onAddToExisting(playlist, song)
-                                        onDismiss()
-                                    }
-                                    .padding(horizontal = 14.dp, vertical = 12.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(
-                                    imageVector = Icons.AutoMirrored.Filled.PlaylistAdd,
-                                    contentDescription = null,
-                                    tint = SpotifyVibrantGreen
-                                )
-                                Spacer(modifier = Modifier.width(12.dp))
-                                Text(
-                                    text = playlist.name,
-                                    style = MaterialTheme.typography.bodyLarge.copy(
-                                        color = PrimaryWhite,
-                                        fontWeight = FontWeight.SemiBold
+                if (!isSpotifyCategorySelected) {
+                    if (playlists.isNotEmpty()) {
+                        Text(
+                            text = "Select Aadify Playlist to add song:",
+                            style = MaterialTheme.typography.labelLarge.copy(color = MutedGray)
+                        )
+                        LazyColumn(
+                            modifier = Modifier.height(210.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            items(playlists, key = { it.playlistId }) { playlist ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(DeepCharcoal)
+                                        .border(
+                                            width = 0.8.dp,
+                                            color = SpotifyGreenBorder.copy(alpha = 0.4f),
+                                            shape = RoundedCornerShape(10.dp)
+                                        )
+                                        .clickable {
+                                            onAddToExisting(playlist, song)
+                                            onDismiss()
+                                        }
+                                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Filled.PlaylistAdd,
+                                        contentDescription = null,
+                                        tint = SpotifyVibrantGreen
                                     )
-                                )
+                                    Spacer(modifier = Modifier.width(12.dp))
+                                    Text(
+                                        text = playlist.name,
+                                        style = MaterialTheme.typography.bodyLarge.copy(
+                                            color = PrimaryWhite,
+                                            fontWeight = FontWeight.SemiBold
+                                        ),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
                             }
                         }
+                    } else {
+                        Text(
+                            text = "Koi Aadify Playlist nahi hai. Upar naam daalkar + dabayein ya Spotify Playlist tab select karein!",
+                            style = MaterialTheme.typography.bodyMedium.copy(color = MutedGray)
+                        )
                     }
                 } else {
-                    Text(
-                        text = "No playlists yet. Enter a name above and tap + to create your first playlist!",
-                        style = MaterialTheme.typography.bodyMedium.copy(color = MutedGray)
-                    )
+                    if (spotifyPlaylists.isNotEmpty()) {
+                        Text(
+                            text = "Select Spotify Playlist to add song:",
+                            style = MaterialTheme.typography.labelLarge.copy(color = MutedGray)
+                        )
+                        LazyColumn(
+                            modifier = Modifier.height(210.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            items(spotifyPlaylists, key = { it.spotifyPlaylistId }) { spPlaylist ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(DeepCharcoal)
+                                        .border(
+                                            width = 0.8.dp,
+                                            color = SpotifyGreenBorder.copy(alpha = 0.4f),
+                                            shape = RoundedCornerShape(10.dp)
+                                        )
+                                        .clickable {
+                                            onAddToExistingSpotify(spPlaylist, song)
+                                            onDismiss()
+                                        }
+                                        .padding(horizontal = 14.dp, vertical = 12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.CloudDownload,
+                                        contentDescription = null,
+                                        tint = SpotifyVibrantGreen
+                                    )
+                                    Spacer(modifier = Modifier.width(12.dp))
+                                    Text(
+                                        text = spPlaylist.name,
+                                        style = MaterialTheme.typography.bodyLarge.copy(
+                                            color = PrimaryWhite,
+                                            fontWeight = FontWeight.SemiBold
+                                        ),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                }
+                            }
+                        }
+                    } else {
+                        Text(
+                            text = "Koi Spotify Playlist nahi hai. Upar naam daalkar + dabayein ya Library -> Spotify Playlists se import karein!",
+                            style = MaterialTheme.typography.bodyMedium.copy(color = MutedGray)
+                        )
+                    }
                 }
             }
         },

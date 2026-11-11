@@ -263,8 +263,13 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
                     updateSubscriptionAndCrazyDealTimers()
                     firebaseService.resetAdminDeletionFlagForFreshLogin()
-                    // Restore any existing Playlists, Spotify Playlists, and Favorites from cloud BEFORE syncing so login never deletes old playlists!
-                    restoreUserPlaylistsFromCloud(authRes.userId, authRes.userName)
+                    // Only Premium VIP users get permanent Cloud Data Save & Restore!
+                    // Free users' playlist/library data is not saved.
+                    if (_subscriptionState.value.isActive(now)) {
+                        restoreUserPlaylistsFromCloud(authRes.userId, authRes.userName)
+                    } else {
+                        clearLocalLibraryDataForFreeUser()
+                    }
                     syncCurrentUserDataToAdminCloud(isExplicitLogin = true)
                     syncCurrentUserTimeUsageToAdminCloud()
 
@@ -993,6 +998,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     if (isNewOrChanged) {
                         saveSubscriptionStateLocally(cloudVipState)
                         _isDailyLimitReachedModalOpen.value = false
+                        val currentName = _userName.value.trim()
+                        if (currentName.isNotEmpty()) {
+                            val uid = getOrCreateCloudUserId(currentName)
+                            restoreUserPlaylistsFromCloud(uid, currentName)
+                            syncCurrentUserDataToAdminCloud(isExplicitLogin = false)
+                        }
                         emitSnackbar("👑 VIP Activated (${cloudVipState.planType.displayName})!")
                     }
                 } else if (current.isActive()) {
@@ -1058,12 +1069,14 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        // Initial cloud restore & sync if user is already logged in with their name:
+        // Initial cloud restore & sync if user is already logged in with their name (Cloud Data Save is ONLY for VIP users):
         if (_userName.value.isNotBlank()) {
             viewModelScope.launch {
                 val currentName = _userName.value.trim()
                 val uid = getOrCreateCloudUserId(currentName)
-                restoreUserPlaylistsFromCloud(uid, currentName)
+                if (_subscriptionState.value.isActive()) {
+                    restoreUserPlaylistsFromCloud(uid, currentName)
+                }
                 syncCurrentUserDataToAdminCloud(isExplicitLogin = false)
             }
         }
@@ -1170,6 +1183,24 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                             }
                         } else {
                             repairedSongIds.add(songEntity.songId)
+                        }
+
+                        // Step C: Pre-resolve playable YouTube videoId in the background so tapping the song starts in 0ms!
+                        if (songEntity.videoId.isBlank()) {
+                            val resolvedVid = audioExtractor.findPlayableVideoIdForSong(songEntity.toSong()).orEmpty()
+                            if (resolvedVid.isNotBlank()) {
+                                val updatedBanner = songEntity.bannerUrl.ifBlank {
+                                    "https://i.ytimg.com/vi/$resolvedVid/hqdefault.jpg"
+                                }
+                                try {
+                                    libraryDao.updateSpotifyPlaylistSongVideoId(
+                                        songId = songEntity.songId,
+                                        videoId = resolvedVid,
+                                        bannerUrl = updatedBanner
+                                    )
+                                } catch (_: Exception) {
+                                }
+                            }
                         }
                     }
                 }
@@ -1429,11 +1460,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             firebaseService.syncSongHistoryToCloud(userId, historyJsonArray)
         }
 
-        // Also back up full custom Playlists, Spotify Playlists (with original Spotify cover + individual song covers),
-        // and Favorites to `/userPlaylistsBackup/{userId}` whenever local data is present so login never loses playlists!
+        // Permanent Cloud Data Save is EXCLUSIVELY for Premium VIP users (`isSubActive == true`).
+        // Free users' playlists & favorites are NOT backed up to `/userPlaylistsBackup/{userId}`!
         val spLists = spotifyPlaylists.value
         val spSongsList = allSpotifyPlaylistSongs.value
-        if (!isRestoringCloudPlaylists && (playlistList.isNotEmpty() || spLists.isNotEmpty() || favList.isNotEmpty())) {
+        if (isSubActive && !isRestoringCloudPlaylists && (playlistList.isNotEmpty() || spLists.isNotEmpty() || favList.isNotEmpty())) {
             val customPlaylistsBackupArr = JSONArray()
             for (pl in playlistList) {
                 val songsInPl = playlistSongsList
@@ -1522,14 +1553,35 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private suspend fun clearLocalLibraryDataForFreeUser() {
+        try {
+            val currentPls = playlists.value
+            for (pl in currentPls) {
+                libraryDao.deleteAllSongsInPlaylist(pl.playlistId)
+                libraryDao.deletePlaylist(pl.playlistId)
+            }
+            val currentSpPls = spotifyPlaylists.value
+            for (sp in currentSpPls) {
+                libraryDao.deleteAllSongsInSpotifyPlaylist(sp.spotifyPlaylistId)
+                libraryDao.deleteSpotifyPlaylist(sp.spotifyPlaylistId)
+            }
+            val currentFavs = favoriteEntities.value
+            for (fav in currentFavs) {
+                libraryDao.removeFavorite(fav.id)
+            }
+        } catch (_: Exception) {
+        }
+    }
+
     @Volatile
     private var isRestoringCloudPlaylists: Boolean = false
 
     /**
-     * Restores and merges the user's Playlists, Spotify Playlists (with original Spotify coverUrl),
-     * and Favorites from Firebase when the user logs in, without ever deleting local playlists!
+     * Restores and merges the VIP user's Playlists, Spotify Playlists (with original Spotify coverUrl),
+     * and Favorites from Firebase when a Premium VIP user logs in!
      */
     private suspend fun restoreUserPlaylistsFromCloud(userId: String, userName: String) {
+        if (!_subscriptionState.value.isActive()) return
         if (isRestoringCloudPlaylists) return
         isRestoringCloudPlaylists = true
         try {
@@ -2118,7 +2170,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
 
-            // 3. Resolve playable YouTube Video ID (even if a legacy history/library or imported Spotify row had a blank videoId)
+            // 3. Resolve playable YouTube Video ID (fast in-memory / catalog lookup first, then InnerTube VR search)
             var playableVideoId = song.cleanVideoId
             var activeSongToPlay = song
             if (playableVideoId.isBlank()) {
@@ -2129,38 +2181,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 if (playableVideoId.isBlank()) {
                     playableVideoId = audioExtractor.findPlayableVideoIdForSong(song).orEmpty()
                 }
-                if (playableVideoId.isNotBlank() && song.id.startsWith("spotify_")) {
-                    val isPlaylistCoverUsed = spotifyPlaylists.value.any {
-                        it.coverUrl.isNotBlank() && it.coverUrl == song.bannerUrl &&
-                            allSpotifyPlaylistSongs.value.count { s -> s.spotifyPlaylistId == it.spotifyPlaylistId } > 1
+                if (playableVideoId.isNotBlank()) {
+                    val fastFallbackBanner = song.bannerUrl.ifBlank {
+                        "https://i.ytimg.com/vi/$playableVideoId/hqdefault.jpg"
                     }
-                    val individualCover = if (song.bannerUrl.isBlank() || isPlaylistCoverUsed) {
-                        spotifyImportService.resolveIndividualTrackCoverUrl(
-                            spotifyTrackId = "",
-                            title = song.title,
-                            artist = song.artist
-                        ).ifBlank { "https://i.ytimg.com/vi/$playableVideoId/hqdefault.jpg" }
-                    } else {
-                        song.bannerUrl
-                    }
-                    activeSongToPlay = song.copy(videoId = playableVideoId, bannerUrl = individualCover)
+                    activeSongToPlay = song.copy(videoId = playableVideoId, bannerUrl = fastFallbackBanner)
                     _currentSong.value = activeSongToPlay
-                    MusicPlaybackService.syncNowPlaying(
-                        context = appContext,
-                        song = activeSongToPlay,
-                        isPlaying = true,
-                        directStreamUri = null,
-                        playbackSpeed = _playbackSpeed.value,
-                        startPositionMs = resolvedStartMs
-                    )
-                    try {
-                        libraryDao.updateSpotifyPlaylistSongVideoId(
-                            songId = song.id,
-                            videoId = playableVideoId,
-                            bannerUrl = individualCover
-                        )
-                    } catch (_: Exception) {
-                    }
                 }
             }
 
@@ -2172,7 +2198,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 return@launch
             }
 
-            // 4. Primary Engine for ALL Admin & Online Songs:
+            // 4. Primary Engine for ALL Admin & Online Songs — Start playback IMMEDIATELY without waiting on cover art!
             val rawTarget = activeSongToPlay.videoId.trim()
             val isDirectAudioUrl = (rawTarget.startsWith("http://", ignoreCase = true) ||
                 rawTarget.startsWith("https://", ignoreCase = true)) &&
@@ -2195,6 +2221,69 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     songArtist = activeSongToPlay.artist,
                     artworkUrl = activeSongToPlay.highResBannerUrl
                 )
+            }
+
+            // 5. Non-blocking background cover hydration & upcoming queue videoId pre-fetching (0ms impact on playback start!)
+            val resolvedVidForAsync = playableVideoId
+            viewModelScope.launch(Dispatchers.IO) {
+                if (song.id.startsWith("spotify_")) {
+                    val isPlaylistCoverUsed = spotifyPlaylists.value.any {
+                        it.coverUrl.isNotBlank() && it.coverUrl == song.bannerUrl &&
+                            allSpotifyPlaylistSongs.value.count { s -> s.spotifyPlaylistId == it.spotifyPlaylistId } > 1
+                    }
+                    val individualCover = if (song.bannerUrl.isBlank() || isPlaylistCoverUsed) {
+                        spotifyImportService.resolveIndividualTrackCoverUrl(
+                            spotifyTrackId = "",
+                            title = song.title,
+                            artist = song.artist
+                        ).ifBlank { "https://i.ytimg.com/vi/$resolvedVidForAsync/hqdefault.jpg" }
+                    } else {
+                        song.bannerUrl
+                    }
+                    try {
+                        libraryDao.updateSpotifyPlaylistSongVideoId(
+                            songId = song.id,
+                            videoId = resolvedVidForAsync,
+                            bannerUrl = individualCover
+                        )
+                    } catch (_: Exception) {
+                    }
+                    if (_currentSong.value?.id == song.id && individualCover.isNotBlank() && individualCover != _currentSong.value?.bannerUrl) {
+                        val updatedSong = activeSongToPlay.copy(videoId = resolvedVidForAsync, bannerUrl = individualCover)
+                        _currentSong.value = updatedSong
+                        MusicPlaybackService.syncNowPlaying(
+                            context = appContext,
+                            song = updatedSong,
+                            isPlaying = _isPlaying.value,
+                            directStreamUri = null,
+                            playbackSpeed = _playbackSpeed.value,
+                            startPositionMs = _currentPositionMs.value
+                        )
+                    }
+                }
+
+                // Pre-resolve videoIds for the next 3 tracks in the queue so skipping to next song is instant!
+                val currentIdx = resolvedQueue.indexOfFirst { it.id == song.id }
+                if (currentIdx >= 0) {
+                    val upcoming = resolvedQueue.drop(currentIdx + 1).take(3)
+                    for (nextTrack in upcoming) {
+                        if (nextTrack.cleanVideoId.isBlank() && nextTrack.resolvedLocalUri.isBlank()) {
+                            val nextVid = audioExtractor.findPlayableVideoIdForSong(nextTrack).orEmpty()
+                            if (nextVid.isNotBlank() && nextTrack.id.startsWith("spotify_")) {
+                                try {
+                                    libraryDao.updateSpotifyPlaylistSongVideoId(
+                                        songId = nextTrack.id,
+                                        videoId = nextVid,
+                                        bannerUrl = nextTrack.bannerUrl.ifBlank {
+                                            "https://i.ytimg.com/vi/$nextVid/hqdefault.jpg"
+                                        }
+                                    )
+                                } catch (_: Exception) {
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -2601,7 +2690,74 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     localContentUri = song.resolvedLocalUri
                 )
             )
-            emitSnackbar("Added \"${song.title}\" to ${playlist.name}")
+            emitSnackbar("Added \"${song.title}\" to Aadify playlist \"${playlist.name}\" 🎵")
+        }
+    }
+
+    fun removeSongFromPlaylist(playlist: PlaylistEntity, song: Song) {
+        viewModelScope.launch {
+            libraryDao.removeSongFromPlaylist(playlist.playlistId, song.id)
+            emitSnackbar("Removed \"${song.title}\" from \"${playlist.name}\"")
+        }
+    }
+
+    fun createNewSpotifyPlaylist(name: String, initialSong: Song? = null) {
+        if (!_subscriptionState.value.isActive()) {
+            emitSnackbar("👑 Spotify Playlists VIP users ke liye hai! Subscription lein.")
+            _isSubscriptionModalOpen.value = true
+            return
+        }
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return
+        viewModelScope.launch {
+            val cover = initialSong?.highResBannerUrl.orEmpty()
+            val newId = libraryDao.createSpotifyPlaylist(
+                SpotifyPlaylistEntity(
+                    name = trimmed,
+                    coverUrl = cover,
+                    spotifyUrl = ""
+                )
+            )
+            if (initialSong != null) {
+                libraryDao.addSongToSpotifyPlaylist(
+                    SpotifyPlaylistSongEntity(
+                        spotifyPlaylistId = newId,
+                        songId = initialSong.id,
+                        title = initialSong.title,
+                        artist = initialSong.artist,
+                        videoId = initialSong.videoId,
+                        bannerUrl = initialSong.bannerUrl.ifBlank { initialSong.highResBannerUrl },
+                        timestamp = initialSong.timestamp
+                    )
+                )
+                emitSnackbar("Created Spotify playlist \"$trimmed\" and added \"${initialSong.title}\" 🟢")
+            } else {
+                emitSnackbar("Spotify playlist \"$trimmed\" created")
+            }
+        }
+    }
+
+    fun addSongToExistingSpotifyPlaylist(playlist: SpotifyPlaylistEntity, song: Song) {
+        viewModelScope.launch {
+            libraryDao.addSongToSpotifyPlaylist(
+                SpotifyPlaylistSongEntity(
+                    spotifyPlaylistId = playlist.spotifyPlaylistId,
+                    songId = song.id,
+                    title = song.title,
+                    artist = song.artist,
+                    videoId = song.videoId,
+                    bannerUrl = song.bannerUrl.ifBlank { song.highResBannerUrl },
+                    timestamp = song.timestamp
+                )
+            )
+            emitSnackbar("Added \"${song.title}\" to Spotify playlist \"${playlist.name}\" 🟢")
+        }
+    }
+
+    fun removeSongFromSpotifyPlaylist(playlist: SpotifyPlaylistEntity, song: Song) {
+        viewModelScope.launch {
+            libraryDao.removeSongFromSpotifyPlaylist(playlist.spotifyPlaylistId, song.id)
+            emitSnackbar("Removed \"${song.title}\" from Spotify playlist \"${playlist.name}\"")
         }
     }
 
@@ -3347,8 +3503,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             while (isActive && _isFamGatewayCheckoutOpen.value && !_isPaymentVerifiedSuccess.value &&
                 (System.currentTimeMillis() - startTimeMs) < maxPollDurationMs
             ) {
-                // Fast real-time polling: 800ms once user clicked "I Have Paid", 1400ms otherwise
-                val intervalMs = if (_isUserClickedIHavePaid.value) 800L else 1400L
+                // Fast real-time polling: 650ms once user clicked "I Have Paid", 1100ms otherwise
+                val intervalMs = if (_isUserClickedIHavePaid.value) 650L else 1100L
                 delay(intervalMs)
                 if (!_isFamGatewayCheckoutOpen.value || _isPaymentVerifiedSuccess.value) break
 

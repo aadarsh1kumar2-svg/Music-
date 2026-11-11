@@ -1033,6 +1033,9 @@ fun AKMusicAppRoot(
                                         onSongMoreClick = { musicViewModel.openSongOptions(it) },
                                         onCreatePlaylist = { musicViewModel.createNewPlaylist(it) },
                                         onDeletePlaylist = { musicViewModel.deletePlaylist(it) },
+                                        onRemoveSongFromPlaylist = { playlist, song ->
+                                            musicViewModel.removeSongFromPlaylist(playlist, song)
+                                        },
                                         onImportSpotifyPlaylist = { link ->
                                             musicViewModel.importSpotifyPlaylistOrSong(link)
                                         },
@@ -1045,6 +1048,9 @@ fun AKMusicAppRoot(
                                         },
                                         onDeleteSpotifyPlaylist = { spPlaylist ->
                                             musicViewModel.deleteSpotifyPlaylist(spPlaylist)
+                                        },
+                                        onRemoveSongFromSpotifyPlaylist = { spPlaylist, song ->
+                                            musicViewModel.removeSongFromSpotifyPlaylist(spPlaylist, song)
                                         },
                                         onSharePlaylist = { playlistName, songsToShare ->
                                             musicViewModel.sharePlaylistViaShortLink(
@@ -1157,17 +1163,24 @@ fun AKMusicAppRoot(
             )
         }
 
-        // Add to Playlist Dialog
+        // Add to Playlist Dialog (Supports BOTH Aadify Playlists and Spotify Playlists!)
         val targetPlaylistSong = playlistPickerSong
         if (targetPlaylistSong != null) {
             AddToPlaylistDialog(
                 song = targetPlaylistSong,
                 playlists = playlists,
+                spotifyPlaylists = spotifyPlaylists,
                 onCreateAndAdd = { name, song ->
                     musicViewModel.createNewPlaylist(name, song)
                 },
                 onAddToExisting = { playlist, song ->
                     musicViewModel.addSongToExistingPlaylist(playlist, song)
+                },
+                onCreateAndAddSpotify = { name, song ->
+                    musicViewModel.createNewSpotifyPlaylist(name, song)
+                },
+                onAddToExistingSpotify = { spPlaylist, song ->
+                    musicViewModel.addSongToExistingSpotifyPlaylist(spPlaylist, song)
                 },
                 onDismiss = { musicViewModel.closePlaylistPicker() }
             )
