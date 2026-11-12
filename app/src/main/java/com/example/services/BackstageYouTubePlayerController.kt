@@ -262,7 +262,8 @@ class BackstageYouTubePlayerController(
                     view: WebView?,
                     request: WebResourceRequest?
                 ): WebResourceResponse? {
-                    val reqUrl = request?.url?.toString()?.lowercase(Locale.US) ?: return null
+                    val rawUrl = request?.url?.toString() ?: return null
+                    val reqUrl = rawUrl.lowercase(Locale.US)
                     if (reqUrl.contains("doubleclick.net") ||
                         reqUrl.contains("googlesyndication.com") ||
                         reqUrl.contains("googleadservices.com") ||
@@ -279,6 +280,45 @@ class BackstageYouTubePlayerController(
                             ByteArrayInputStream(ByteArray(0))
                         )
                     }
+
+                    // Capture exact signed googlevideo stream for the currently loaded videoId so downloading
+                    // this song saves 100% the exact same audio stream from the user's YouTube link!
+                    val targetVid = currentLoadedVideoId
+                    if (targetVid.length == 11 &&
+                        reqUrl.contains("googlevideo.com/videoplayback") &&
+                        (reqUrl.contains("mime=audio") ||
+                            reqUrl.contains("mime%3daudio") ||
+                            reqUrl.contains("itag=140") ||
+                            reqUrl.contains("itag=139") ||
+                            reqUrl.contains("itag=249") ||
+                            reqUrl.contains("itag=250") ||
+                            reqUrl.contains("itag=251") ||
+                            reqUrl.contains("itag=18"))
+                    ) {
+                        try {
+                            val cleanStreamUrl = rawUrl
+                                .replace(Regex("&range=[^&]*"), "")
+                                .replace(Regex("&rn=[^&]*"), "")
+                                .replace(Regex("&rbuf=[^&]*"), "")
+                                .replace(Regex("&ump=[^&]*"), "")
+                                .replace(Regex("&srfvp=[^&]*"), "")
+                            val ua = request.requestHeaders?.get("User-Agent")
+                                ?: "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+                            val cookie = try {
+                                CookieManager.getInstance().getCookie(rawUrl).orEmpty()
+                            } catch (_: Exception) {
+                                ""
+                            }
+                            AudioStreamExtractor.registerWebViewCapturedStream(
+                                videoId = targetVid,
+                                streamUrl = cleanStreamUrl,
+                                userAgent = ua,
+                                cookie = cookie
+                            )
+                        } catch (_: Exception) {
+                        }
+                    }
+
                     return super.shouldInterceptRequest(view, request)
                 }
 
@@ -305,6 +345,18 @@ class BackstageYouTubePlayerController(
                     val targetId = currentLoadedVideoId
                     val token = currentLoadToken
                     if (targetId.isBlank()) return
+                    val currentUrl = url.orEmpty()
+                    if (currentUrl.contains("youtube.com/watch", ignoreCase = true) ||
+                        currentUrl.contains("youtu.be/", ignoreCase = true) ||
+                        currentUrl.contains("youtube.com/shorts/", ignoreCase = true)
+                    ) {
+                        val navVid = Song.extractYoutubeVideoId(currentUrl)
+                        if (navVid.length == 11 && navVid != targetId) {
+                            // Block SPA navigation to a different video! Force back to targetId immediately.
+                            view?.loadUrl("https://m.youtube.com/watch?v=$targetId&autoplay=1")
+                            return
+                        }
+                    }
                     injectVideoBridgeScript(token, targetId)
                 }
 
@@ -313,6 +365,18 @@ class BackstageYouTubePlayerController(
                     request: WebResourceRequest?
                 ): Boolean {
                     val reqUrl = request?.url?.toString() ?: return false
+                    val targetId = currentLoadedVideoId
+                    if (targetId.length == 11 &&
+                        (reqUrl.contains("youtube.com/watch", ignoreCase = true) ||
+                            reqUrl.contains("youtu.be/", ignoreCase = true) ||
+                            reqUrl.contains("youtube.com/shorts/", ignoreCase = true))
+                    ) {
+                        val navVid = Song.extractYoutubeVideoId(reqUrl)
+                        if (navVid.isNotBlank() && navVid != targetId) {
+                            // Never allow YouTube to redirect or auto-advance to a different videoId!
+                            return true
+                        }
+                    }
                     return !(reqUrl.contains("youtube.com") ||
                             reqUrl.contains("youtu.be") ||
                             reqUrl.contains("google.com") ||
@@ -1487,6 +1551,20 @@ class BackstageYouTubePlayerController(
                         }
 
                         if (!isCurrentVideoMatchingTarget()) {
+                            if (v && !v.paused) {
+                                try { v.pause(); } catch (e) {}
+                            }
+                            var hrefNow = window.location.href || '';
+                            if (window.__akTargetVideoId &&
+                                hrefNow.indexOf('watch?v=') !== -1 &&
+                                hrefNow.indexOf(window.__akTargetVideoId) === -1
+                            ) {
+                                var nowMs = Date.now();
+                                if (!window.__akLastForceRedirectMs || (nowMs - window.__akLastForceRedirectMs) > 2500) {
+                                    window.__akLastForceRedirectMs = nowMs;
+                                    window.location.replace('https://m.youtube.com/watch?v=' + window.__akTargetVideoId + '&autoplay=1');
+                                }
+                            }
                             return;
                         }
 

@@ -666,8 +666,21 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 viewModelScope.launch {
                     if (!hasRetriedCurrentTrack) {
                         hasRetriedCurrentTrack = true
+                        // CRITICAL: If the song has an explicit YouTube link (cleanVideoId),
+                        // NEVER replace it with a search result! Retry the exact same link.
+                        val exactVid = active.cleanVideoId
+                        if (exactVid.isNotBlank()) {
+                            backstagePlayer.loadVideoById(
+                                rawVideoId = exactVid,
+                                startSeconds = 0.0,
+                                songTitle = active.title,
+                                songArtist = active.artist,
+                                artworkUrl = active.highResBannerUrl
+                            )
+                            return@launch
+                        }
                         val altVideoId = audioExtractor.findPlayableVideoIdForSong(active)
-                        if (!altVideoId.isNullOrBlank() && altVideoId != active.cleanVideoId) {
+                        if (!altVideoId.isNullOrBlank()) {
                             backstagePlayer.loadVideoById(
                                 rawVideoId = altVideoId,
                                 startSeconds = 0.0,
@@ -888,6 +901,26 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private var hasRetriedCurrentTrack = false
 
     init {
+        // One-time cleanup of any legacy mismatched title-only downloads so every song plays its exact link
+        if (!prefs.getBoolean("purged_mismatched_downloads_v3", false)) {
+            prefs.edit().putBoolean("purged_mismatched_downloads_v3", true).apply()
+            viewModelScope.launch(Dispatchers.IO) {
+                try {
+                    val offlineDir = File(appContext.filesDir, "offline_music")
+                    offlineDir.listFiles()?.forEach { file ->
+                        try {
+                            file.delete()
+                        } catch (_: Exception) {
+                        }
+                    }
+                    delay(600L)
+                    for (item in downloadedSongs.value) {
+                        libraryDao.deleteDownloadedSong(item.id)
+                    }
+                } catch (_: Exception) {
+                }
+            }
+        }
         MusicPlaybackService.onSkipNextCallback = {
             viewModelScope.launch { skipToNext() }
         }
@@ -2214,13 +2247,18 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 return@launch
             }
 
-            // 2. Check if song is downloaded locally for offline playback (works 100% online AND offline!)
+            // 2. Check if song is downloaded locally for offline playback
+            // Match strictly by song.id or exact cleanVideoId (NEVER by title/artist alone so two songs with the same title never collide!)
             val downloaded = downloadedSongs.value.firstOrNull {
                 it.id == song.id ||
                     (song.cleanVideoId.isNotBlank() && Song.extractYoutubeVideoId(it.videoId) == song.cleanVideoId) ||
-                    (it.title.equals(song.title, ignoreCase = true) && it.artist.equals(song.artist, ignoreCase = true))
+                    (song.cleanVideoId.isBlank() && it.title.equals(song.title, ignoreCase = true) && it.artist.equals(song.artist, ignoreCase = true))
             } ?: libraryDao.getDownloadedSong(song.id)
-            if (downloaded != null) {
+
+            val isPlayingFromDownloadedSection =
+                (_selectedTab.value == MainTab.LIBRARY && _librarySubScreen.value == LibrarySubScreen.DownloadedSongs)
+
+            if (downloaded != null && (!_isInternetAvailable.value || isPlayingFromDownloadedSection || song.cleanVideoId.isBlank())) {
                 val localFile = File(downloaded.localFilePath)
                 if (localFile.exists()) {
                     isUsingExoPlayerFallback = true
@@ -2231,21 +2269,22 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
 
-            // 3. Resolve playable YouTube Video ID (fast in-memory / catalog / Room lookup first, then parallel YT Music + VR search)
+            // 3. Resolve playable YouTube Video ID:
+            // CRITICAL: If song.cleanVideoId is present, NEVER overwrite it with another song's videoId!
             var playableVideoId = song.cleanVideoId
             var activeSongToPlay = song
             if (playableVideoId.isBlank()) {
                 val catalogMatch = allSongs.value.firstOrNull {
-                    it.cleanVideoId.isNotBlank() && (it.id == song.id || it.title.equals(song.title, ignoreCase = true))
+                    it.cleanVideoId.isNotBlank() && it.id == song.id
                 }
                 val spotifySavedMatch = allSpotifyPlaylistSongs.value.firstOrNull {
-                    it.videoId.isNotBlank() && (it.songId == song.id || it.title.equals(song.title, ignoreCase = true))
+                    it.videoId.isNotBlank() && (it.songId == song.id || (it.title.equals(song.title, ignoreCase = true) && it.artist.equals(song.artist, ignoreCase = true)))
                 }
                 val playlistSavedMatch = allPlaylistSongs.value.firstOrNull {
-                    it.videoId.isNotBlank() && (it.songId == song.id || it.title.equals(song.title, ignoreCase = true))
+                    it.videoId.isNotBlank() && it.songId == song.id
                 }
                 val historySavedMatch = sessionHistoryEntities.value.firstOrNull {
-                    it.videoId.isNotBlank() && (it.id == song.id || it.title.equals(song.title, ignoreCase = true))
+                    it.videoId.isNotBlank() && it.id == song.id
                 }
                 playableVideoId = catalogMatch?.cleanVideoId
                     ?: Song.extractYoutubeVideoId(spotifySavedMatch?.videoId.orEmpty()).takeIf { it.isNotBlank() }
@@ -3139,7 +3178,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         return downloadedSongs.value.any {
             it.id == song.id ||
                 (song.cleanVideoId.isNotBlank() && Song.extractYoutubeVideoId(it.videoId) == song.cleanVideoId) ||
-                (it.title.equals(song.title, ignoreCase = true) && it.artist.equals(song.artist, ignoreCase = true))
+                (song.cleanVideoId.isBlank() && it.title.equals(song.title, ignoreCase = true) && it.artist.equals(song.artist, ignoreCase = true))
         }
     }
 
@@ -3180,7 +3219,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             _downloadingSongIds.value = _downloadingSongIds.value + song.id
             emitSnackbar("📥 Downloading \"${song.title}\"...")
             val targetDir = File(appContext.filesDir, "offline_music")
-            val result = audioExtractor.downloadAudioToLocalFile(song, targetDir)
+            val result = audioExtractor.downloadAudioToLocalFile(song, targetDir, appContext)
             result.fold(
                 onSuccess = { file ->
                     val resolvedCover = song.bannerUrl.ifBlank { song.highResBannerUrl }
