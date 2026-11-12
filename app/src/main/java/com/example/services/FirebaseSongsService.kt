@@ -2223,30 +2223,46 @@ class FirebaseSongsService(private val context: Context) {
                 }
             }
 
-            // 2. Also scan /users to see if any existing user profile already has this username
+            // 2. O(1) Direct User Node Lookup (scales to 1,00,000+ users without downloading all of /users.json!)
             var existingUserNodeObj: JSONObject? = null
             var existingUserNodeKey: String? = null
-            val usersReq = Request.Builder()
-                .url("$DATABASE_URL/users.json")
-                .get()
-                .build()
-            httpClient.newCall(usersReq).execute().use { resp ->
-                if (resp.isSuccessful) {
-                    val body = resp.body?.string()?.trim().orEmpty()
-                    if (body.isNotEmpty() && body != "null" && body.startsWith("{")) {
-                        val root = JSONObject(body)
-                        val keys = root.keys()
-                        while (keys.hasNext()) {
-                            val k = keys.next()
-                            val uObj = root.optJSONObject(k) ?: continue
-                            if (isMarkedDeletedInJson(uObj)) continue
-                            val candidateName = uObj.optString("userName")
-                                .ifBlank { uObj.optString("username") }
-                                .ifBlank { uObj.optString("name") }
-                                .trim()
-                            if (candidateName.equals(cleanName, ignoreCase = true) ||
-                                normalizeUsernameKey(candidateName) == normalizedKey
-                            ) {
+            val mappedUserId = existingAccountObj?.optString("userId", "")?.trim().orEmpty()
+            if (mappedUserId.isNotBlank()) {
+                val directUserReq = Request.Builder()
+                    .url("$DATABASE_URL/users/$mappedUserId.json")
+                    .get()
+                    .build()
+                httpClient.newCall(directUserReq).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        val body = resp.body?.string()?.trim().orEmpty()
+                        if (body.isNotEmpty() && body != "null" && body.startsWith("{")) {
+                            val uObj = JSONObject(body)
+                            if (!isMarkedDeletedInJson(uObj)) {
+                                existingUserNodeObj = uObj
+                                existingUserNodeKey = mappedUserId
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Fallback indexed query only if account mapping didn't exist yet
+            if (existingUserNodeObj == null) {
+                val encodedName = java.net.URLEncoder.encode("\"$cleanName\"", "UTF-8")
+                val indexedUsersReq = Request.Builder()
+                    .url("$DATABASE_URL/users.json?orderBy=%22userName%22&equalTo=$encodedName")
+                    .get()
+                    .build()
+                httpClient.newCall(indexedUsersReq).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        val body = resp.body?.string()?.trim().orEmpty()
+                        if (body.isNotEmpty() && body != "null" && body.startsWith("{")) {
+                            val root = JSONObject(body)
+                            val keys = root.keys()
+                            while (keys.hasNext()) {
+                                val k = keys.next()
+                                val uObj = root.optJSONObject(k) ?: continue
+                                if (isMarkedDeletedInJson(uObj)) continue
                                 existingUserNodeObj = uObj
                                 existingUserNodeKey = k
                                 break
