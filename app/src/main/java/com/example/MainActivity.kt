@@ -43,6 +43,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.automirrored.filled.TrendingUp
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Explore
@@ -53,6 +54,7 @@ import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.WorkspacePremium
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DrawerValue
@@ -70,6 +72,7 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -282,6 +285,7 @@ fun AKMusicAppRoot(
     val isImportingSpotifyPlaylist by musicViewModel.isImportingSpotifyPlaylist.collectAsStateWithLifecycle()
     val downloadedSongs by musicViewModel.downloadedSongs.collectAsStateWithLifecycle()
     val downloadingSongIds by musicViewModel.downloadingSongIds.collectAsStateWithLifecycle()
+    val downloadedSongSuccessPopup by musicViewModel.downloadedSongSuccessPopup.collectAsStateWithLifecycle()
 
     var offlineBypassMode by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(isInternetAvailable) {
@@ -425,21 +429,11 @@ fun AKMusicAppRoot(
                     onRetryConnection = {
                         musicViewModel.refreshNetworkState()
                     },
-                    mySongsCount = deviceLocalSongs.size,
-                    downloadedSongsCount = downloadedSongs.size,
-                    onOpenMySongsOffline = {
-                        offlineBypassMode = true
-                        launchStage = LaunchStage.MAIN_APP
-                        musicViewModel.openLibrarySubScreen(LibrarySubScreen.MyMusic)
-                        if (!musicViewModel.checkAudioPermissionGranted()) {
-                            audioPermissionLauncher.launch(audioPermissionName)
-                        } else {
-                            musicViewModel.loadDeviceLocalSongs()
-                        }
-                    },
+                    downloadedSongsCount = downloadedSongs.size + deviceLocalSongs.size,
+                    isUserSubscribed = subscriptionState.isActive(),
                     onOpenDownloadedSongsOffline = {
-                        if (!subscriptionState.isActive() && downloadedSongs.isEmpty()) {
-                            musicViewModel.emitSnackbar("👑 Downloaded Songs sirf VIP Premium users ke liye hai!")
+                        if (!musicViewModel.isVerifiedVipActive()) {
+                            musicViewModel.emitSnackbar("👑 Downloaded Songs sirf VIP Premium users ke liye hai! Internet on karke Subscription lein.")
                         } else {
                             offlineBypassMode = true
                             launchStage = LaunchStage.MAIN_APP
@@ -1188,6 +1182,7 @@ fun AKMusicAppRoot(
                 sleepTimerRemainingSeconds = sleepTimerRemainingSeconds,
                 isAlreadyDownloaded = isDownloaded,
                 isCurrentlyDownloading = isDownloading,
+                isUserSubscribed = subscriptionState.isActive(),
                 onDismiss = { musicViewModel.closeSongOptions() },
                 onViewAlbum = { song ->
                     musicViewModel.closeFullScreenPlayer()
@@ -1206,6 +1201,80 @@ fun AKMusicAppRoot(
                             audioPermissionLauncher.launch(audioPermissionName)
                         }
                     )
+                }
+            )
+        }
+
+        // Song Has Been Downloaded Popup Dialog
+        val justDownloadedSong = downloadedSongSuccessPopup
+        if (justDownloadedSong != null) {
+            AlertDialog(
+                onDismissRequest = { musicViewModel.dismissDownloadedSongSuccessPopup() },
+                containerColor = SurfaceDarkCard,
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.CheckCircle,
+                            contentDescription = null,
+                            tint = SpotifyVibrantGreen,
+                            modifier = Modifier.size(28.dp)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text(
+                            text = "Song Has Been Downloaded!",
+                            style = MaterialTheme.typography.titleLarge.copy(
+                                color = PrimaryWhite,
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 19.sp
+                            )
+                        )
+                    }
+                },
+                text = {
+                    Column {
+                        Text(
+                            text = "\"${justDownloadedSong.title}\" by ${justDownloadedSong.artist} has been saved to your device.",
+                            style = MaterialTheme.typography.bodyMedium.copy(
+                                color = PrimaryWhite,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "You can now listen to this song anytime even without an internet connection in Library -> Downloaded Songs.",
+                            style = MaterialTheme.typography.bodySmall.copy(color = MutedGray)
+                        )
+                    }
+                },
+                confirmButton = {
+                    Button(
+                        onClick = {
+                            musicViewModel.dismissDownloadedSongSuccessPopup()
+                            musicViewModel.closeFullScreenPlayer()
+                            musicViewModel.openLibrarySubScreen(LibrarySubScreen.DownloadedSongs)
+                        },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = SpotifyVibrantGreen,
+                            contentColor = PureBlack
+                        ),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Text(
+                            text = "Open Downloaded Songs",
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = { musicViewModel.dismissDownloadedSongSuccessPopup() }
+                    ) {
+                        Text(
+                            text = "OK",
+                            color = PrimaryWhite,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
             )
         }

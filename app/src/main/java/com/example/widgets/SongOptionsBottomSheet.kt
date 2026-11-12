@@ -79,6 +79,7 @@ import com.example.utils.TimeFormatUtils
 fun SongOptionsBottomSheet(
     song: Song,
     sleepTimerRemainingSeconds: Long?,
+    isUserSubscribed: Boolean = false,
     isAlreadyDownloaded: Boolean = false,
     isCurrentlyDownloading: Boolean = false,
     onDismiss: () -> Unit,
@@ -195,14 +196,15 @@ fun SongOptionsBottomSheet(
                 }
             )
 
-            // 4. Download Song for Offline Playback (Available for ALL songs in the app & Spotify playlists for VIP users!)
+            // 4. Download Song for Offline Playback (Only shows VIP crown if user is NOT already VIP!)
             if (!song.id.startsWith("local_media_")) {
                 OptionSheetRow(
                     icon = Icons.Default.Download,
                     label = when {
                         isAlreadyDownloaded -> "Downloaded ✅ (Saved in Downloaded Songs)"
                         isCurrentlyDownloading -> "Downloading Song... ⏳"
-                        else -> "Download Song (Offline VIP 👑)"
+                        isUserSubscribed -> "Download Song"
+                        else -> "Download Song (VIP 👑)"
                     },
                     showChevron = false,
                     tint = SpotifyVibrantGreen,

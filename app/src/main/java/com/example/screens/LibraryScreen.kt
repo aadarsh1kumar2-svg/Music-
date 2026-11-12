@@ -171,23 +171,13 @@ fun LibraryScreen(
                 modifier = modifier
             )
         }
-        is LibrarySubScreen.MyMusic -> {
-            LibraryMyMusicView(
-                hasAudioStoragePermission = hasAudioStoragePermission,
-                deviceLocalSongs = deviceLocalSongs,
-                currentSong = currentSong,
-                isPlaying = isPlaying,
-                onBack = { onNavigateSubScreen(LibrarySubScreen.Root) },
-                onSongClick = onSongClick,
-                onSongMoreClick = onSongMoreClick,
-                onRequestStoragePermission = onRequestStoragePermission,
-                modifier = modifier
-            )
-        }
+        is LibrarySubScreen.MyMusic,
         is LibrarySubScreen.DownloadedSongs -> {
             LibraryDownloadedSongsView(
                 hasAudioStoragePermission = hasAudioStoragePermission,
                 downloadedSongs = downloadedSongs,
+                deviceLocalSongs = deviceLocalSongs,
+                isUserSubscribed = isUserSubscribed,
                 currentSong = currentSong,
                 isPlaying = isPlaying,
                 onBack = { onNavigateSubScreen(LibrarySubScreen.Root) },
@@ -406,20 +396,9 @@ private fun LibraryRootContent(
                         modifier = Modifier.padding(start = 88.dp, end = 20.dp)
                     )
                     LibraryMenuCardRow(
-                        icon = Icons.Default.FolderSpecial,
-                        title = stringResource(id = R.string.library_my_music),
-                        countBadge = myMusicCount,
-                        testTag = "library_row_my_music",
-                        onClick = { onNavigateSubScreen(LibrarySubScreen.MyMusic) }
-                    )
-                    HorizontalDivider(
-                        color = DividerDark,
-                        modifier = Modifier.padding(start = 88.dp, end = 20.dp)
-                    )
-                    LibraryMenuCardRow(
                         icon = Icons.Default.CloudDownload,
                         title = "Downloaded Songs",
-                        countBadge = downloadedSongsCount,
+                        countBadge = downloadedSongsCount + myMusicCount,
                         showVipBadge = !isUserSubscribed,
                         isPrimaryAccentIcon = true,
                         testTag = "library_row_downloaded_songs",
@@ -804,203 +783,11 @@ private fun LibrarySongCollectionView(
 }
 
 @Composable
-private fun LibraryMyMusicView(
-    hasAudioStoragePermission: Boolean,
-    deviceLocalSongs: List<Song>,
-    currentSong: Song?,
-    isPlaying: Boolean,
-    onBack: () -> Unit,
-    onSongClick: (Song, List<Song>) -> Unit,
-    onSongMoreClick: (Song) -> Unit,
-    onRequestStoragePermission: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .background(PureBlack)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 14.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            IconButton(
-                onClick = onBack,
-                modifier = Modifier.size(48.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                    contentDescription = "Back",
-                    tint = PrimaryWhite
-                )
-            }
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(
-                text = "My Music (Device Storage)",
-                style = MaterialTheme.typography.headlineMedium.copy(
-                    color = PrimaryWhite,
-                    fontWeight = FontWeight.Bold
-                )
-            )
-        }
-
-        if (!hasAudioStoragePermission) {
-            Surface(
-                color = SurfaceDarkCard,
-                shape = RoundedCornerShape(16.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 12.dp)
-                    .border(
-                        width = 1.dp,
-                        color = SpotifyGreenBorder.copy(alpha = 0.6f),
-                        shape = RoundedCornerShape(16.dp)
-                    )
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(24.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(64.dp)
-                            .background(SpotifyDarkGreenPill, CircleShape),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.LibraryMusic,
-                            contentDescription = null,
-                            tint = SpotifyVibrantGreen,
-                            modifier = Modifier.size(32.dp)
-                        )
-                    }
-                    Spacer(modifier = Modifier.height(14.dp))
-                    Text(
-                        text = "Storage Permission Required",
-                        style = MaterialTheme.typography.titleLarge.copy(
-                            color = PrimaryWhite,
-                            fontWeight = FontWeight.Bold
-                        ),
-                        textAlign = TextAlign.Center
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "Tap the button below to give permission so AADIFY can load and play all songs stored on your device (and unlock Downloaded Songs).",
-                        style = MaterialTheme.typography.bodyMedium.copy(color = MutedGray),
-                        textAlign = TextAlign.Center
-                    )
-                    Spacer(modifier = Modifier.height(18.dp))
-                    Button(
-                        onClick = onRequestStoragePermission,
-                        shape = RoundedCornerShape(12.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = SpotifyVibrantGreen,
-                            contentColor = PureBlack
-                        ),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(50.dp)
-                            .testTag("give_storage_permission_button")
-                    ) {
-                        Text(
-                            text = "Tap Button to Give Permission",
-                            style = MaterialTheme.typography.titleMedium.copy(
-                                color = PureBlack,
-                                fontWeight = FontWeight.Bold
-                            )
-                        )
-                    }
-                }
-            }
-        }
-
-        if (hasAudioStoragePermission && deviceLocalSongs.isEmpty()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(24.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Surface(
-                    color = SurfaceDarkCard,
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(
-                        text = "No device audio files found on your phone storage yet.",
-                        style = MaterialTheme.typography.bodyLarge.copy(color = MutedGray),
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.padding(24.dp)
-                    )
-                }
-            }
-        } else if (hasAudioStoragePermission && deviceLocalSongs.isNotEmpty()) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Button(
-                    onClick = { onSongClick(deviceLocalSongs.first(), deviceLocalSongs) },
-                    shape = RoundedCornerShape(24.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = SpotifyVibrantGreen,
-                        contentColor = PureBlack
-                    ),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(46.dp)
-                ) {
-                    Icon(Icons.Default.PlayArrow, contentDescription = null)
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = "Play All My Songs (${deviceLocalSongs.size} Songs)",
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            }
-
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(bottom = 140.dp)
-            ) {
-                item {
-                    Text(
-                        text = "Device Storage Songs (${deviceLocalSongs.size})",
-                        style = MaterialTheme.typography.titleMedium.copy(
-                            color = SpotifyVibrantGreen,
-                            fontWeight = FontWeight.Bold
-                        ),
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
-                    )
-                }
-                itemsIndexed(items = deviceLocalSongs, key = { idx, it -> "dev_${idx}_${it.id}" }) { _, song ->
-                    SongListRow(
-                        song = song,
-                        isCurrentSong = currentSong?.id == song.id,
-                        isPlaying = isPlaying,
-                        subtitlePrefix = "Phone Storage • ",
-                        onSongClick = { onSongClick(song, deviceLocalSongs) },
-                        onMoreClick = { onSongMoreClick(song) }
-                    )
-                }
-                item {
-                    LibraryCreatorFooter()
-                }
-            }
-        }
-    }
-}
-
-@Composable
 private fun LibraryDownloadedSongsView(
     hasAudioStoragePermission: Boolean,
     downloadedSongs: List<DownloadedSongEntity>,
+    deviceLocalSongs: List<Song>,
+    isUserSubscribed: Boolean,
     currentSong: Song?,
     isPlaying: Boolean,
     onBack: () -> Unit,
@@ -1011,6 +798,10 @@ private fun LibraryDownloadedSongsView(
     modifier: Modifier = Modifier
 ) {
     val downloadedAsSongs = remember(downloadedSongs) { downloadedSongs.map { it.toSong() } }
+    val allCombinedOfflineSongs = remember(downloadedAsSongs, deviceLocalSongs) {
+        val dlIds = downloadedAsSongs.map { it.id }.toSet()
+        downloadedAsSongs + deviceLocalSongs.filterNot { it.id in dlIds }
+    }
 
     Column(
         modifier = modifier
@@ -1035,7 +826,7 @@ private fun LibraryDownloadedSongsView(
             }
             Spacer(modifier = Modifier.width(8.dp))
             Text(
-                text = "Downloaded Songs (Offline VIP 👑)",
+                text = if (isUserSubscribed) "Downloaded Songs" else "Downloaded Songs (VIP 👑)",
                 style = MaterialTheme.typography.headlineMedium.copy(
                     color = PrimaryWhite,
                     fontWeight = FontWeight.Bold
@@ -1086,7 +877,7 @@ private fun LibraryDownloadedSongsView(
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "Give device storage permission to download & play songs offline. Once granted, both Downloaded Songs and My Music will be unlocked!",
+                        text = "Allow device storage permission to download songs in under 10 seconds and play all your downloaded & offline songs anytime without internet.",
                         style = MaterialTheme.typography.bodyMedium.copy(color = MutedGray),
                         textAlign = TextAlign.Center
                     )
@@ -1104,7 +895,7 @@ private fun LibraryDownloadedSongsView(
                             .testTag("give_download_storage_permission_button")
                     ) {
                         Text(
-                            text = "Allow Permission to Access Downloads",
+                            text = "Allow Permission to Access Downloaded Songs",
                             style = MaterialTheme.typography.titleMedium.copy(
                                 color = PureBlack,
                                 fontWeight = FontWeight.Bold
@@ -1113,7 +904,7 @@ private fun LibraryDownloadedSongsView(
                     }
                 }
             }
-        } else if (downloadedAsSongs.isEmpty()) {
+        } else if (allCombinedOfflineSongs.isEmpty()) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -1126,7 +917,7 @@ private fun LibraryDownloadedSongsView(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
-                        text = "No downloaded songs yet.\nOpen any song or Spotify playlist -> tap 3-dots/3-lines menu -> \"Download Song (Offline VIP 👑)\" to save songs for offline playback!",
+                        text = "No downloaded songs yet.\nOpen any song or Spotify playlist -> tap 3-dots/3-lines menu -> \"Download Song\" to save songs for instant offline playback!",
                         style = MaterialTheme.typography.bodyLarge.copy(color = MutedGray),
                         textAlign = TextAlign.Center,
                         modifier = Modifier.padding(24.dp)
@@ -1141,7 +932,7 @@ private fun LibraryDownloadedSongsView(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Button(
-                    onClick = { onSongClick(downloadedAsSongs.first(), downloadedAsSongs) },
+                    onClick = { onSongClick(allCombinedOfflineSongs.first(), allCombinedOfflineSongs) },
                     shape = RoundedCornerShape(24.dp),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = SpotifyVibrantGreen,
@@ -1154,7 +945,7 @@ private fun LibraryDownloadedSongsView(
                     Icon(Icons.Default.PlayArrow, contentDescription = null)
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "Play All Downloaded Songs (${downloadedAsSongs.size} Songs)",
+                        text = "Play All Downloaded Songs (${allCombinedOfflineSongs.size} Songs)",
                         fontWeight = FontWeight.Bold
                     )
                 }
@@ -1164,29 +955,55 @@ private fun LibraryDownloadedSongsView(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(bottom = 140.dp)
             ) {
-                item {
-                    Text(
-                        text = "Saved for Offline Playback (${downloadedSongs.size})",
-                        style = MaterialTheme.typography.titleMedium.copy(
-                            color = SpotifyVibrantGreen,
-                            fontWeight = FontWeight.Bold
-                        ),
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
-                    )
+                if (downloadedSongs.isNotEmpty()) {
+                    item {
+                        Text(
+                            text = "Downloaded from AADIFY (${downloadedSongs.size})",
+                            style = MaterialTheme.typography.titleMedium.copy(
+                                color = SpotifyVibrantGreen,
+                                fontWeight = FontWeight.Bold
+                            ),
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
+                        )
+                    }
+                    itemsIndexed(items = downloadedSongs, key = { idx, it -> "dl_${idx}_${it.id}" }) { _, entity ->
+                        val song = entity.toSong()
+                        val sizeMb = String.format("%.1f MB", entity.fileSizeBytes / (1024f * 1024f))
+                        SongListRow(
+                            song = song,
+                            isCurrentSong = currentSong?.id == song.id,
+                            isPlaying = isPlaying,
+                            subtitlePrefix = "Downloaded ($sizeMb) • ",
+                            onSongClick = { onSongClick(song, allCombinedOfflineSongs) },
+                            onMoreClick = { onSongMoreClick(song) },
+                            onDeleteClick = { onDeleteDownloadedSong(entity) }
+                        )
+                    }
                 }
-                itemsIndexed(items = downloadedSongs, key = { idx, it -> "dl_${idx}_${it.id}" }) { _, entity ->
-                    val song = entity.toSong()
-                    val sizeMb = String.format("%.1f MB", entity.fileSizeBytes / (1024f * 1024f))
-                    SongListRow(
-                        song = song,
-                        isCurrentSong = currentSong?.id == song.id,
-                        isPlaying = isPlaying,
-                        subtitlePrefix = "Offline ($sizeMb) • ",
-                        onSongClick = { onSongClick(song, downloadedAsSongs) },
-                        onMoreClick = { onSongMoreClick(song) },
-                        onDeleteClick = { onDeleteDownloadedSong(entity) }
-                    )
+
+                if (deviceLocalSongs.isNotEmpty()) {
+                    item {
+                        Text(
+                            text = "Device Offline Songs (${deviceLocalSongs.size})",
+                            style = MaterialTheme.typography.titleMedium.copy(
+                                color = SpotifyVibrantGreen,
+                                fontWeight = FontWeight.Bold
+                            ),
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
+                        )
+                    }
+                    itemsIndexed(items = deviceLocalSongs, key = { idx, it -> "dev_${idx}_${it.id}" }) { _, song ->
+                        SongListRow(
+                            song = song,
+                            isCurrentSong = currentSong?.id == song.id,
+                            isPlaying = isPlaying,
+                            subtitlePrefix = "Offline Audio • ",
+                            onSongClick = { onSongClick(song, allCombinedOfflineSongs) },
+                            onMoreClick = { onSongMoreClick(song) }
+                        )
+                    }
                 }
+
                 item {
                     LibraryCreatorFooter()
                 }

@@ -333,6 +333,13 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _pendingDownloadSongAfterPermission = MutableStateFlow<Song?>(null)
 
+    private val _downloadedSongSuccessPopup = MutableStateFlow<Song?>(null)
+    val downloadedSongSuccessPopup: StateFlow<Song?> = _downloadedSongSuccessPopup.asStateFlow()
+
+    fun dismissDownloadedSongSuccessPopup() {
+        _downloadedSongSuccessPopup.value = null
+    }
+
     fun checkAudioPermissionGranted(): Boolean {
         val permission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             Manifest.permission.READ_MEDIA_AUDIO
@@ -344,10 +351,13 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     fun onAudioStoragePermissionResult(granted: Boolean) {
         _hasAudioStoragePermission.value = granted || checkAudioPermissionGranted()
+        if (!isVerifiedVipActive()) {
+            _pendingDownloadSongAfterPermission.value = null
+            _deviceLocalSongs.value = emptyList()
+            return
+        }
         if (_hasAudioStoragePermission.value) {
-            // Automatically unlock & load My Songs (Device Music) as soon as permission is granted!
             loadDeviceLocalSongs()
-            // If the user triggered a song download that was waiting on storage permission, start it now!
             val pendingSong = _pendingDownloadSongAfterPermission.value
             _pendingDownloadSongAfterPermission.value = null
             if (pendingSong != null) {
@@ -365,7 +375,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     fun loadDeviceLocalSongs() {
         val granted = checkAudioPermissionGranted()
         _hasAudioStoragePermission.value = granted
-        if (!granted) return
+        // Smart Anti-Bypass: Even if a Free user gives storage permission from phone settings,
+        // never load or expose local songs unless they have a verified VIP subscription!
+        if (!granted || !isVerifiedVipActive()) {
+            _deviceLocalSongs.value = emptyList()
+            return
+        }
 
         viewModelScope.launch {
             val loaded = withContext(Dispatchers.IO) {
@@ -1918,31 +1933,26 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun openLibrarySubScreen(subScreen: LibrarySubScreen) {
-        if ((subScreen is LibrarySubScreen.Playlists ||
-                subScreen is LibrarySubScreen.PlaylistDetail ||
-                subScreen is LibrarySubScreen.SpotifyPlaylists ||
-                subScreen is LibrarySubScreen.SpotifyPlaylistDetail ||
-                subScreen is LibrarySubScreen.Favorites) &&
-            !_subscriptionState.value.isActive()
-        ) {
-            emitSnackbar("👑 VIP Subscription required! Buy a subscription to unlock Playlists, Spotify Playlists & Favorites.")
-            _isSubscriptionModalOpen.value = true
-            return
+        val resolvedSubScreen = if (subScreen is LibrarySubScreen.MyMusic) {
+            LibrarySubScreen.DownloadedSongs
+        } else {
+            subScreen
         }
-        if (subScreen is LibrarySubScreen.DownloadedSongs &&
-            _isInternetAvailable.value &&
-            !_subscriptionState.value.isActive() &&
-            downloadedSongs.value.isEmpty()
+        if ((resolvedSubScreen is LibrarySubScreen.Playlists ||
+                resolvedSubScreen is LibrarySubScreen.PlaylistDetail ||
+                resolvedSubScreen is LibrarySubScreen.SpotifyPlaylists ||
+                resolvedSubScreen is LibrarySubScreen.SpotifyPlaylistDetail ||
+                resolvedSubScreen is LibrarySubScreen.Favorites ||
+                resolvedSubScreen is LibrarySubScreen.DownloadedSongs) &&
+            !isVerifiedVipActive()
         ) {
-            emitSnackbar("👑 Downloaded Songs VIP users ke liye hai! Offline download ke liye Subscription lein.")
+            emitSnackbar("👑 Downloaded Songs, Playlists & Favorites sirf VIP Premium users ke liye hai! Subscription lein.")
             _isSubscriptionModalOpen.value = true
             return
         }
         _selectedTab.value = MainTab.LIBRARY
-        _librarySubScreen.value = subScreen
-        if ((subScreen is LibrarySubScreen.MyMusic || subScreen is LibrarySubScreen.DownloadedSongs) &&
-            checkAudioPermissionGranted()
-        ) {
+        _librarySubScreen.value = resolvedSubScreen
+        if (resolvedSubScreen is LibrarySubScreen.DownloadedSongs && checkAudioPermissionGranted()) {
             loadDeviceLocalSongs()
         }
     }
@@ -3138,10 +3148,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         onRequestPermission: (() -> Unit)? = null
     ) {
         if (song.id.startsWith("local_media_")) {
-            emitSnackbar("Yeh song pehle se aapke phone storage (My Music) mein hai! 🎵")
+            emitSnackbar("Yeh song pehle se aapke Downloaded Songs mein hai! 🎵")
             return
         }
-        if (!_subscriptionState.value.isActive()) {
+        // Strict Anti-Crack VIP Check: Even if a Free user gave storage permission from phone settings,
+        // they cannot download any song without a verified VIP subscription!
+        if (!isVerifiedVipActive()) {
             emitSnackbar("👑 Offline Song Download sirf VIP Premium users ke liye hai! Subscription lein.")
             _isSubscriptionModalOpen.value = true
             return
@@ -3152,11 +3164,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             onRequestPermission?.invoke()
             return
         }
-        // Ensure My Songs (Device Music) is also loaded whenever permission is active
         if (_deviceLocalSongs.value.isEmpty()) {
             loadDeviceLocalSongs()
         }
         if (isSongDownloaded(song)) {
+            _downloadedSongSuccessPopup.value = song
             emitSnackbar("\"${song.title}\" pehle se Downloaded Songs mein saved hai! ✅")
             return
         }
@@ -3166,7 +3178,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
         viewModelScope.launch {
             _downloadingSongIds.value = _downloadingSongIds.value + song.id
-            emitSnackbar("📥 Downloading \"${song.title}\" to Downloaded Songs...")
+            emitSnackbar("📥 Downloading \"${song.title}\"...")
             val targetDir = File(appContext.filesDir, "offline_music")
             val result = audioExtractor.downloadAudioToLocalFile(song, targetDir)
             result.fold(
@@ -3185,7 +3197,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                             localContentUri = Uri.fromFile(file).toString()
                         )
                     )
-                    emitSnackbar("✅ \"${song.title}\" Downloaded Songs mein save ho gaya! Bina internet ke play karein.")
+                    val completedSong = song.copy(bannerUrl = resolvedCover)
+                    _downloadedSongSuccessPopup.value = completedSong
+                    emitSnackbar("✅ Song has been downloaded: \"${song.title}\"!")
                 },
                 onFailure = { _ ->
                     emitSnackbar("⚠️ Download nahi ho paya. Internet check karke dobara try karein.")
@@ -3410,6 +3424,26 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun isVerifiedVipActive(nowMs: Long = System.currentTimeMillis()): Boolean {
+        val current = _subscriptionState.value
+        if (!current.isActive(nowMs)) return false
+        if (com.example.security.AadifySecurityVault.isRuntimeHookedOrTampered()) return false
+        val storedSeal = prefs.getString("sub_vault_seal_v6", "").orEmpty()
+        val validSeal = com.example.security.AadifySecurityVault.verifySubscriptionIntegritySeal(
+            storedSeal = storedSeal,
+            planId = current.planType.id,
+            activatedAtMs = current.activatedAtMs,
+            expiresAtMs = current.expiresAtMs,
+            orderId = current.orderId,
+            utr = current.utr
+        )
+        if (!validSeal) {
+            saveSubscriptionStateLocally(UserSubscriptionState())
+            return false
+        }
+        return true
+    }
+
     private fun loadPersistedSubscriptionState(): UserSubscriptionState {
         val planId = prefs.getString("sub_plan_id", "none") ?: "none"
         val activatedAt = prefs.getLong("sub_activated_at_ms", 0L)
@@ -3423,19 +3457,76 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             orderId = orderId,
             utr = utr
         )
-        return if (state.isActive()) state else UserSubscriptionState()
+        if (!state.isActive()) return UserSubscriptionState()
+        if (com.example.security.AadifySecurityVault.isRuntimeHookedOrTampered()) return UserSubscriptionState()
+
+        val storedSeal = prefs.getString("sub_vault_seal_v6", "").orEmpty()
+        if (storedSeal.isBlank()) {
+            // Migrate existing legitimate active subscription once to Level-6 HMAC seal
+            if (orderId.isNotBlank() || utr.isNotBlank()) {
+                val migratedSeal = com.example.security.AadifySecurityVault.computeSubscriptionIntegritySeal(
+                    planId = state.planType.id,
+                    activatedAtMs = activatedAt,
+                    expiresAtMs = expiresAt,
+                    orderId = orderId,
+                    utr = utr
+                )
+                prefs.edit().putString("sub_vault_seal_v6", migratedSeal).apply()
+                return state
+            }
+            return UserSubscriptionState()
+        }
+
+        val isAuthentic = com.example.security.AadifySecurityVault.verifySubscriptionIntegritySeal(
+            storedSeal = storedSeal,
+            planId = state.planType.id,
+            activatedAtMs = activatedAt,
+            expiresAtMs = expiresAt,
+            orderId = orderId,
+            utr = utr
+        )
+        return if (isAuthentic) {
+            state
+        } else {
+            prefs.edit()
+                .remove("sub_plan_id")
+                .remove("sub_activated_at_ms")
+                .remove("sub_expires_at_ms")
+                .remove("sub_order_id")
+                .remove("sub_utr")
+                .remove("sub_vault_seal_v6")
+                .apply()
+            UserSubscriptionState()
+        }
     }
 
     private fun saveSubscriptionStateLocally(state: UserSubscriptionState) {
+        val seal = if (state.isActive()) {
+            com.example.security.AadifySecurityVault.computeSubscriptionIntegritySeal(
+                planId = state.planType.id,
+                activatedAtMs = state.activatedAtMs,
+                expiresAtMs = state.expiresAtMs,
+                orderId = state.orderId,
+                utr = state.utr
+            )
+        } else {
+            ""
+        }
         prefs.edit()
             .putString("sub_plan_id", state.planType.id)
             .putLong("sub_activated_at_ms", state.activatedAtMs)
             .putLong("sub_expires_at_ms", state.expiresAtMs)
             .putString("sub_order_id", state.orderId)
             .putString("sub_utr", state.utr)
+            .putString("sub_vault_seal_v6", seal)
             .apply()
         _subscriptionState.value = state
         _activeSubscriptionRemainingSeconds.value = state.remainingSeconds()
+        if (state.isActive() && checkAudioPermissionGranted()) {
+            loadDeviceLocalSongs()
+        } else if (!state.isActive()) {
+            _deviceLocalSongs.value = emptyList()
+        }
     }
 
     private fun updateSubscriptionAndCrazyDealTimers() {

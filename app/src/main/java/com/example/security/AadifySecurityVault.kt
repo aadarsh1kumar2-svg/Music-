@@ -341,4 +341,63 @@ object AadifySecurityVault {
             ""
         }
     }
+
+    /**
+     * Level-6 Anti-Crack Cryptographic Subscription Seal (HMAC-SHA256 + Split-Shard Derived Key).
+     * Prevents SharedPreferences XML editing, Lucky Patcher / root pref spoofing, and fake plan injection.
+     */
+    fun computeSubscriptionIntegritySeal(
+        planId: String,
+        activatedAtMs: Long,
+        expiresAtMs: Long,
+        orderId: String,
+        utr: String
+    ): String {
+        if (planId.isBlank() || planId.equals("none", ignoreCase = true) || expiresAtMs <= 0L) {
+            return ""
+        }
+        return try {
+            val derivedKey = ByteArray(32)
+            for (i in 0 until 32) {
+                val a = MASK_PART_A[i and 7]
+                val b = MASK_PART_B[(i + 3) and 7]
+                val c = FB_PROJECT_ID_SHARD[i % FB_PROJECT_ID_SHARD.size]
+                derivedKey[i] = ((a xor b) + c + (i * 41)).toByte()
+            }
+            val payload = "AADIFY_V6_VIP_SEAL|${planId.lowercase()}|$activatedAtMs|$expiresAtMs|${orderId.trim()}|${utr.trim()}"
+            val mac = javax.crypto.Mac.getInstance("HmacSHA256")
+            mac.init(javax.crypto.spec.SecretKeySpec(derivedKey, "HmacSHA256"))
+            val digest = mac.doFinal(payload.toByteArray(StandardCharsets.UTF_8))
+            Arrays.fill(derivedKey, 0.toByte())
+            encryptSensitiveLocalString(Base64.encodeToString(digest, Base64.NO_WRAP))
+        } catch (_: Throwable) {
+            ""
+        }
+    }
+
+    fun verifySubscriptionIntegritySeal(
+        storedSeal: String,
+        planId: String,
+        activatedAtMs: Long,
+        expiresAtMs: Long,
+        orderId: String,
+        utr: String
+    ): Boolean {
+        if (planId.isBlank() || planId.equals("none", ignoreCase = true)) return false
+        if (storedSeal.isBlank() || isRuntimeHookedOrTampered()) return false
+        return try {
+            val expectedEncrypted = computeSubscriptionIntegritySeal(
+                planId = planId,
+                activatedAtMs = activatedAtMs,
+                expiresAtMs = expiresAtMs,
+                orderId = orderId,
+                utr = utr
+            )
+            val actualRaw = decryptSensitiveLocalString(storedSeal)
+            val expectedRaw = decryptSensitiveLocalString(expectedEncrypted)
+            actualRaw.isNotBlank() && actualRaw == expectedRaw
+        } catch (_: Throwable) {
+            false
+        }
+    }
 }

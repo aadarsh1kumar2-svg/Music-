@@ -90,9 +90,8 @@ import com.example.ui.theme.SurfaceDarkCard
 @Composable
 fun NoInternetScreen(
     onRetryConnection: () -> Unit,
-    mySongsCount: Int = 0,
     downloadedSongsCount: Int = 0,
-    onOpenMySongsOffline: (() -> Unit)? = null,
+    isUserSubscribed: Boolean = false,
     onOpenDownloadedSongsOffline: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
@@ -247,61 +246,31 @@ fun NoInternetScreen(
                     )
                 }
 
-                if (onOpenMySongsOffline != null) {
-                    Spacer(modifier = Modifier.height(10.dp))
-                    Button(
-                        onClick = onOpenMySongsOffline,
-                        shape = RoundedCornerShape(14.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = SpotifyDarkGreenPill,
-                            contentColor = SpotifyVibrantGreen
-                        ),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(48.dp)
-                            .border(
-                                width = 1.dp,
-                                color = SpotifyGreenBorder,
-                                shape = RoundedCornerShape(14.dp)
-                            )
-                            .testTag("no_internet_my_songs_button")
-                    ) {
-                        val badgeSuffix = if (mySongsCount > 0) " ($mySongsCount)" else ""
-                        Text(
-                            text = "🎵 My Songs$badgeSuffix",
-                            style = MaterialTheme.typography.titleSmall.copy(
-                                color = SpotifyVibrantGreen,
-                                fontWeight = FontWeight.ExtraBold,
-                                fontSize = 15.sp
-                            )
-                        )
-                    }
-                }
-
                 if (onOpenDownloadedSongsOffline != null) {
                     Spacer(modifier = Modifier.height(10.dp))
                     Button(
                         onClick = onOpenDownloadedSongsOffline,
                         shape = RoundedCornerShape(14.dp),
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = Color(0xFF1F1704),
-                            contentColor = Color(0xFFFFD700)
+                            containerColor = if (isUserSubscribed) SpotifyDarkGreenPill else Color(0xFF1F1704),
+                            contentColor = if (isUserSubscribed) SpotifyVibrantGreen else Color(0xFFFFD700)
                         ),
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(48.dp)
                             .border(
                                 width = 1.dp,
-                                color = Color(0xFFFFD700).copy(alpha = 0.65f),
+                                color = if (isUserSubscribed) SpotifyGreenBorder else Color(0xFFFFD700).copy(alpha = 0.65f),
                                 shape = RoundedCornerShape(14.dp)
                             )
                             .testTag("no_internet_downloaded_songs_button")
                     ) {
                         val dlSuffix = if (downloadedSongsCount > 0) " ($downloadedSongsCount)" else ""
+                        val vipCrown = if (isUserSubscribed) "" else " 👑"
                         Text(
-                            text = "📥 Downloaded Songs$dlSuffix 👑",
+                            text = "📥 Downloaded Songs$dlSuffix$vipCrown",
                             style = MaterialTheme.typography.titleSmall.copy(
-                                color = Color(0xFFFFD700),
+                                color = if (isUserSubscribed) SpotifyVibrantGreen else Color(0xFFFFD700),
                                 fontWeight = FontWeight.ExtraBold,
                                 fontSize = 15.sp
                             )
