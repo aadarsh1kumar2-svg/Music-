@@ -95,6 +95,15 @@ class AudioStreamExtractor {
         .followSslRedirects(true)
         .build()
 
+    private val downloadHttpClient = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .writeTimeout(30, TimeUnit.SECONDS)
+        .callTimeout(120, TimeUnit.SECONDS)
+        .followRedirects(true)
+        .followSslRedirects(true)
+        .build()
+
     // Cache resolved stream URLs for 20 minutes
     private val streamCache = ConcurrentHashMap<String, Pair<Long, ResolvedAudioStream>>()
     private val searchCache = ConcurrentHashMap<String, List<Song>>()
@@ -830,8 +839,13 @@ class AudioStreamExtractor {
         targetDir: File
     ): Result<File> = withContext(Dispatchers.IO) {
         try {
+            val resolvedVid = song.cleanVideoId.ifBlank {
+                findPlayableVideoIdForSong(song).orEmpty()
+            }.ifBlank {
+                song.videoId
+            }
             val streamResult = extractBestAudioStream(
-                rawVideoId = song.videoId,
+                rawVideoId = resolvedVid,
                 songTitle = song.title,
                 songArtist = song.artist
             )
@@ -845,17 +859,17 @@ class AudioStreamExtractor {
             } else {
                 "m4a"
             }
-            val safeId = song.id.replace(Regex("[^a-zA-Z0-9_-]"), "_")
+            val safeId = song.id.replace(Regex("[^a-zA-Z0-9_-]"), "_").take(80)
             val destFile = File(targetDir, "${safeId}.$extension")
 
             val request = Request.Builder()
                 .url(resolved.streamUrl)
-                .header("User-Agent", resolved.userAgent)
+                .header("User-Agent", resolved.userAgent.ifBlank { EXOPLAYER_USER_AGENT })
                 .header("Accept", "*/*")
                 .get()
                 .build()
 
-            httpClient.newCall(request).execute().use { response ->
+            downloadHttpClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
                     return@withContext Result.failure(
                         RuntimeException("Download failed with HTTP ${response.code}")
@@ -865,7 +879,7 @@ class AudioStreamExtractor {
                     RuntimeException("Empty audio response body")
                 )
                 FileOutputStream(destFile).use { output ->
-                    body.byteStream().copyTo(output)
+                    body.byteStream().copyTo(output, bufferSize = 32 * 1024)
                 }
             }
             Result.success(destFile)

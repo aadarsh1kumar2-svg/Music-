@@ -126,7 +126,11 @@ object AadifySecurityVault {
                     cls.contains("frida") ||
                     cls.contains("substrate") ||
                     cls.contains("lsposed") ||
-                    cls.contains("edxposed")
+                    cls.contains("edxposed") ||
+                    cls.contains("epic") ||
+                    cls.contains("sandhook") ||
+                    cls.contains("whale") ||
+                    cls.contains("pine")
             }
             stackSuspicious || Debug.isDebuggerConnected() || Debug.waitingForDebugger()
         } catch (_: Throwable) {
@@ -140,7 +144,8 @@ object AadifySecurityVault {
             val expectedPkg = listOf("com", "aadarsh", "aadify", "app").joinToString(".")
             val fallbackPkg = listOf("com", "example").joinToString(".")
             val validPkg = pkg == expectedPkg || pkg == fallbackPkg
-            validPkg && !isRuntimeHookedOrTampered()
+            val validLoader = context.classLoader != null
+            validPkg && validLoader && !isRuntimeHookedOrTampered()
         } catch (_: Throwable) {
             true
         }
@@ -231,11 +236,11 @@ object AadifySecurityVault {
         }
     }
 
-    const val SECURITY_VAULT_LEVEL = 5
+    const val SECURITY_VAULT_LEVEL = 6
 
     /**
-     * Fast, non-blocking Level-5 double-pass rolling-shard encryption for local preferences
-     * so the Main Thread never stalls on OEM hardware Keystore Binder IPC during app startup.
+     * Fast, non-blocking Level-6 triple-pass rolling-shard encryption for local preferences
+     * and offline vault metadata so the Main Thread never stalls on OEM hardware Keystore Binder IPC.
      */
     fun encryptSensitiveLocalString(plainText: String): String {
         if (plainText.isEmpty()) return ""
@@ -244,13 +249,15 @@ object AadifySecurityVault {
             val encoded = ByteArray(raw.size)
             for (i in raw.indices) {
                 val maskA = MASK_PART_A[i and 7]
-                val maskB = MASK_PART_B[(i + 3) and 7]
-                val rot = ((i * 71) + 0x4F) and 0xFF
+                val maskB = MASK_PART_B[(i + 5) and 7]
+                val rot1 = ((i * 73) + 0x5B) and 0xFF
+                val rot2 = ((i * 29) + 0x1F) and 0xFF
                 val pass1 = ((raw[i].toInt() and 0xFF) xor maskA)
-                val pass2 = ((pass1 + rot) and 0xFF) xor maskB
-                encoded[i] = pass2.toByte()
+                val pass2 = ((pass1 + rot1) and 0xFF) xor maskB
+                val pass3 = (pass2 + rot2) and 0xFF
+                encoded[i] = pass3.toByte()
             }
-            "ENC_V5:" + Base64.encodeToString(encoded, Base64.NO_WRAP)
+            "ENC_V6:" + Base64.encodeToString(encoded, Base64.NO_WRAP)
         } catch (_: Throwable) {
             plainText
         }
@@ -258,6 +265,25 @@ object AadifySecurityVault {
 
     fun decryptSensitiveLocalString(storedValue: String): String {
         if (storedValue.isEmpty()) return ""
+        if (storedValue.startsWith("ENC_V6:")) {
+            return try {
+                val encoded = Base64.decode(storedValue.removePrefix("ENC_V6:"), Base64.NO_WRAP)
+                val out = ByteArray(encoded.size)
+                for (i in encoded.indices) {
+                    val maskA = MASK_PART_A[i and 7]
+                    val maskB = MASK_PART_B[(i + 5) and 7]
+                    val rot1 = ((i * 73) + 0x5B) and 0xFF
+                    val rot2 = ((i * 29) + 0x1F) and 0xFF
+                    val unpass3 = ((encoded[i].toInt() and 0xFF) - rot2) and 0xFF
+                    val unpass2 = unpass3 xor maskB
+                    val unrot = (unpass2 - rot1) and 0xFF
+                    out[i] = (unrot xor maskA).toByte()
+                }
+                String(out, StandardCharsets.UTF_8)
+            } catch (_: Throwable) {
+                ""
+            }
+        }
         if (storedValue.startsWith("ENC_V5:")) {
             return try {
                 val encoded = Base64.decode(storedValue.removePrefix("ENC_V5:"), Base64.NO_WRAP)

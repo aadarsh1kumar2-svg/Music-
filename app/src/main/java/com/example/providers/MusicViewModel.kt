@@ -87,6 +87,7 @@ sealed class LibrarySubScreen {
     data object Root : LibrarySubScreen()
     data object Favorites : LibrarySubScreen()
     data object MyMusic : LibrarySubScreen()
+    data object DownloadedSongs : LibrarySubScreen()
     data object Playlists : LibrarySubScreen()
     data class PlaylistDetail(val playlist: PlaylistEntity) : LibrarySubScreen()
     data object SpotifyPlaylists : LibrarySubScreen()
@@ -103,8 +104,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         val PLAYBACK_SPEEDS = listOf(0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
         const val FREE_DAILY_LIMIT_SECONDS = 3600 // 1 hour (3600 seconds) per day for Free users
         const val CRAZY_DEAL_WINDOW_MS = 3L * 24L * 60L * 60L * 1000L // 3 days (72 hours) for new users
-        const val CURRENT_APP_UPDATE_SECRET_CODE = "6394"
-        private const val CURRENT_SECRET_CODE_VERSION = 11
+        const val CURRENT_APP_UPDATE_SECRET_CODE = "8429"
+        private const val CURRENT_SECRET_CODE_VERSION = 12
     }
 
     private val appContext = application.applicationContext
@@ -330,6 +331,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private val _deviceLocalSongs = MutableStateFlow<List<Song>>(emptyList())
     val deviceLocalSongs: StateFlow<List<Song>> = _deviceLocalSongs.asStateFlow()
 
+    private val _pendingDownloadSongAfterPermission = MutableStateFlow<Song?>(null)
+
     fun checkAudioPermissionGranted(): Boolean {
         val permission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             Manifest.permission.READ_MEDIA_AUDIO
@@ -342,7 +345,20 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     fun onAudioStoragePermissionResult(granted: Boolean) {
         _hasAudioStoragePermission.value = granted || checkAudioPermissionGranted()
         if (_hasAudioStoragePermission.value) {
+            // Automatically unlock & load My Songs (Device Music) as soon as permission is granted!
             loadDeviceLocalSongs()
+            // If the user triggered a song download that was waiting on storage permission, start it now!
+            val pendingSong = _pendingDownloadSongAfterPermission.value
+            _pendingDownloadSongAfterPermission.value = null
+            if (pendingSong != null) {
+                downloadSongForOffline(pendingSong)
+            }
+        } else {
+            val hadPending = _pendingDownloadSongAfterPermission.value != null
+            _pendingDownloadSongAfterPermission.value = null
+            if (hadPending) {
+                emitSnackbar("⚠️ Device Storage Permission allow karein tabhi song download hoga!")
+            }
         }
     }
 
@@ -1913,9 +1929,20 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             _isSubscriptionModalOpen.value = true
             return
         }
+        if (subScreen is LibrarySubScreen.DownloadedSongs &&
+            _isInternetAvailable.value &&
+            !_subscriptionState.value.isActive() &&
+            downloadedSongs.value.isEmpty()
+        ) {
+            emitSnackbar("👑 Downloaded Songs VIP users ke liye hai! Offline download ke liye Subscription lein.")
+            _isSubscriptionModalOpen.value = true
+            return
+        }
         _selectedTab.value = MainTab.LIBRARY
         _librarySubScreen.value = subScreen
-        if (subScreen is LibrarySubScreen.MyMusic && checkAudioPermissionGranted()) {
+        if ((subScreen is LibrarySubScreen.MyMusic || subScreen is LibrarySubScreen.DownloadedSongs) &&
+            checkAudioPermissionGranted()
+        ) {
             loadDeviceLocalSongs()
         }
     }
@@ -2088,7 +2115,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     _librarySubScreen.value is LibrarySubScreen.SpotifyPlaylistDetail ||
                     _librarySubScreen.value is LibrarySubScreen.SpotifyPlaylists ||
                     _librarySubScreen.value is LibrarySubScreen.Favorites ||
-                    _librarySubScreen.value is LibrarySubScreen.MyMusic
+                    _librarySubScreen.value is LibrarySubScreen.MyMusic ||
+                    _librarySubScreen.value is LibrarySubScreen.DownloadedSongs
                 )
             val isSameCustomQueue = isCustomPlaylistQueueActive && customQueue == _queue.value
             isCustomPlaylistQueueActive = isFromCollectionScreen || isSameCustomQueue || song.id.startsWith("spotify_")
@@ -2176,9 +2204,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 return@launch
             }
 
-            // 2. Check if song is downloaded locally for offline playback (fast in-memory check first)
-            val downloaded = downloadedSongs.value.firstOrNull { it.id == song.id }
-                ?: if (song.cleanVideoId.isBlank()) libraryDao.getDownloadedSong(song.id) else null
+            // 2. Check if song is downloaded locally for offline playback (works 100% online AND offline!)
+            val downloaded = downloadedSongs.value.firstOrNull {
+                it.id == song.id ||
+                    (song.cleanVideoId.isNotBlank() && Song.extractYoutubeVideoId(it.videoId) == song.cleanVideoId) ||
+                    (it.title.equals(song.title, ignoreCase = true) && it.artist.equals(song.artist, ignoreCase = true))
+            } ?: libraryDao.getDownloadedSong(song.id)
             if (downloaded != null) {
                 val localFile = File(downloaded.localFilePath)
                 if (localFile.exists()) {
@@ -3094,36 +3125,70 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun downloadSongForOffline(song: Song) {
-        if (!song.allowDownload) {
-            emitSnackbar("Offline download is not enabled by Admin for this song.")
+    fun isSongDownloaded(song: Song): Boolean {
+        return downloadedSongs.value.any {
+            it.id == song.id ||
+                (song.cleanVideoId.isNotBlank() && Song.extractYoutubeVideoId(it.videoId) == song.cleanVideoId) ||
+                (it.title.equals(song.title, ignoreCase = true) && it.artist.equals(song.artist, ignoreCase = true))
+        }
+    }
+
+    fun downloadSongForOffline(
+        song: Song,
+        onRequestPermission: (() -> Unit)? = null
+    ) {
+        if (song.id.startsWith("local_media_")) {
+            emitSnackbar("Yeh song pehle se aapke phone storage (My Music) mein hai! 🎵")
             return
         }
-        if (_downloadingSongIds.value.contains(song.id)) return
+        if (!_subscriptionState.value.isActive()) {
+            emitSnackbar("👑 Offline Song Download sirf VIP Premium users ke liye hai! Subscription lein.")
+            _isSubscriptionModalOpen.value = true
+            return
+        }
+        if (!checkAudioPermissionGranted()) {
+            _pendingDownloadSongAfterPermission.value = song
+            emitSnackbar("📂 Song download karne ke liye Storage Permission allow karein!")
+            onRequestPermission?.invoke()
+            return
+        }
+        // Ensure My Songs (Device Music) is also loaded whenever permission is active
+        if (_deviceLocalSongs.value.isEmpty()) {
+            loadDeviceLocalSongs()
+        }
+        if (isSongDownloaded(song)) {
+            emitSnackbar("\"${song.title}\" pehle se Downloaded Songs mein saved hai! ✅")
+            return
+        }
+        if (_downloadingSongIds.value.contains(song.id)) {
+            emitSnackbar("\"${song.title}\" abhi download ho raha hai... ⏳")
+            return
+        }
         viewModelScope.launch {
             _downloadingSongIds.value = _downloadingSongIds.value + song.id
-            emitSnackbar("Downloading \"${song.title}\" for offline playback...")
+            emitSnackbar("📥 Downloading \"${song.title}\" to Downloaded Songs...")
             val targetDir = File(appContext.filesDir, "offline_music")
             val result = audioExtractor.downloadAudioToLocalFile(song, targetDir)
             result.fold(
                 onSuccess = { file ->
+                    val resolvedCover = song.bannerUrl.ifBlank { song.highResBannerUrl }
                     libraryDao.insertDownloadedSong(
                         DownloadedSongEntity(
                             id = song.id,
                             title = song.title,
                             artist = song.artist,
                             videoId = song.videoId,
-                            bannerUrl = song.bannerUrl,
-                            timestamp = song.timestamp,
+                            bannerUrl = resolvedCover,
+                            timestamp = System.currentTimeMillis(),
                             localFilePath = file.absolutePath,
                             fileSizeBytes = file.length(),
                             localContentUri = Uri.fromFile(file).toString()
                         )
                     )
-                    emitSnackbar("Downloaded \"${song.title}\" to My Music")
+                    emitSnackbar("✅ \"${song.title}\" Downloaded Songs mein save ho gaya! Bina internet ke play karein.")
                 },
                 onFailure = { _ ->
-                    emitSnackbar("Offline download unavailable for this track.")
+                    emitSnackbar("⚠️ Download nahi ho paya. Internet check karke dobara try karein.")
                 }
             )
             _downloadingSongIds.value = _downloadingSongIds.value - song.id

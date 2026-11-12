@@ -79,6 +79,8 @@ import com.example.utils.TimeFormatUtils
 fun SongOptionsBottomSheet(
     song: Song,
     sleepTimerRemainingSeconds: Long?,
+    isAlreadyDownloaded: Boolean = false,
+    isCurrentlyDownloading: Boolean = false,
     onDismiss: () -> Unit,
     onViewAlbum: (Song) -> Unit,
     onAddToPlaylist: (Song) -> Unit,
@@ -193,12 +195,17 @@ fun SongOptionsBottomSheet(
                 }
             )
 
-            // 4. Download Offline (ONLY shown if Admin enabled download permission for this song)
-            if (song.allowDownload) {
+            // 4. Download Song for Offline Playback (Available for ALL songs in the app & Spotify playlists for VIP users!)
+            if (!song.id.startsWith("local_media_")) {
                 OptionSheetRow(
                     icon = Icons.Default.Download,
-                    label = stringResource(id = R.string.option_download_offline),
+                    label = when {
+                        isAlreadyDownloaded -> "Downloaded ✅ (Saved in Downloaded Songs)"
+                        isCurrentlyDownloading -> "Downloading Song... ⏳"
+                        else -> "Download Song (Offline VIP 👑)"
+                    },
                     showChevron = false,
+                    tint = SpotifyVibrantGreen,
                     testTag = "sheet_option_download",
                     onClick = {
                         onDismiss()

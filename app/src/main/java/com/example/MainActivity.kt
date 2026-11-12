@@ -281,6 +281,14 @@ fun AKMusicAppRoot(
     val allSpotifyPlaylistSongs by musicViewModel.allSpotifyPlaylistSongs.collectAsStateWithLifecycle()
     val isImportingSpotifyPlaylist by musicViewModel.isImportingSpotifyPlaylist.collectAsStateWithLifecycle()
     val downloadedSongs by musicViewModel.downloadedSongs.collectAsStateWithLifecycle()
+    val downloadingSongIds by musicViewModel.downloadingSongIds.collectAsStateWithLifecycle()
+
+    var offlineBypassMode by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(isInternetAvailable) {
+        if (isInternetAvailable) {
+            offlineBypassMode = false
+        }
+    }
 
     LaunchedEffect(incomingDeepLinkUri) {
         if (incomingDeepLinkUri != null) {
@@ -412,10 +420,36 @@ fun AKMusicAppRoot(
         }
 
         when {
-            !isInternetAvailable -> {
+            !isInternetAvailable && !offlineBypassMode -> {
                 NoInternetScreen(
                     onRetryConnection = {
                         musicViewModel.refreshNetworkState()
+                    },
+                    mySongsCount = deviceLocalSongs.size,
+                    downloadedSongsCount = downloadedSongs.size,
+                    onOpenMySongsOffline = {
+                        offlineBypassMode = true
+                        launchStage = LaunchStage.MAIN_APP
+                        musicViewModel.openLibrarySubScreen(LibrarySubScreen.MyMusic)
+                        if (!musicViewModel.checkAudioPermissionGranted()) {
+                            audioPermissionLauncher.launch(audioPermissionName)
+                        } else {
+                            musicViewModel.loadDeviceLocalSongs()
+                        }
+                    },
+                    onOpenDownloadedSongsOffline = {
+                        if (!subscriptionState.isActive() && downloadedSongs.isEmpty()) {
+                            musicViewModel.emitSnackbar("👑 Downloaded Songs sirf VIP Premium users ke liye hai!")
+                        } else {
+                            offlineBypassMode = true
+                            launchStage = LaunchStage.MAIN_APP
+                            musicViewModel.openLibrarySubScreen(LibrarySubScreen.DownloadedSongs)
+                            if (!musicViewModel.checkAudioPermissionGranted()) {
+                                audioPermissionLauncher.launch(audioPermissionName)
+                            } else {
+                                musicViewModel.loadDeviceLocalSongs()
+                            }
+                        }
                     }
                 )
             }
@@ -1143,9 +1177,17 @@ fun AKMusicAppRoot(
         // Song Options Bottom Sheet (from song row or top-right 3-lines in player)
         val sheetSong = optionsSheetSong
         if (sheetSong != null) {
+            val isDownloaded = remember(sheetSong, downloadedSongs) {
+                musicViewModel.isSongDownloaded(sheetSong)
+            }
+            val isDownloading = remember(sheetSong, downloadingSongIds) {
+                downloadingSongIds.contains(sheetSong.id)
+            }
             SongOptionsBottomSheet(
                 song = sheetSong,
                 sleepTimerRemainingSeconds = sleepTimerRemainingSeconds,
+                isAlreadyDownloaded = isDownloaded,
+                isCurrentlyDownloading = isDownloading,
                 onDismiss = { musicViewModel.closeSongOptions() },
                 onViewAlbum = { song ->
                     musicViewModel.closeFullScreenPlayer()
@@ -1158,7 +1200,12 @@ fun AKMusicAppRoot(
                     musicViewModel.setSleepTimerDialogOpen(true)
                 },
                 onDownloadOffline = { song ->
-                    musicViewModel.downloadSongForOffline(song)
+                    musicViewModel.downloadSongForOffline(
+                        song = song,
+                        onRequestPermission = {
+                            audioPermissionLauncher.launch(audioPermissionName)
+                        }
+                    )
                 }
             )
         }

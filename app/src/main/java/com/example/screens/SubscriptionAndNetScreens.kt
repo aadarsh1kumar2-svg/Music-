@@ -89,7 +89,11 @@ import com.example.ui.theme.SurfaceDarkCard
  */
 @Composable
 fun NoInternetScreen(
-    onRetryConnection: () -> Unit
+    onRetryConnection: () -> Unit,
+    mySongsCount: Int = 0,
+    downloadedSongsCount: Int = 0,
+    onOpenMySongsOffline: (() -> Unit)? = null,
+    onOpenDownloadedSongsOffline: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
 
@@ -124,7 +128,8 @@ fun NoInternetScreen(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 24.dp, vertical = 36.dp),
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 24.dp, vertical = 28.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 // Top AADIFY Logo
@@ -133,7 +138,7 @@ fun NoInternetScreen(
                     contentDescription = "AADIFY Logo",
                     contentScale = ContentScale.Fit,
                     modifier = Modifier
-                        .size(96.dp)
+                        .size(88.dp)
                         .clip(RoundedCornerShape(22.dp))
                         .border(
                             width = 1.5.dp,
@@ -142,49 +147,49 @@ fun NoInternetScreen(
                         )
                 )
 
-                Spacer(modifier = Modifier.height(20.dp))
+                Spacer(modifier = Modifier.height(16.dp))
 
                 Surface(
                     color = ErrorRed.copy(alpha = 0.15f),
                     shape = CircleShape,
-                    modifier = Modifier.size(64.dp)
+                    modifier = Modifier.size(60.dp)
                 ) {
                     Box(contentAlignment = Alignment.Center) {
                         Icon(
                             imageVector = Icons.Default.SignalWifiOff,
                             contentDescription = "No Internet",
                             tint = ErrorRed,
-                            modifier = Modifier.size(34.dp)
+                            modifier = Modifier.size(32.dp)
                         )
                     }
                 }
 
-                Spacer(modifier = Modifier.height(18.dp))
+                Spacer(modifier = Modifier.height(14.dp))
 
                 Text(
                     text = "No Internet",
                     style = MaterialTheme.typography.headlineLarge.copy(
                         color = PrimaryWhite,
                         fontWeight = FontWeight.ExtraBold,
-                        fontSize = 28.sp
+                        fontSize = 26.sp
                     ),
                     textAlign = TextAlign.Center
                 )
 
-                Spacer(modifier = Modifier.height(10.dp))
+                Spacer(modifier = Modifier.height(8.dp))
 
                 Text(
                     text = "Please turn mobile network or connect with hotspot",
                     style = MaterialTheme.typography.bodyLarge.copy(
                         color = MutedGray,
                         fontWeight = FontWeight.Medium,
-                        fontSize = 16.sp,
-                        lineHeight = 23.sp
+                        fontSize = 15.sp,
+                        lineHeight = 22.sp
                     ),
                     textAlign = TextAlign.Center
                 )
 
-                Spacer(modifier = Modifier.height(28.dp))
+                Spacer(modifier = Modifier.height(22.dp))
 
                 Button(
                     onClick = onRetryConnection,
@@ -195,7 +200,7 @@ fun NoInternetScreen(
                     ),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(52.dp)
+                        .height(50.dp)
                         .testTag("no_internet_retry_button")
                 ) {
                     Icon(
@@ -214,7 +219,7 @@ fun NoInternetScreen(
                     )
                 }
 
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(10.dp))
 
                 OutlinedButton(
                     onClick = {
@@ -240,6 +245,68 @@ fun NoInternetScreen(
                             fontWeight = FontWeight.SemiBold
                         )
                     )
+                }
+
+                if (onOpenMySongsOffline != null) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Button(
+                        onClick = onOpenMySongsOffline,
+                        shape = RoundedCornerShape(14.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = SpotifyDarkGreenPill,
+                            contentColor = SpotifyVibrantGreen
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .border(
+                                width = 1.dp,
+                                color = SpotifyGreenBorder,
+                                shape = RoundedCornerShape(14.dp)
+                            )
+                            .testTag("no_internet_my_songs_button")
+                    ) {
+                        val badgeSuffix = if (mySongsCount > 0) " ($mySongsCount)" else ""
+                        Text(
+                            text = "🎵 My Songs$badgeSuffix",
+                            style = MaterialTheme.typography.titleSmall.copy(
+                                color = SpotifyVibrantGreen,
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 15.sp
+                            )
+                        )
+                    }
+                }
+
+                if (onOpenDownloadedSongsOffline != null) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Button(
+                        onClick = onOpenDownloadedSongsOffline,
+                        shape = RoundedCornerShape(14.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFF1F1704),
+                            contentColor = Color(0xFFFFD700)
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .border(
+                                width = 1.dp,
+                                color = Color(0xFFFFD700).copy(alpha = 0.65f),
+                                shape = RoundedCornerShape(14.dp)
+                            )
+                            .testTag("no_internet_downloaded_songs_button")
+                    ) {
+                        val dlSuffix = if (downloadedSongsCount > 0) " ($downloadedSongsCount)" else ""
+                        Text(
+                            text = "📥 Downloaded Songs$dlSuffix 👑",
+                            style = MaterialTheme.typography.titleSmall.copy(
+                                color = Color(0xFFFFD700),
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 15.sp
+                            )
+                        )
+                    }
                 }
             }
         }
@@ -1132,9 +1199,14 @@ fun SubscriptionPlansDialog(
                             subtitle = "Switch between 6 neon & royal themes anytime"
                         )
                         BenefitRow(
+                            emoji = "📥",
+                            title = "Download Any Song & Spotify Track Offline",
+                            subtitle = "App & Spotify ke kisi bhi song ko device mein download karke bina internet ke play karein (Saved in Downloaded Songs)"
+                        )
+                        BenefitRow(
                             emoji = "❤️",
-                            title = "Unlimited Favorites & Offline Downloads",
-                            subtitle = "Save unlimited favorite tracks & listen offline"
+                            title = "Unlimited Favorites & Custom Collections",
+                            subtitle = "Save unlimited favorite tracks & unlock My Songs + Downloaded Songs"
                         )
                         BenefitRow(
                             emoji = "⚡",
