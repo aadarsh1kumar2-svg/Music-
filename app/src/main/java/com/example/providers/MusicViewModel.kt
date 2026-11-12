@@ -3462,19 +3462,16 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
         val storedSeal = prefs.getString("sub_vault_seal_v6", "").orEmpty()
         if (storedSeal.isBlank()) {
-            // Migrate existing legitimate active subscription once to Level-6 HMAC seal
-            if (orderId.isNotBlank() || utr.isNotBlank()) {
-                val migratedSeal = com.example.security.AadifySecurityVault.computeSubscriptionIntegritySeal(
-                    planId = state.planType.id,
-                    activatedAtMs = activatedAt,
-                    expiresAtMs = expiresAt,
-                    orderId = orderId,
-                    utr = utr
-                )
-                prefs.edit().putString("sub_vault_seal_v6", migratedSeal).apply()
-                return state
-            }
-            return UserSubscriptionState()
+            // Migrate existing legitimate active subscription (including Admin-granted VIP) once to Level-6 HMAC seal
+            val migratedSeal = com.example.security.AadifySecurityVault.computeSubscriptionIntegritySeal(
+                planId = state.planType.id,
+                activatedAtMs = activatedAt,
+                expiresAtMs = expiresAt,
+                orderId = orderId,
+                utr = utr
+            )
+            prefs.edit().putString("sub_vault_seal_v6", migratedSeal).apply()
+            return state
         }
 
         val isAuthentic = com.example.security.AadifySecurityVault.verifySubscriptionIntegritySeal(
