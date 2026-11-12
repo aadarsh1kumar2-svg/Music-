@@ -104,8 +104,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         val PLAYBACK_SPEEDS = listOf(0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
         const val FREE_DAILY_LIMIT_SECONDS = 3600 // 1 hour (3600 seconds) per day for Free users
         const val CRAZY_DEAL_WINDOW_MS = 3L * 24L * 60L * 60L * 1000L // 3 days (72 hours) for new users
-        const val CURRENT_APP_UPDATE_SECRET_CODE = "8429"
-        private const val CURRENT_SECRET_CODE_VERSION = 12
+        const val CURRENT_APP_UPDATE_SECRET_CODE = "9364"
+        private const val CURRENT_SECRET_CODE_VERSION = 13
     }
 
     private val appContext = application.applicationContext
@@ -901,26 +901,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private var hasRetriedCurrentTrack = false
 
     init {
-        // One-time cleanup of any legacy mismatched title-only downloads so every song plays its exact link
-        if (!prefs.getBoolean("purged_mismatched_downloads_v3", false)) {
-            prefs.edit().putBoolean("purged_mismatched_downloads_v3", true).apply()
-            viewModelScope.launch(Dispatchers.IO) {
-                try {
-                    val offlineDir = File(appContext.filesDir, "offline_music")
-                    offlineDir.listFiles()?.forEach { file ->
-                        try {
-                            file.delete()
-                        } catch (_: Exception) {
-                        }
-                    }
-                    delay(600L)
-                    for (item in downloadedSongs.value) {
-                        libraryDao.deleteDownloadedSong(item.id)
-                    }
-                } catch (_: Exception) {
-                }
-            }
-        }
         MusicPlaybackService.onSkipNextCallback = {
             viewModelScope.launch { skipToNext() }
         }
