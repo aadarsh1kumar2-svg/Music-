@@ -50,8 +50,10 @@ import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.LibraryMusic
 import androidx.compose.material.icons.filled.LocalFireDepartment
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.WorkspacePremium
 import androidx.compose.material3.AlertDialog
@@ -239,6 +241,7 @@ fun AKMusicAppRoot(
     val authErrorMessage by musicViewModel.authErrorMessage.collectAsStateWithLifecycle()
     val isEditNameDialogOpen by musicViewModel.isEditNameDialogOpen.collectAsStateWithLifecycle()
     val isDeveloperScreenOpen by musicViewModel.isDeveloperScreenOpen.collectAsStateWithLifecycle()
+    val isSettingsPrivacyOpen by musicViewModel.isSettingsPrivacyOpen.collectAsStateWithLifecycle()
     val hasAudioStoragePermission by musicViewModel.hasAudioStoragePermission.collectAsStateWithLifecycle()
     val deviceLocalSongs by musicViewModel.deviceLocalSongs.collectAsStateWithLifecycle()
 
@@ -671,6 +674,75 @@ fun AKMusicAppRoot(
                             HorizontalDivider(color = DividerDark)
                             Spacer(modifier = Modifier.height(8.dp))
 
+                            // Developer Section at TOP of Left 3-Lines Drawer (right below Name & Logo)
+                            NavigationDrawerItem(
+                                label = { Text("Developer") },
+                                icon = { Icon(Icons.Default.Code, contentDescription = "Developer") },
+                                selected = isDeveloperScreenOpen,
+                                onClick = {
+                                    coroutineScope.launch { drawerState.close() }
+                                    musicViewModel.setDeveloperScreenOpen(true)
+                                },
+                                colors = NavigationDrawerItemDefaults.colors(
+                                    selectedContainerColor = SpotifyDarkGreenPill,
+                                    selectedIconColor = SpotifyVibrantGreen,
+                                    selectedTextColor = SpotifyVibrantGreen,
+                                    unselectedIconColor = SpotifyVibrantGreen,
+                                    unselectedTextColor = PrimaryWhite
+                                ),
+                                modifier = Modifier
+                                    .padding(horizontal = 12.dp)
+                                    .testTag("drawer_developer_item")
+                            )
+
+                            // Settings & Privacy Policy Button right below Developer
+                            NavigationDrawerItem(
+                                label = {
+                                    Column {
+                                        Text(
+                                            text = "Settings & Privacy Policy",
+                                            style = MaterialTheme.typography.bodyMedium.copy(
+                                                color = PrimaryWhite,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                        )
+                                        Text(
+                                            text = "Privacy • Smart Cache • Account",
+                                            style = MaterialTheme.typography.labelSmall.copy(
+                                                color = MutedGray
+                                            )
+                                        )
+                                    }
+                                },
+                                icon = {
+                                    Icon(
+                                        imageVector = Icons.Default.Settings,
+                                        contentDescription = "Settings & Privacy Policy",
+                                        tint = SpotifyVibrantGreen
+                                    )
+                                },
+                                selected = isSettingsPrivacyOpen,
+                                onClick = {
+                                    coroutineScope.launch { drawerState.close() }
+                                    musicViewModel.setSettingsPrivacyOpen(true)
+                                },
+                                colors = NavigationDrawerItemDefaults.colors(
+                                    selectedContainerColor = SpotifyDarkGreenPill,
+                                    selectedIconColor = SpotifyVibrantGreen,
+                                    selectedTextColor = SpotifyVibrantGreen,
+                                    unselectedIconColor = SpotifyVibrantGreen,
+                                    unselectedTextColor = PrimaryWhite
+                                ),
+                                modifier = Modifier
+                                    .padding(horizontal = 12.dp)
+                                    .testTag("drawer_settings_privacy_item")
+                            )
+
+                            HorizontalDivider(
+                                color = DividerDark,
+                                modifier = Modifier.padding(vertical = 8.dp)
+                            )
+
                             NavigationDrawerItem(
                                 label = { Text("Home") },
                                 icon = { Icon(Icons.Default.Home, contentDescription = null) },
@@ -897,27 +969,6 @@ fun AKMusicAppRoot(
                                     unselectedTextColor = PrimaryWhite
                                 ),
                                 modifier = Modifier.padding(horizontal = 12.dp)
-                            )
-
-                            // Developer Section in Left 3-Lines Drawer
-                            NavigationDrawerItem(
-                                label = { Text("Developer") },
-                                icon = { Icon(Icons.Default.Code, contentDescription = "Developer") },
-                                selected = isDeveloperScreenOpen,
-                                onClick = {
-                                    coroutineScope.launch { drawerState.close() }
-                                    musicViewModel.setDeveloperScreenOpen(true)
-                                },
-                                colors = NavigationDrawerItemDefaults.colors(
-                                    selectedContainerColor = SpotifyDarkGreenPill,
-                                    selectedIconColor = SpotifyVibrantGreen,
-                                    selectedTextColor = SpotifyVibrantGreen,
-                                    unselectedIconColor = SpotifyVibrantGreen,
-                                    unselectedTextColor = PrimaryWhite
-                                ),
-                                modifier = Modifier
-                                    .padding(horizontal = 12.dp)
-                                    .testTag("drawer_developer_item")
                             )
                         }
                     }
@@ -1317,6 +1368,24 @@ fun AKMusicAppRoot(
         if (isDeveloperScreenOpen) {
             DeveloperProfileDialog(
                 onDismiss = { musicViewModel.setDeveloperScreenOpen(false) }
+            )
+        }
+
+        // Settings & Privacy Policy Dialog / Modal (opened from 3-lines drawer right below Developer)
+        if (isSettingsPrivacyOpen) {
+            SettingsAndPrivacyDialog(
+                userName = userName,
+                secretNumber = userSecretNumber,
+                isUserSubscribed = subscriptionState.isActive(),
+                onOptimizeCache = {
+                    musicViewModel.optimizeSmartCache()
+                },
+                onDeleteAccount = {
+                    musicViewModel.deleteCurrentUserAccount()
+                },
+                onDismiss = {
+                    musicViewModel.setSettingsPrivacyOpen(false)
+                }
             )
         }
 
@@ -2259,3 +2328,274 @@ fun AppThemeSelectorDialog(
         }
     }
 }
+
+@Composable
+fun SettingsAndPrivacyDialog(
+    userName: String,
+    secretNumber: String,
+    isUserSubscribed: Boolean,
+    onOptimizeCache: () -> Unit,
+    onDeleteAccount: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    var confirmDeleteStep by remember { mutableStateOf(false) }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            color = DeepCharcoal,
+            shape = RoundedCornerShape(24.dp),
+            modifier = Modifier
+                .fillMaxWidth(0.92f)
+                .border(
+                    width = 1.5.dp,
+                    color = SpotifyGreenBorder,
+                    shape = RoundedCornerShape(24.dp)
+                )
+                .testTag("settings_privacy_dialog")
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(22.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.Settings,
+                            contentDescription = "Settings",
+                            tint = SpotifyVibrantGreen,
+                            modifier = Modifier.size(26.dp)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column {
+                            Text(
+                                text = "Settings & Privacy Policy",
+                                style = MaterialTheme.typography.titleLarge.copy(
+                                    color = PrimaryWhite,
+                                    fontWeight = FontWeight.ExtraBold
+                                )
+                            )
+                            Text(
+                                text = "AADIFY Security Vault • Secret #$secretNumber",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    color = SpotifyVibrantGreen,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            )
+                        }
+                    }
+                    IconButton(onClick = onDismiss) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Close",
+                            tint = MutedGray
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+                HorizontalDivider(color = DividerDark)
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // 1. Smart Cache & Load Balancer Section
+                Surface(
+                    color = SurfaceDarkCard,
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(1.dp, DividerDark, RoundedCornerShape(16.dp))
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            text = "⚡ Smart Cache & Load Balancer (Active)",
+                            style = MaterialTheme.typography.titleSmall.copy(
+                                color = SpotifyVibrantGreen,
+                                fontWeight = FontWeight.Bold
+                            )
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "Repeated clicks, catalog songs, and trending charts are served from high-speed local memory & disk cache to keep playback lag-free and support 1,00,000+ users smoothly.",
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                color = MutedGray,
+                                lineHeight = 18.sp
+                            )
+                        )
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Button(
+                            onClick = onOptimizeCache,
+                            shape = RoundedCornerShape(12.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = SpotifyDarkGreenPill,
+                                contentColor = SpotifyVibrantGreen
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(42.dp)
+                                .border(1.dp, SpotifyGreenBorder, RoundedCornerShape(12.dp))
+                                .testTag("optimize_smart_cache_button")
+                        ) {
+                            Text(
+                                text = "⚡ Refresh & Optimize Smart Cache",
+                                style = MaterialTheme.typography.labelLarge.copy(
+                                    fontWeight = FontWeight.Bold
+                                )
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // 2. Privacy Policy & All-Ages Safety Notice
+                Surface(
+                    color = SurfaceDarkCard,
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(1.dp, DividerDark, RoundedCornerShape(16.dp))
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            text = "🛡️ Privacy Policy & Terms of Use",
+                            style = MaterialTheme.typography.titleSmall.copy(
+                                color = PrimaryWhite,
+                                fontWeight = FontWeight.ExtraBold
+                            )
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "• All Ages & Family Safe: AADIFY is a music streaming & offline player app suitable for all ages (kids, teens, and adults).\n" +
+                                "• Minimal Data Collection: We only store your chosen Username, encrypted Password, and VIP Music Playlists so you can access your music across sessions. We do NOT collect your GPS location, contacts, camera, microphone, or personal identity documents.\n" +
+                                "• Zero Ad-Tracking or Data Selling: We never sell, rent, or share your data with advertising networks or third-party data brokers.\n" +
+                                "• Payment Security: VIP subscriptions are processed via UPI QR Gateway. AADIFY never collects or stores credit/debit card numbers or banking passwords.\n" +
+                                "• Storage Permission: Audio storage permission is requested only when VIP users choose to download songs for offline playback.",
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                color = MutedGray,
+                                lineHeight = 19.sp
+                            )
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // 3. Account & Data Deletion (DPDP / Play Policy Compliance)
+                Surface(
+                    color = SurfaceDarkCard,
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(1.dp, DividerDark, RoundedCornerShape(16.dp))
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            text = "👤 Account & Data Control ($userName)",
+                            style = MaterialTheme.typography.titleSmall.copy(
+                                color = PrimaryWhite,
+                                fontWeight = FontWeight.Bold
+                            )
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = if (isUserSubscribed) "Status: 👑 VIP Premium Active" else "Status: Free Plan",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                color = SpotifyVibrantGreen,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        if (!confirmDeleteStep) {
+                            TextButton(
+                                onClick = { confirmDeleteStep = true },
+                                modifier = Modifier.testTag("delete_account_init_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Delete,
+                                    contentDescription = "Delete Account",
+                                    tint = Color(0xFFFF5252),
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Delete My Account & Cloud Data",
+                                    style = MaterialTheme.typography.labelLarge.copy(
+                                        color = Color(0xFFFF5252),
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                )
+                            }
+                        } else {
+                            Text(
+                                text = "Are you sure? This will permanently delete your account \"$userName\" and cloud profile data.",
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    color = Color(0xFFFF8A80)
+                                )
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Button(
+                                    onClick = { confirmDeleteStep = false },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = DeepCharcoal,
+                                        contentColor = PrimaryWhite
+                                    ),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text("Cancel")
+                                }
+                                Button(
+                                    onClick = onDeleteAccount,
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = Color(0xFFD32F2F),
+                                        contentColor = PrimaryWhite
+                                    ),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("confirm_delete_account_button")
+                                ) {
+                                    Text("Confirm Delete")
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Button(
+                    onClick = onDismiss,
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = SpotifyVibrantGreen,
+                        contentColor = PureBlack
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("close_settings_privacy_button")
+                ) {
+                    Text(
+                        text = "Done",
+                        style = MaterialTheme.typography.titleSmall.copy(
+                            color = PureBlack,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                    )
+                }
+            }
+        }
+    }
+}
+

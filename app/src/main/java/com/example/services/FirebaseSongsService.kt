@@ -92,7 +92,18 @@ class FirebaseSongsService(private val context: Context) {
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(10, TimeUnit.SECONDS)
+        .connectionPool(okhttp3.ConnectionPool(16, 5, TimeUnit.MINUTES))
+        .apply {
+            try {
+                val cacheDir = java.io.File(context.applicationContext.cacheDir, "aadify_cloud_http_cache")
+                cache(okhttp3.Cache(cacheDir, 15L * 1024L * 1024L))
+            } catch (_: Exception) {
+            }
+        }
         .build()
+
+    @Volatile
+    private var lastSongsRestFetchMs: Long = 0L
 
     private val rankPrefs = context.applicationContext.getSharedPreferences(
         "ak_admin_rank_tracker",
@@ -157,7 +168,22 @@ class FirebaseSongsService(private val context: Context) {
 
     init {
         loadSavedRankHistory()
+        loadCachedSongsCatalog()
         initializeCloudAndListen()
+    }
+
+    private fun loadCachedSongsCatalog() {
+        try {
+            val cachedJson = configCachePrefs.getString("cached_songs_catalog_json", null)
+            if (!cachedJson.isNullOrBlank() && cachedJson != "null") {
+                val parsed = resolveSmartSwapsAndSort(parseSongsJsonRaw(cachedJson))
+                if (parsed.isNotEmpty()) {
+                    _songs.value = parsed
+                    _isLoading.value = false
+                }
+            }
+        } catch (_: Exception) {
+        }
     }
 
     private fun loadSavedRankHistory() {
@@ -667,6 +693,11 @@ class FirebaseSongsService(private val context: Context) {
     }
 
     suspend fun fetchSongsViaRest(silent: Boolean = false) = withContext(Dispatchers.IO) {
+        val nowMs = System.currentTimeMillis()
+        // Smart Load-Balanced Cache: Avoid repeated network hits if songs were already fetched within 15 seconds
+        if (silent && _songs.value.isNotEmpty() && (nowMs - lastSongsRestFetchMs) < 15_000L) {
+            return@withContext
+        }
         if (!silent && _songs.value.isEmpty()) {
             _isLoading.value = true
         }
@@ -678,7 +709,7 @@ class FirebaseSongsService(private val context: Context) {
 
             httpClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
-                    if (!silent) {
+                    if (!silent && _songs.value.isEmpty()) {
                         _connectionError.value = "Network error (${response.code})"
                     }
                     _isLoading.value = false
@@ -694,7 +725,13 @@ class FirebaseSongsService(private val context: Context) {
                 }
 
                 val rawList = parseSongsJsonRaw(bodyStr)
-                _songs.value = resolveSmartSwapsAndSort(rawList)
+                val sorted = resolveSmartSwapsAndSort(rawList)
+                _songs.value = sorted
+                lastSongsRestFetchMs = System.currentTimeMillis()
+                try {
+                    configCachePrefs.edit().putString("cached_songs_catalog_json", bodyStr).apply()
+                } catch (_: Exception) {
+                }
                 _connectionError.value = null
                 _isLoading.value = false
             }
@@ -2344,7 +2381,7 @@ class FirebaseSongsService(private val context: Context) {
                 )
             } else {
                 // SIGN IN MODE:
-                // If the user was deleted from /users by Admin, permanently remove any leftover /userAccounts entry and reject login!
+                // Anti-Enumeration Security: Never reveal whether only the Username/Email or only the Password is wrong!
                 if (existingUserNodeObj == null) {
                     if (existingAccountObj != null) {
                         try {
@@ -2356,12 +2393,9 @@ class FirebaseSongsService(private val context: Context) {
                             ).execute().close()
                         } catch (_: Exception) {
                         }
-                        return@withContext Result.failure(
-                            IllegalArgumentException("Account \"$cleanName\" was permanently deleted by Admin. Please Create a new account.")
-                        )
                     }
                     return@withContext Result.failure(
-                        IllegalArgumentException("Username \"$cleanName\" not found! Tap \"Create your account\" below to register.")
+                        IllegalArgumentException("Invalid Username/Email or Password! Both Username and Password must be correct to Sign In.")
                     )
                 }
 
@@ -2371,7 +2405,7 @@ class FirebaseSongsService(private val context: Context) {
 
                 if (savedPassword.isNotBlank() && savedPassword != cleanPassword) {
                     return@withContext Result.failure(
-                        IllegalArgumentException("Incorrect password for \"$cleanName\". Please try again.")
+                        IllegalArgumentException("Invalid Username/Email or Password! Both Username and Password must be correct to Sign In.")
                     )
                 }
 
@@ -2488,6 +2522,32 @@ class FirebaseSongsService(private val context: Context) {
             return@withContext Result.failure(
                 Exception("Connection error while verifying account. Please check your internet.")
             )
+        }
+    }
+
+    /**
+     * Permanently deletes a user's account and associated listening data from Firebase when requested by the user.
+     */
+    suspend fun deleteUserAccountFromCloud(userId: String, userName: String): Boolean = withContext(Dispatchers.IO) {
+        return@withContext try {
+            val normalizedKey = normalizeUsernameKey(userName.trim())
+            if (userId.isNotBlank()) {
+                httpClient.newCall(
+                    Request.Builder().url("$DATABASE_URL/users/$userId.json").delete().build()
+                ).execute().close()
+                httpClient.newCall(
+                    Request.Builder().url("$DATABASE_URL/userTimeUsage/$userId.json").delete().build()
+                ).execute().close()
+            }
+            if (normalizedKey.isNotBlank()) {
+                httpClient.newCall(
+                    Request.Builder().url("$DATABASE_URL/userAccounts/$normalizedKey.json").delete().build()
+                ).execute().close()
+            }
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "Account deletion cloud request failed: ${e.message}")
+            false
         }
     }
 

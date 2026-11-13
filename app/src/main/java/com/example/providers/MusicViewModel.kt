@@ -172,6 +172,19 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         _isDeveloperScreenOpen.value = open
     }
 
+    // Settings & Privacy Policy Modal State
+    private val _isSettingsPrivacyOpen = MutableStateFlow(false)
+    val isSettingsPrivacyOpen: StateFlow<Boolean> = _isSettingsPrivacyOpen.asStateFlow()
+
+    fun setSettingsPrivacyOpen(open: Boolean) {
+        _isSettingsPrivacyOpen.value = open
+    }
+
+    @Volatile
+    private var failedLoginAttempts: Int = 0
+    @Volatile
+    private var loginLockoutUntilMs: Long = 0L
+
     private fun getOrCreateUserSecretNumber(): String {
         val savedVersion = prefs.getInt("secret_code_version", 0)
         if (savedVersion < CURRENT_SECRET_CODE_VERSION) {
@@ -190,13 +203,13 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         return CURRENT_APP_UPDATE_SECRET_CODE
     }
 
-    // Unique 4-digit Secret Number for this User Panel (changed on every app update: 5829)
+    // Unique 4-digit Secret Number for this User Panel (changed on every app update: 9364)
     private val _userSecretNumber = MutableStateFlow(getOrCreateUserSecretNumber())
     val userSecretNumber: StateFlow<String> = _userSecretNumber.asStateFlow()
 
     /**
      * Authenticates (Sign In) or registers (Create Account) a user with unique username + password
-     * against Firebase Realtime Database.
+     * against Firebase Realtime Database, protected by Brute-Force Rate Limiting & Anti-Enumeration.
      */
     fun authenticateWithNameAndPassword(
         name: String,
@@ -208,6 +221,13 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         val cleanedPass = password.trim()
         if (cleanedName.isEmpty() || cleanedPass.isEmpty()) return
         if (_isAuthenticating.value) return
+
+        val nowCheck = System.currentTimeMillis()
+        if (nowCheck < loginLockoutUntilMs) {
+            val waitSecs = ((loginLockoutUntilMs - nowCheck) / 1000L).coerceAtLeast(1L)
+            _authErrorMessage.value = "Too many failed login attempts! Please wait ${waitSecs}s before trying again."
+            return
+        }
 
         viewModelScope.launch {
             _isAuthenticating.value = true
@@ -222,8 +242,10 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             _isAuthenticating.value = false
             result.fold(
                 onSuccess = { authRes ->
+                    failedLoginAttempts = 0
+                    loginLockoutUntilMs = 0L
                     val now = System.currentTimeMillis()
-                    // Keep the rotated App Update Secret Code (7492) for this update so Admin can target this build or user
+                    // Keep the rotated App Update Secret Code (9364) for this update so Admin can target this build or user
                     val resolvedSecret = CURRENT_APP_UPDATE_SECRET_CODE
                     val encryptedPass = com.example.security.AadifySecurityVault.encryptSensitiveLocalString(authRes.password)
                     prefs.edit()
@@ -282,9 +304,58 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     onAuthenticated()
                 },
                 onFailure = { err ->
-                    _authErrorMessage.value = err.message ?: "Authentication failed. Please try again."
+                    failedLoginAttempts += 1
+                    if (failedLoginAttempts >= 5) {
+                        loginLockoutUntilMs = System.currentTimeMillis() + 30_000L
+                        failedLoginAttempts = 0
+                        _authErrorMessage.value = "Too many failed attempts! Login locked for 30s for security."
+                    } else {
+                        _authErrorMessage.value = err.message ?: "Invalid Username/Email or Password! Both must be correct."
+                    }
                 }
             )
+        }
+    }
+
+    /**
+     * Permanently deletes the current user's account and clears local credentials when requested by the user.
+     */
+    fun deleteCurrentUserAccount() {
+        val currentName = _userName.value.trim()
+        val currentUserId = prefs.getString("cloud_user_id", "")?.trim().orEmpty()
+        viewModelScope.launch {
+            _isSettingsPrivacyOpen.value = false
+            if (currentName.isNotBlank() || currentUserId.isNotBlank()) {
+                firebaseService.deleteUserAccountFromCloud(currentUserId, currentName)
+            }
+            backstagePlayer.pauseVideo()
+            MusicPlaybackService.syncPlayState(false)
+            _isPlaying.value = false
+            prefs.edit()
+                .remove("user_name")
+                .remove("user_password")
+                .remove("cloud_user_id")
+                .apply()
+            saveSubscriptionStateLocally(UserSubscriptionState())
+            clearLocalLibraryDataForFreeUser()
+            _userName.value = ""
+            _userPassword.value = ""
+            _isEditNameDialogOpen.value = true
+            emitSnackbar("Your account and cloud profile data have been permanently deleted.")
+        }
+    }
+
+    /**
+     * Optimizes in-memory and temporary HTTP cache without touching downloaded songs or playlists.
+     */
+    fun optimizeSmartCache() {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                countryTrendingCache.clear()
+                firebaseService.fetchSongsViaRest(silent = true)
+            } catch (_: Exception) {
+            }
+            emitSnackbar("⚡ Smart Cache & Load Balancer optimized!")
         }
     }
 
@@ -2017,7 +2088,17 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private val countryTrendingCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, List<Song>>>()
+    private val countryTrendingCacheTtlMs = 15 * 60 * 1000L
+
     private fun fetchCountryTrendingSongs(country: CountryOption) {
+        val nowMs = System.currentTimeMillis()
+        val cached = countryTrendingCache[country.code]
+        if (cached != null && (nowMs - cached.first) < countryTrendingCacheTtlMs && cached.second.isNotEmpty()) {
+            _countryTrendingSongs.value = cached.second
+            _isSearchingOnline.value = false
+            return
+        }
         countryFetchJob?.cancel()
         countryFetchJob = viewModelScope.launch {
             _isSearchingOnline.value = true
@@ -2026,6 +2107,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 countryCode = country.code,
                 countryName = country.name
             )
+            if (trending.isNotEmpty()) {
+                countryTrendingCache[country.code] = System.currentTimeMillis() to trending
+            }
             _countryTrendingSongs.value = trending
             _isSearchingOnline.value = false
         }
