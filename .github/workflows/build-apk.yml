@@ -118,6 +118,11 @@ jobs:
             exit 1
           fi
           if [ -n "${ANDROID_HOME:-}" ] && [ -d "${ANDROID_HOME}/build-tools" ]; then
+            ZIPALIGN_BIN="$(find "${ANDROID_HOME}/build-tools" -name zipalign -type f | sort -V | tail -n 1 || true)"
+            if [ -n "$ZIPALIGN_BIN" ] && [ -x "$ZIPALIGN_BIN" ]; then
+              "$ZIPALIGN_BIN" -p -f 4 "$EXPECTED_APK" "${EXPECTED_APK}.aligned"
+              mv -f "${EXPECTED_APK}.aligned" "$EXPECTED_APK"
+            fi
             APKSIGNER_BIN="$(find "${ANDROID_HOME}/build-tools" -name apksigner -type f | sort -V | tail -n 1 || true)"
             if [ -n "$APKSIGNER_BIN" ] && [ -x "$APKSIGNER_BIN" ]; then
               "$APKSIGNER_BIN" sign \

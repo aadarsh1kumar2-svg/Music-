@@ -16,9 +16,16 @@ android {
     applicationId = "com.aadarsh.aadify.app"
     minSdk = 24
     targetSdk = 34
-    val buildNumber = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 60
-    versionCode = (System.currentTimeMillis() / 10000L).toInt()
-    versionName = "4.$buildNumber"
+    val ghRunNumber = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull()
+    val buildNumber = ghRunNumber ?: 75
+    val rawTenSec = (System.currentTimeMillis() / 10000L).toInt()
+    val clockTail = ((rawTenSec % 100_000) + 100_000) % 100_000
+    versionCode = if (ghRunNumber != null && ghRunNumber > 0) {
+      210_200_000 + (ghRunNumber * 100_000) + clockTail
+    } else {
+      210_100_000 + clockTail
+    }
+    versionName = "5.$buildNumber"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -71,10 +78,6 @@ android {
     }
   }
   testOptions { unitTests { isIncludeAndroidResources = true } }
-  dependenciesInfo {
-    includeInApk = false
-    includeInBundle = true
-  }
 }
 
 // Configure the Secrets Gradle Plugin to use .env and .env.example files
