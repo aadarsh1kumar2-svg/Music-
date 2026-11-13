@@ -17,13 +17,13 @@ android {
     minSdk = 24
     targetSdk = 34
     val ghRunNumber = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull()
-    val buildNumber = ghRunNumber ?: 75
+    val buildNumber = ghRunNumber ?: 80
     val rawTenSec = (System.currentTimeMillis() / 10000L).toInt()
     val clockTail = ((rawTenSec % 100_000) + 100_000) % 100_000
     versionCode = if (ghRunNumber != null && ghRunNumber > 0) {
-      210_200_000 + (ghRunNumber * 100_000) + clockTail
+      211_200_000 + (ghRunNumber * 100_000) + clockTail
     } else {
-      210_100_000 + clockTail
+      211_100_000 + clockTail
     }
     versionName = "5.$buildNumber"
 
@@ -99,7 +99,7 @@ dependencies {
   implementation(libs.androidx.compose.material3)
   implementation(libs.androidx.compose.ui)
   implementation(libs.androidx.compose.ui.graphics)
-  implementation(libs.androidx.compose.ui.tooling.preview)
+  // implementation(libs.androidx.compose.ui.tooling.preview)
   implementation(libs.androidx.core.ktx)
   implementation(libs.androidx.lifecycle.runtime.compose)
   implementation(libs.androidx.lifecycle.runtime.ktx)
@@ -114,7 +114,7 @@ dependencies {
   implementation(libs.okhttp)
   implementation(libs.androidx.media3.exoplayer)
   implementation(libs.androidx.media3.session)
-  implementation(libs.androidx.media3.ui)
+  // implementation(libs.androidx.media3.ui)
   // implementation(libs.play.services.ads)
   // implementation(libs.unity.ads)
   testImplementation(libs.androidx.compose.ui.test.junit4)
@@ -129,6 +129,6 @@ dependencies {
   androidTestImplementation(libs.androidx.junit)
   androidTestImplementation(libs.androidx.runner)
   // debugImplementation(libs.androidx.compose.ui.test.manifest)
-  debugImplementation(libs.androidx.compose.ui.tooling)
+  // debugImplementation(libs.androidx.compose.ui.tooling)
   "ksp"(libs.androidx.room.compiler)
 }
