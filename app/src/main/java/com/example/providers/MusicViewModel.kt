@@ -104,8 +104,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         val PLAYBACK_SPEEDS = listOf(0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
         const val FREE_DAILY_LIMIT_SECONDS = 3600 // 1 hour (3600 seconds) per day for Free users
         const val CRAZY_DEAL_WINDOW_MS = 3L * 24L * 60L * 60L * 1000L // 3 days (72 hours) for new users
-        const val CURRENT_APP_UPDATE_SECRET_CODE = "7418"
-        private const val CURRENT_SECRET_CODE_VERSION = 15
+        const val CURRENT_APP_UPDATE_SECRET_CODE = "9364"
+        private const val CURRENT_SECRET_CODE_VERSION = 13
     }
 
     private val appContext = application.applicationContext
@@ -970,13 +970,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     private var playbackJob: Job? = null
     private var hasRetriedCurrentTrack = false
-    private var cloudUserSyncJob: Job? = null
-    @Volatile
-    private var isRestoringCloudPlaylists: Boolean = false
-    private val countryTrendingCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, List<Song>>>()
-    private val countryTrendingCacheTtlMs = 15 * 60 * 1000L
-    private val recentSessionPlayedIds = ArrayDeque<String>()
-    private var isCustomPlaylistQueueActive: Boolean = false
 
     init {
         MusicPlaybackService.onSkipNextCallback = {
@@ -1092,22 +1085,10 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        // Create hidden backstage WebView on main thread safely
-        try {
-            backstagePlayer.getOrCreateWebView()
-        } catch (t: Throwable) {
-            Log.e(TAG, "WebView init warning", t)
-        }
-        try {
-            initializeMediaController()
-        } catch (t: Throwable) {
-            Log.e(TAG, "MediaController init warning", t)
-        }
-        try {
-            restorePersistedPlaybackState()
-        } catch (t: Throwable) {
-            Log.e(TAG, "Restore playback state warning", t)
-        }
+        // Create hidden backstage WebView on main thread
+        backstagePlayer.getOrCreateWebView()
+        initializeMediaController()
+        restorePersistedPlaybackState()
         startProgressPoller()
         startSubscriptionAndDailyLimitMonitor()
         registerNetworkCallbackMonitor()
@@ -1117,6 +1098,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         fetchCountryTrendingSongs(_selectedCountry.value)
         setupCloudUserSyncAndAdminControl()
     }
+
+    private var cloudUserSyncJob: Job? = null
 
     private fun setupCloudUserSyncAndAdminControl() {
         firebaseService.onUserDeletedByAdminCallback = {
@@ -1725,6 +1708,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    @Volatile
+    private var isRestoringCloudPlaylists: Boolean = false
+
     /**
      * Restores and merges the VIP user's Playlists, Spotify Playlists (with original Spotify coverUrl),
      * and Favorites from Firebase when a Premium VIP user logs in!
@@ -2102,6 +2088,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private val countryTrendingCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, List<Song>>>()
+    private val countryTrendingCacheTtlMs = 15 * 60 * 1000L
+
     private fun fetchCountryTrendingSongs(country: CountryOption) {
         val nowMs = System.currentTimeMillis()
         val cached = countryTrendingCache[country.code]
@@ -2172,6 +2161,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     fun setLyricsOverlayOpen(open: Boolean) {
         _isLyricsOverlayOpen.value = open
     }
+
+    private val recentSessionPlayedIds = ArrayDeque<String>()
 
     private fun recordPlayedSongForVibeEngine(songId: String) {
         if (songId.isBlank()) return
@@ -2710,6 +2701,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
         return pool.first()
     }
+
+    private var isCustomPlaylistQueueActive: Boolean = false
 
     fun skipToNext() {
         val current = _currentSong.value ?: return

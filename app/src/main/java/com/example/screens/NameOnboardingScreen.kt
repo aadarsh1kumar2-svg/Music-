@@ -404,22 +404,6 @@ fun NameOnboardingScreen(
                         )
                     )
                 }
-
-                Spacer(modifier = Modifier.height(18.dp))
-
-                Text(
-                    text = "Created by Aadarsh kr.",
-                    style = MaterialTheme.typography.labelMedium.copy(
-                        color = SpotifyVibrantGreen.copy(alpha = 0.9f),
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 13.sp,
-                        letterSpacing = 0.6.sp
-                    ),
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("onboarding_created_by_footer")
-                )
             }
         }
     }
