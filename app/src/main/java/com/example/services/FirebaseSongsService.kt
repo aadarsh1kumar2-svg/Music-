@@ -170,6 +170,8 @@ class FirebaseSongsService(private val context: Context) {
     private var isCurrentUserDeletedByAdmin: Boolean = false
     @Volatile
     private var lastUserUploadTimestampMs: Long = 0L
+    @Volatile
+    private var currentWatchedUserName: String = ""
 
     init {
         loadSavedRankHistory()
@@ -1481,9 +1483,6 @@ class FirebaseSongsService(private val context: Context) {
             }
         }
     }
-
-    @Volatile
-    private var currentWatchedUserName: String = ""
 
     private fun verifyUserStillExistsBeforeUpdate(userId: String): Boolean {
         return try {

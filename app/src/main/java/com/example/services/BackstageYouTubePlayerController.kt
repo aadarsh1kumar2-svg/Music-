@@ -202,13 +202,14 @@ class BackstageYouTubePlayerController(
     private var fallbackUrlReloadRunnable: Runnable? = null
 
     @SuppressLint("SetJavaScriptEnabled")
-    fun getOrCreateWebView(): BackstageAudioWebView {
+    fun getOrCreateWebView(): BackstageAudioWebView? {
         val existing = webView
         if (existing != null) {
             return existing
         }
 
-        val created = BackstageAudioWebView(context.applicationContext).apply {
+        val created = try {
+            BackstageAudioWebView(context.applicationContext).apply {
             setBackgroundColor(Color.BLACK)
             // Use LAYER_TYPE_NONE so stopping MainActivity's hardware surface in background never suspends Chromium!
             setLayerType(View.LAYER_TYPE_NONE, null)
@@ -387,6 +388,10 @@ class BackstageYouTubePlayerController(
 
             resumeTimers()
         }
+        } catch (t: Throwable) {
+            Log.e(TAG, "Failed to create BackstageAudioWebView", t)
+            return null
+        }
 
         webView = created
         try {
@@ -404,31 +409,35 @@ class BackstageYouTubePlayerController(
         mainHandler.post {
             try {
                 if (currentLoadedVideoId.isNotBlank()) return@post
-                val view = getOrCreateWebView()
+                val view = getOrCreateWebView() ?: return@post
                 val curUrl = view.url.orEmpty()
                 if (curUrl.isBlank() || curUrl == "about:blank") {
                     view.loadUrl("https://m.youtube.com/?hl=en")
                 }
-            } catch (_: Exception) {
+            } catch (_: Throwable) {
             }
         }
     }
 
     fun attachToContainer(container: ViewGroup) {
-        val view = getOrCreateWebView()
-        val currentParent = view.parent as? ViewGroup
-        if (currentParent !== container) {
-            currentParent?.removeView(view)
-            container.removeAllViews()
-            container.addView(
-                view,
-                ViewGroup.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT
+        try {
+            val view = getOrCreateWebView() ?: return
+            val currentParent = view.parent as? ViewGroup
+            if (currentParent !== container) {
+                currentParent?.removeView(view)
+                container.removeAllViews()
+                container.addView(
+                    view,
+                    ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT
+                    )
                 )
-            )
-            view.onResume()
-            view.resumeTimers()
+                view.onResume()
+                view.resumeTimers()
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "attachToContainer skipped", t)
         }
     }
 
@@ -511,7 +520,10 @@ class BackstageYouTubePlayerController(
         val safeFallbackArt = escapeJsSingleQuoted(buildArtworkFallbackUrl(cleanId))
 
         mainHandler.post {
-            val view = getOrCreateWebView()
+            val view = getOrCreateWebView() ?: run {
+                onErrorUpdate(-1)
+                return@post
+            }
             view.onResume()
             view.resumeTimers()
             try {

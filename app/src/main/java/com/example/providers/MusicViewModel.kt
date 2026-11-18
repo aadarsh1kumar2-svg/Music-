@@ -2,7 +2,6 @@ package com.example.providers
 
 import android.Manifest
 import android.app.Application
-import android.content.ComponentName
 import android.content.ContentUris
 import android.content.Context
 import android.content.pm.PackageManager
@@ -17,8 +16,6 @@ import android.view.ViewGroup
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import androidx.media3.session.MediaController
-import androidx.media3.session.SessionToken
 import androidx.room.Room
 import com.example.models.AKMusicDatabase
 import com.example.models.AdminAppControlConfig
@@ -42,7 +39,6 @@ import com.example.services.MusicPlaybackService
 import com.example.services.SpotifyPlaylistImportService
 import com.example.utils.CountryOption
 import com.example.utils.SUPPORTED_COUNTRIES
-import com.google.common.util.concurrent.ListenableFuture
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -675,9 +671,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     private var paymentPollingJob: Job? = null
 
-    // Media3 Controller (Foreground MediaSessionService for Notification Bar + Lockscreen + Offline Playback)
-    private var controllerFuture: ListenableFuture<MediaController>? = null
-    private var mediaController: MediaController? = null
+    // Playback engine flags (Foreground MediaSessionService handled directly via MusicPlaybackService callbacks)
     private var isUsingExoPlayerFallback = false
     private var hasHandledEndForCurrentSong = false
     private var isCurrentSongLoadedInEngine = false
@@ -800,8 +794,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     )
 
     fun attachBackstagePlayer(container: ViewGroup) {
-        backstagePlayer.attachToContainer(container)
-        backstagePlayer.preWarmEngine()
+        try {
+            backstagePlayer.attachToContainer(container)
+            backstagePlayer.preWarmEngine()
+        } catch (t: Throwable) {
+            Log.w(TAG, "Backstage player attach skipped safely", t)
+        }
     }
 
     fun keepEngineAwakeInBackground() {
@@ -988,6 +986,13 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     private var playbackJob: Job? = null
     private var hasRetriedCurrentTrack = false
+    private var cloudUserSyncJob: Job? = null
+    @Volatile
+    private var isRestoringCloudPlaylists: Boolean = false
+    private val countryTrendingCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, List<Song>>>()
+    private val countryTrendingCacheTtlMs = 15 * 60 * 1000L
+    private val recentSessionPlayedIds = ArrayDeque<String>()
+    private var isCustomPlaylistQueueActive: Boolean = false
 
     init {
         MusicPlaybackService.onSkipNextCallback = {
@@ -1103,9 +1108,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        // Create hidden backstage WebView on main thread
-        backstagePlayer.getOrCreateWebView()
-        initializeMediaController()
+        // Create hidden backstage WebView on main thread safely
+        try {
+            backstagePlayer.getOrCreateWebView()
+        } catch (t: Throwable) {
+            Log.w(TAG, "Backstage WebView init deferred/skipped safely", t)
+        }
         restorePersistedPlaybackState()
         startProgressPoller()
         startSubscriptionAndDailyLimitMonitor()
@@ -1116,8 +1124,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         fetchCountryTrendingSongs(_selectedCountry.value)
         setupCloudUserSyncAndAdminControl()
     }
-
-    private var cloudUserSyncJob: Job? = null
 
     private fun setupCloudUserSyncAndAdminControl() {
         firebaseService.onUserDeletedByAdminCallback = {
@@ -1732,9 +1738,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    @Volatile
-    private var isRestoringCloudPlaylists: Boolean = false
-
     /**
      * Restores and merges the VIP user's Playlists, Spotify Playlists (with original Spotify coverUrl),
      * and Favorites from Firebase when a Premium VIP user logs in!
@@ -1969,29 +1972,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun initializeMediaController() {
-        try {
-            val sessionToken = SessionToken(
-                appContext,
-                ComponentName(appContext, MusicPlaybackService::class.java)
-            )
-            val future = MediaController.Builder(appContext, sessionToken).buildAsync()
-            controllerFuture = future
-            future.addListener(
-                {
-                    try {
-                        mediaController = future.get()
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Failed to connect MediaController", e)
-                    }
-                },
-                ContextCompat.getMainExecutor(appContext)
-            )
-        } catch (e: Exception) {
-            Log.e(TAG, "MediaController init exception", e)
-        }
-    }
-
     private fun startProgressPoller() {
         viewModelScope.launch {
             var backgroundKeepAliveTick = 0
@@ -2112,9 +2092,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private val countryTrendingCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, List<Song>>>()
-    private val countryTrendingCacheTtlMs = 15 * 60 * 1000L
-
     private fun fetchCountryTrendingSongs(country: CountryOption) {
         val nowMs = System.currentTimeMillis()
         val cached = countryTrendingCache[country.code]
@@ -2185,8 +2162,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     fun setLyricsOverlayOpen(open: Boolean) {
         _isLyricsOverlayOpen.value = open
     }
-
-    private val recentSessionPlayedIds = ArrayDeque<String>()
 
     private fun recordPlayedSongForVibeEngine(songId: String) {
         if (songId.isBlank()) return
@@ -2725,8 +2700,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
         return pool.first()
     }
-
-    private var isCustomPlaylistQueueActive: Boolean = false
 
     fun skipToNext() {
         val current = _currentSong.value ?: return
@@ -4075,6 +4048,5 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         MusicPlaybackService.onExoPlayerStreamErrorCallback = null
         MusicPlaybackService.onKeepOnlineEngineAwakeCallback = null
         backstagePlayer.release()
-        controllerFuture?.let { MediaController.releaseFuture(it) }
     }
 }
