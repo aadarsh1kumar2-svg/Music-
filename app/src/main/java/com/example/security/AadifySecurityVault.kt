@@ -216,11 +216,12 @@ object AadifySecurityVault {
             cachedFirebaseApp?.let { return it }
             val appCtx = context.applicationContext ?: context
             verifyAppIntegrity(appCtx)
-            val existing = FirebaseApp.getApps(appCtx)
-            if (existing.isNotEmpty()) {
-                val instance = FirebaseApp.getInstance()
-                cachedFirebaseApp = instance
-                return instance
+            val existingDefault = FirebaseApp.getApps(appCtx).firstOrNull {
+                it.name == FirebaseApp.DEFAULT_APP_NAME
+            }
+            if (existingDefault != null) {
+                cachedFirebaseApp = existingDefault
+                return existingDefault
             }
             val options = FirebaseOptions.Builder()
                 .setProjectId(getFirebaseProjectId())

@@ -549,11 +549,11 @@ private fun LibraryMenuCardRow(
             if (showVipBadge) {
                 Spacer(modifier = Modifier.width(8.dp))
                 Surface(
-                    color = SpotifyDarkGreenPill,
+                    color = androidx.compose.ui.graphics.Color(0xFF261C04),
                     shape = RoundedCornerShape(50),
                     modifier = Modifier.border(
                         width = 1.dp,
-                        color = SpotifyVibrantGreen,
+                        color = androidx.compose.ui.graphics.Color(0xFFFFD700),
                         shape = RoundedCornerShape(50)
                     )
                 ) {
@@ -562,7 +562,7 @@ private fun LibraryMenuCardRow(
                         maxLines = 1,
                         softWrap = false,
                         style = MaterialTheme.typography.labelSmall.copy(
-                            color = SpotifyVibrantGreen,
+                            color = androidx.compose.ui.graphics.Color(0xFFFFD700),
                             fontWeight = FontWeight.ExtraBold,
                             fontSize = 11.sp
                         ),

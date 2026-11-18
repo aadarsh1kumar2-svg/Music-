@@ -1,7 +1,7 @@
 <resources>
     <string name="app_name">AADIFY</string>
     <string name="splash_logo_title">AADIFY</string>
-    <string name="greeting_prefix">Hi There,</string>
+    <string name="greeting_prefix">Welcome,</string>
     <string name="greeting_name">Listener</string>
     <string name="search_placeholder">Songs, albums or artists</string>
     <string name="recent_uploads">All Tracks</string>

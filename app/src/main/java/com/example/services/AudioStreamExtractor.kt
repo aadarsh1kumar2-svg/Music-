@@ -507,14 +507,16 @@ class AudioStreamExtractor {
     }
 
     private suspend fun resolveForSingleVideoIdFast(videoId: String): ResolvedAudioStream? =
-        withTimeoutOrNull(6_500L) {
+        withTimeoutOrNull(7_000L) {
             coroutineScope {
                 val resultChannel = Channel<ResolvedAudioStream?>(Channel.UNLIMITED)
                 val tasks = listOf<suspend () -> ResolvedAudioStream?>(
                     { extractViaSingleInnerTubeClient(videoId, vrClientConfig) },
-                    { extractViaSingleInnerTubeClient(videoId, androidCreatorClientConfig) },
                     { extractViaAndroidMusicInnerTube(videoId) },
                     { extractViaSingleInnerTubeClient(videoId, iosClientConfig) },
+                    { extractViaSingleInnerTubeClient(videoId, tvEmbeddedClientConfig) },
+                    { extractViaSingleInnerTubeClient(videoId, androidCreatorClientConfig) },
+                    { extractViaSingleInnerTubeClient(videoId, webEmbeddedClientConfig) },
                     { extractViaSingleInnerTubeClient(videoId, testSuiteClientConfig) },
                     { fetchFromPipedMirror(PIPED_MIRRORS[0], videoId) },
                     { fetchFromPipedMirror(PIPED_MIRRORS[1], videoId) }
@@ -554,13 +556,37 @@ class AudioStreamExtractor {
         clientName = "ANDROID_VR",
         clientVersion = "1.62.27",
         clientIdHeader = "28",
-        userAgent = "com.google.android.apps.youtube.vr.oculus/1.62.27 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+        userAgent = ANDROID_VR_USER_AGENT,
         osName = "Android",
         osVersion = "12L",
         androidSdkVersion = 32,
         deviceMake = "Oculus",
         deviceModel = "Quest 3",
         playerParams = null
+    )
+
+    private val tvEmbeddedClientConfig = InnerTubeClientConfig(
+        endpoint = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
+        clientName = "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
+        clientVersion = "2.0",
+        clientIdHeader = "85",
+        userAgent = EXOPLAYER_USER_AGENT,
+        osName = "Linux",
+        osVersion = "5.10",
+        androidSdkVersion = null,
+        thirdPartyEmbedUrl = "https://www.youtube.com/"
+    )
+
+    private val webEmbeddedClientConfig = InnerTubeClientConfig(
+        endpoint = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
+        clientName = "WEB_EMBEDDED_PLAYER",
+        clientVersion = "1.20250101.00.00",
+        clientIdHeader = "56",
+        userAgent = EXOPLAYER_USER_AGENT,
+        osName = "Android",
+        osVersion = "14",
+        androidSdkVersion = null,
+        thirdPartyEmbedUrl = "https://www.youtube.com/"
     )
 
     private val androidCreatorClientConfig = InnerTubeClientConfig(
@@ -684,6 +710,12 @@ class AudioStreamExtractor {
                     put("deviceModel", client.deviceModel)
                 }
             }
+            val contextObj = JSONObject().apply {
+                put("client", contextClient)
+                if (!client.thirdPartyEmbedUrl.isNullOrBlank()) {
+                    put("thirdParty", JSONObject().put("embedUrl", client.thirdPartyEmbedUrl))
+                }
+            }
             val payload = JSONObject().apply {
                 put("videoId", videoId)
                 if (!client.playerParams.isNullOrBlank()) {
@@ -691,7 +723,7 @@ class AudioStreamExtractor {
                 }
                 put("contentCheckOk", true)
                 put("racyCheckOk", true)
-                put("context", JSONObject().put("client", contextClient))
+                put("context", contextObj)
             }
 
             val request = Request.Builder()
@@ -896,21 +928,20 @@ class AudioStreamExtractor {
     private fun isStreamUrlReachable(streamUrl: String, userAgent: String): Boolean {
         if (!streamUrl.startsWith("http", ignoreCase = true) || userAgent.isBlank()) return false
         return try {
-            val probeUrl = if (streamUrl.contains("googlevideo.com", ignoreCase = true) &&
-                !streamUrl.contains("&range=", ignoreCase = true)
-            ) {
+            val isGoogleVideo = streamUrl.contains("googlevideo.com", ignoreCase = true)
+            val probeUrl = if (isGoogleVideo && !streamUrl.contains("&range=", ignoreCase = true)) {
                 "$streamUrl&range=0-1023"
             } else {
                 streamUrl
             }
-            val req = Request.Builder()
+            val reqBuilder = Request.Builder()
                 .url(probeUrl)
                 .header("User-Agent", userAgent)
-                .header("Range", "bytes=0-1023")
-                .get()
-                .build()
-            httpClient.newCall(req).execute().use { resp ->
-                resp.code == 200 || resp.code == 206
+            if (!isGoogleVideo) {
+                reqBuilder.header("Range", "bytes=0-1023")
+            }
+            httpClient.newCall(reqBuilder.get().build()).execute().use { resp ->
+                resp.code == 200 || resp.code == 206 || resp.code == 302
             }
         } catch (_: Exception) {
             false
@@ -999,6 +1030,7 @@ class AudioStreamExtractor {
         return try {
             val baseStreamUrl = resolved.streamUrl
             val ua = resolved.userAgent.ifBlank { EXOPLAYER_USER_AGENT }
+            val isBrowserUa = ua.startsWith("Mozilla/", ignoreCase = true)
             val cookieHeader = resolved.cookie.ifBlank {
                 try {
                     CookieManager.getInstance().getCookie(baseStreamUrl).orEmpty()
@@ -1014,6 +1046,7 @@ class AudioStreamExtractor {
                 var startByte = 0L
                 var totalDownloaded = 0L
                 val maxBytes = 15L * 1024L * 1024L // Safety cap 15 MB
+                var chunkAborted = false
 
                 FileOutputStream(destFile).use { output ->
                     while (startByte < maxBytes) {
@@ -1023,8 +1056,10 @@ class AudioStreamExtractor {
                             .url(chunkUrl)
                             .header("User-Agent", ua)
                             .header("Accept", "*/*")
-                            .header("Origin", "https://m.youtube.com")
-                            .header("Referer", "https://m.youtube.com/")
+                        if (isBrowserUa) {
+                            chunkReqBuilder.header("Origin", "https://m.youtube.com")
+                            chunkReqBuilder.header("Referer", "https://m.youtube.com/")
+                        }
                         if (cookieHeader.isNotBlank()) {
                             chunkReqBuilder.header("Cookie", cookieHeader)
                         }
@@ -1033,7 +1068,9 @@ class AudioStreamExtractor {
                         var bytesReadInChunk = 0L
                         downloadHttpClient.newCall(chunkReq).execute().use { resp ->
                             if (!resp.isSuccessful) {
-                                if (totalDownloaded == 0L) return false
+                                if (totalDownloaded == 0L) {
+                                    chunkAborted = true
+                                }
                                 return@use
                             }
                             val body = resp.body ?: return@use
@@ -1047,13 +1084,13 @@ class AudioStreamExtractor {
                                 totalDownloaded += r
                             }
                         }
-                        if (bytesReadInChunk < chunkSize) {
+                        if (chunkAborted || bytesReadInChunk < chunkSize) {
                             break
                         }
                         startByte += bytesReadInChunk
                     }
                 }
-                if (destFile.exists() && destFile.length() > 16_384L) {
+                if (!chunkAborted && destFile.exists() && destFile.length() > 16_384L) {
                     return true
                 }
             }
@@ -1063,7 +1100,7 @@ class AudioStreamExtractor {
                 .url(baseStreamUrl)
                 .header("User-Agent", ua)
                 .header("Accept", "*/*")
-            if (isGoogleVideo) {
+            if (isGoogleVideo && isBrowserUa) {
                 reqBuilder.header("Origin", "https://m.youtube.com")
                 reqBuilder.header("Referer", "https://m.youtube.com/")
             }
@@ -1074,6 +1111,10 @@ class AudioStreamExtractor {
 
             downloadHttpClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) return false
+                val contentType = response.header("Content-Type").orEmpty().lowercase(Locale.US)
+                if (contentType.contains("text/html") || contentType.contains("application/json")) {
+                    return false
+                }
                 val body = response.body ?: return false
                 FileOutputStream(destFile).use { output ->
                     body.byteStream().copyTo(output, bufferSize = 64 * 1024)
@@ -1182,9 +1223,9 @@ class AudioStreamExtractor {
                 wv.loadUrl("https://m.youtube.com/watch?v=$cleanVid&autoplay=1")
             }
 
-            val result = withTimeoutOrNull(5500L) {
+            val result = withTimeoutOrNull(6800L) {
                 val pollJob = kotlinx.coroutines.CoroutineScope(Dispatchers.Main).launch {
-                    repeat(10) {
+                    repeat(13) {
                         delay(450L)
                         if (deferred.isCompleted) return@launch
                         getWebViewCapturedStream(cleanVid)?.let {
@@ -1195,6 +1236,20 @@ class AudioStreamExtractor {
                             """
                             (function() {
                                 try {
+                                    var pr = window.ytInitialPlayerResponse;
+                                    if (pr && pr.streamingData) {
+                                        var fmts = (pr.streamingData.adaptiveFormats || []).concat(pr.streamingData.formats || []);
+                                        for (var i = 0; i < fmts.length; i++) {
+                                            var f = fmts[i];
+                                            if (f && f.url && f.mimeType && f.mimeType.indexOf('audio/') === 0) {
+                                                return f.url;
+                                            }
+                                        }
+                                        for (var j = 0; j < fmts.length; j++) {
+                                            var f2 = fmts[j];
+                                            if (f2 && f2.url) return f2.url;
+                                        }
+                                    }
                                     var v = document.querySelector('video');
                                     if (v) {
                                         v.muted = true;
@@ -1347,7 +1402,8 @@ class AudioStreamExtractor {
         songTitle: String,
         songArtist: String,
         expectedArtistOrTitleHint: String = "",
-        videoId: String = ""
+        videoId: String = "",
+        strictExactMatch: Boolean = false
     ): ResolvedAudioStream? {
         return try {
             val cleanTitle = cleanSongSearchTitle(songTitle)
@@ -1449,6 +1505,22 @@ class AudioStreamExtractor {
                         val artistMapStr = moreInfo.optJSONObject("artistMap")?.toString()?.lowercase(Locale.US).orEmpty()
                         val combinedMeta = "$itemTitle $itemSub $artistMapStr"
 
+                        if (strictExactMatch) {
+                            // Never download a wrong/changed song when strictExactMatch is required
+                            if (titleTokens.isNotEmpty() && !titleTokens.all { combinedMeta.contains(it) }) {
+                                continue
+                            }
+                            if ((itemTitle.contains("lofi") || itemTitle.contains("cover") ||
+                                    itemTitle.contains("remix") || itemTitle.contains("slowed") ||
+                                    itemTitle.contains("ringtone") || itemTitle.contains("karaoke")) &&
+                                !query.lowercase(Locale.US).contains("lofi") &&
+                                !query.lowercase(Locale.US).contains("cover") &&
+                                !query.lowercase(Locale.US).contains("remix")
+                            ) {
+                                continue
+                            }
+                        }
+
                         var score = (10 - i) * 5
                         if (baseNoBrackets.isNotBlank() && itemTitle.contains(baseNoBrackets.lowercase(Locale.US))) {
                             score += 50
@@ -1474,7 +1546,8 @@ class AudioStreamExtractor {
                         }
                     }
 
-                    if (!bestUrl.isNullOrBlank()) {
+                    val minThreshold = if (strictExactMatch) 65 else 0
+                    if (!bestUrl.isNullOrBlank() && bestScore >= minThreshold) {
                         return ResolvedAudioStream(
                             streamUrl = bestUrl,
                             mimeType = "audio/mp4",
@@ -1546,18 +1619,69 @@ class AudioStreamExtractor {
             val safeId = song.id.replace(Regex("[^a-zA-Z0-9_-]"), "_").take(80)
             val explicitVid = song.cleanVideoId
 
-            // 1. FASTEST ENGINE (<2 SECONDS): Direct High-Speed M4A CDN (aac.saavncdn.com)
-            // Uses oEmbed hint tokens for smart artist/version scoring without ever blocking downloads!
-            val (oembedTitle, oembedAuthor) = if (explicitVid.length == 11) {
-                fetchYoutubeOembedInfo(explicitVid)
-            } else {
-                "" to ""
+            // If this song has an exact YouTube videoId (e.g. Admin YouTube link), ALWAYS download
+            // the exact audio of THAT videoId first so downloading NEVER changes the song into a different singer!
+            if (explicitVid.length == 11) {
+                // 1. Live captured stream from BackstageYouTubePlayerController (0ms if currently loaded!)
+                getWebViewCapturedStream(explicitVid)?.let { captured ->
+                    val ext = if (captured.mimeType.contains("webm")) "webm" else "m4a"
+                    val destFile = File(targetDir, "${safeId}.$ext")
+                    if (downloadStreamFastToFile(captured, destFile)) {
+                        return@withContext Result.success(destFile)
+                    }
+                }
+
+                // 2. Direct multi-client InnerTube + Embedded + Piped/Invidious extraction ONLY for explicitVid
+                resolveForSingleVideoIdFast(explicitVid)?.let { exactResolved ->
+                    val ext = if (exactResolved.mimeType.contains("webm") || exactResolved.mimeType.contains("opus")) "webm" else "m4a"
+                    val destFile = File(targetDir, "${safeId}.$ext")
+                    if (downloadStreamFastToFile(exactResolved, destFile)) {
+                        return@withContext Result.success(destFile)
+                    }
+                }
+
+                // 3. Offscreen WebView playerResponse + network capture ONLY for explicitVid
+                if (context != null) {
+                    extractExactYoutubeStreamViaWebView(context, explicitVid)?.let { webViewStream ->
+                        val ext = if (webViewStream.mimeType.contains("webm")) "webm" else "m4a"
+                        val destFile = File(targetDir, "${safeId}.$ext")
+                        if (downloadStreamFastToFile(webViewStream, destFile)) {
+                            return@withContext Result.success(destFile)
+                        }
+                    }
+                }
+
+                // 4. Last-Resort Verified Fallback for exact YouTube video:
+                // Only use high-speed Saavn CDN if it is NOT a cover/lofi/remix AND strictly matches title + artist!
+                val (oembedTitle, oembedAuthor) = fetchYoutubeOembedInfo(explicitVid)
+                val cleanAuthor = oembedAuthor.replace(Regex("\\s*-\\s*Topic$", RegexOption.IGNORE_CASE), "").trim()
+                val effectiveArtist = if (!isGenericArtistLabel(song.artist)) song.artist else cleanAuthor
+                val combinedTitleMeta = "${song.title} $oembedTitle"
+                if (!isSpecialOrCoverYoutubeVariant(combinedTitleMeta)) {
+                    val strictCdnStream = resolveViaDirectSaavnCdn(
+                        songTitle = song.title.ifBlank { oembedTitle },
+                        songArtist = effectiveArtist,
+                        expectedArtistOrTitleHint = "$oembedTitle $cleanAuthor",
+                        videoId = explicitVid,
+                        strictExactMatch = true
+                    )
+                    if (strictCdnStream != null) {
+                        val destFile = File(targetDir, "${safeId}.m4a")
+                        if (downloadStreamFastToFile(strictCdnStream, destFile)) {
+                            return@withContext Result.success(destFile)
+                        }
+                    }
+                }
+
+                return@withContext Result.failure(RuntimeException("Could not download exact YouTube audio stream"))
             }
+
+            // Non-YouTube track (e.g., raw Spotify imported song without videoId):
+            // 1. Direct High-Speed M4A CDN (Saavn) matching title & artist
             val directCdnStream = resolveViaDirectSaavnCdn(
-                songTitle = song.title.ifBlank { oembedTitle },
+                songTitle = song.title,
                 songArtist = song.artist,
-                expectedArtistOrTitleHint = "$oembedTitle $oembedAuthor",
-                videoId = explicitVid
+                strictExactMatch = false
             )
             if (directCdnStream != null) {
                 val destFile = File(targetDir, "${safeId}.m4a")
@@ -1573,50 +1697,18 @@ class AudioStreamExtractor {
                 }
             }
 
-            // 2. If oEmbed title was different from song.title, try resolving via oEmbed title on Direct M4A CDN
-            if (oembedTitle.isNotBlank() && !oembedTitle.equals(song.title, ignoreCase = true)) {
-                val oembedCdnStream = resolveViaDirectSaavnCdn(
-                    songTitle = oembedTitle,
-                    songArtist = oembedAuthor,
-                    expectedArtistOrTitleHint = oembedAuthor,
-                    videoId = explicitVid
-                )
-                if (oembedCdnStream != null) {
-                    val destFile = File(targetDir, "${safeId}.m4a")
-                    if (downloadStreamFastToFile(oembedCdnStream, destFile)) {
-                        return@withContext Result.success(destFile)
-                    }
-                }
-            }
-
-            // 3. Check if BackstageYouTubePlayerController already captured a signed stream for explicitVid
-            if (explicitVid.length == 11) {
-                getWebViewCapturedStream(explicitVid)?.let { captured ->
-                    val ext = if (captured.mimeType.contains("webm")) "webm" else "m4a"
-                    val destFile = File(targetDir, "${safeId}.$ext")
-                    if (downloadStreamFastToFile(captured, destFile)) {
-                        return@withContext Result.success(destFile)
-                    }
-                }
-            }
-
-            // 4. Try InnerTube / Piped / Invidious across explicitVid + searched candidate videoIds
-            val candidateVideoIds = mutableListOf<String>()
-            if (explicitVid.length == 11) candidateVideoIds.add(explicitVid)
+            // 2. Search YouTube Music / YouTube by title + artist and extract fast
             val cleanTitle = cleanSongSearchTitle(song.title)
             val query = if (!isGenericArtistLabel(song.artist)) {
                 "$cleanTitle ${song.artist}".trim()
             } else {
                 cleanTitle
             }
-            if (query.isNotBlank()) {
-                val searchIds = searchPlayableVideoIdsViaYtMusic("$query audio")
+            val candidateVideoIds = if (query.isNotBlank()) {
+                searchPlayableVideoIdsViaYtMusic("$query audio")
                     .ifEmpty { searchPlayableVideoIds("$query audio") }
-                for (id in searchIds) {
-                    if (id.isNotBlank() && !candidateVideoIds.contains(id)) {
-                        candidateVideoIds.add(id)
-                    }
-                }
+            } else {
+                emptyList()
             }
 
             for (vid in candidateVideoIds.take(3)) {
@@ -1628,8 +1720,7 @@ class AudioStreamExtractor {
                 }
             }
 
-            // 5. Try offscreen WebView capture if context is available
-            val targetVidForWebView = explicitVid.ifBlank { candidateVideoIds.firstOrNull().orEmpty() }
+            val targetVidForWebView = candidateVideoIds.firstOrNull().orEmpty()
             if (context != null && targetVidForWebView.length == 11) {
                 extractExactYoutubeStreamViaWebView(context, targetVidForWebView)?.let { webViewStream ->
                     val ext = if (webViewStream.mimeType.contains("webm")) "webm" else "m4a"
@@ -1637,15 +1728,6 @@ class AudioStreamExtractor {
                     if (downloadStreamFastToFile(webViewStream, destFile)) {
                         return@withContext Result.success(destFile)
                     }
-                }
-            }
-
-            // 6. Final Global Fallback: Apple Music / iTunes M4A CDN
-            val itunesFallback = resolveViaItunesCdnFallback(song.title.ifBlank { oembedTitle }, song.artist)
-            if (itunesFallback != null) {
-                val destFile = File(targetDir, "${safeId}.m4a")
-                if (downloadStreamFastToFile(itunesFallback, destFile)) {
-                    return@withContext Result.success(destFile)
                 }
             }
 
@@ -1667,6 +1749,7 @@ class AudioStreamExtractor {
         val androidSdkVersion: Int?,
         val deviceMake: String? = null,
         val deviceModel: String? = null,
-        val playerParams: String? = null
+        val playerParams: String? = null,
+        val thirdPartyEmbedUrl: String? = null
     )
 }

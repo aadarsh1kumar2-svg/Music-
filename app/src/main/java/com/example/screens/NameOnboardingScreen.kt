@@ -404,6 +404,20 @@ fun NameOnboardingScreen(
                         )
                     )
                 }
+
+                Spacer(modifier = Modifier.height(18.dp))
+
+                Text(
+                    text = "Created by Aadarsh",
+                    style = MaterialTheme.typography.labelMedium.copy(
+                        color = MutedGray.copy(alpha = 0.85f),
+                        fontWeight = FontWeight.SemiBold,
+                        letterSpacing = 0.6.sp,
+                        fontSize = 12.sp
+                    ),
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.testTag("onboarding_created_by_aadarsh")
+                )
             }
         }
     }

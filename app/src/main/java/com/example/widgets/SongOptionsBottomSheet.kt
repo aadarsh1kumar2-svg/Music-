@@ -154,11 +154,12 @@ fun SongOptionsBottomSheet(
                 modifier = Modifier.padding(vertical = 6.dp)
             )
 
-            // 1. Add to Playlist
+            // 1. Add to Playlist (Shows VIP crown badge for Free users, hidden for VIP)
             OptionSheetRow(
                 icon = Icons.AutoMirrored.Filled.PlaylistAdd,
                 label = stringResource(id = R.string.option_add_to_playlist),
                 showChevron = true,
+                showVipBadge = !isUserSubscribed,
                 tint = SpotifyVibrantGreen,
                 testTag = "sheet_option_add_playlist",
                 onClick = {
@@ -196,17 +197,17 @@ fun SongOptionsBottomSheet(
                 }
             )
 
-            // 4. Download Song for Offline Playback (Only shows VIP crown if user is NOT already VIP!)
+            // 4. Download Song for Offline Playback (Shows VIP crown badge for Free users, hidden for VIP!)
             if (!song.id.startsWith("local_media_")) {
                 OptionSheetRow(
                     icon = Icons.Default.Download,
                     label = when {
                         isAlreadyDownloaded -> "Downloaded ✅ (Saved in Downloaded Songs)"
                         isCurrentlyDownloading -> "Downloading Song... ⏳"
-                        isUserSubscribed -> "Download Song"
-                        else -> "Download Song (VIP 👑)"
+                        else -> "Download Song"
                     },
                     showChevron = false,
+                    showVipBadge = !isUserSubscribed && !isAlreadyDownloaded && !isCurrentlyDownloading,
                     tint = SpotifyVibrantGreen,
                     testTag = "sheet_option_download",
                     onClick = {
@@ -225,6 +226,7 @@ private fun OptionSheetRow(
     label: String,
     showChevron: Boolean,
     testTag: String,
+    showVipBadge: Boolean = false,
     tint: androidx.compose.ui.graphics.Color = PrimaryWhite,
     onClick: () -> Unit
 ) {
@@ -250,9 +252,36 @@ private fun OptionSheetRow(
                 fontWeight = FontWeight.Medium,
                 fontSize = 17.sp
             ),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f)
         )
+        if (showVipBadge) {
+            Spacer(modifier = Modifier.width(8.dp))
+            androidx.compose.material3.Surface(
+                color = androidx.compose.ui.graphics.Color(0xFF261C04),
+                shape = RoundedCornerShape(50),
+                modifier = Modifier.border(
+                    width = 1.dp,
+                    color = androidx.compose.ui.graphics.Color(0xFFFFD700),
+                    shape = RoundedCornerShape(50)
+                )
+            ) {
+                Text(
+                    text = "👑 VIP",
+                    maxLines = 1,
+                    softWrap = false,
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        color = androidx.compose.ui.graphics.Color(0xFFFFD700),
+                        fontWeight = FontWeight.ExtraBold,
+                        fontSize = 10.5.sp
+                    ),
+                    modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.dp)
+                )
+            }
+        }
         if (showChevron) {
+            Spacer(modifier = Modifier.width(4.dp))
             Icon(
                 imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
                 contentDescription = null,

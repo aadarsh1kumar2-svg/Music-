@@ -102,10 +102,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     companion object {
         private const val TAG = "MusicViewModel"
         val PLAYBACK_SPEEDS = listOf(0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
-        const val FREE_DAILY_LIMIT_SECONDS = 3600 // 1 hour (3600 seconds) per day for Free users
+        const val FREE_DAILY_LIMIT_SECONDS = 3600 // 1 hour (3600 seconds) per 12h cycle for Free users
+        const val LIMIT_RESET_WINDOW_MS = 12L * 60L * 60L * 1000L // Strict 12-hour window before free limit resets
         const val CRAZY_DEAL_WINDOW_MS = 3L * 24L * 60L * 60L * 1000L // 3 days (72 hours) for new users
-        const val CURRENT_APP_UPDATE_SECRET_CODE = "9364"
-        private const val CURRENT_SECRET_CODE_VERSION = 13
+        const val CURRENT_APP_UPDATE_SECRET_CODE = "6842"
+        private const val CURRENT_SECRET_CODE_VERSION = 14
     }
 
     private val appContext = application.applicationContext
@@ -270,8 +271,25 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                         saveSubscriptionStateLocally(UserSubscriptionState())
                     }
 
-                    // Preserve and merge today's daily listened seconds so logging out and logging back in
-                    // (or creating/switching accounts on the same device) NEVER resets the free daily limit!
+                    // Preserve and merge active 12-hour listening seconds so logging out and logging back in
+                    // (or reopening the app 1-2 hours later) NEVER resets the free limit before 12 hours!
+                    val cloudWinStart = authRes.limitWindowStartMs
+                    val existingWinStart = prefs.getLong("limit_window_start_ms", 0L)
+                    val resolvedWinStart = when {
+                        cloudWinStart > 0L && (now - cloudWinStart) < LIMIT_RESET_WINDOW_MS &&
+                            existingWinStart > 0L && (now - existingWinStart) < LIMIT_RESET_WINDOW_MS ->
+                            minOf(cloudWinStart, existingWinStart)
+                        cloudWinStart > 0L && (now - cloudWinStart) < LIMIT_RESET_WINDOW_MS ->
+                            cloudWinStart
+                        existingWinStart > 0L && (now - existingWinStart) < LIMIT_RESET_WINDOW_MS ->
+                            existingWinStart
+                        authRes.todayListenedSeconds > 0 ->
+                            now
+                        else -> 0L
+                    }
+                    if (resolvedWinStart > 0L) {
+                        prefs.edit().putLong("limit_window_start_ms", resolvedWinStart).apply()
+                    }
                     refreshDailyLimitBucketIfNeeded()
                     val mergedTodaySeconds = maxOf(
                         _dailyListenedSeconds.value,
@@ -1164,17 +1182,22 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 val normUser = _userName.value.trim().lowercase(Locale.US)
                 prefs.edit()
                     .putString("daily_limit_date_key", today)
+                    .putLong("limit_window_start_ms", 0L)
+                    .putInt("limit_used_seconds", 0)
+                    .putInt("device_hard_limit_used_seconds", 0)
                     .putInt("daily_listened_seconds", 0)
                     .putInt("device_hard_daily_listened_seconds_$today", 0)
                     .apply {
                         if (normUser.isNotBlank()) {
                             putInt("user_daily_listened_${normUser}_$today", 0)
+                            putInt("user_hard_limit_used_${normUser}", 0)
+                            putLong("user_hard_window_start_${normUser}", 0L)
                         }
                     }
                     .remove("daily_hourly_seconds_json")
                     .apply()
                 _isDailyLimitReachedModalOpen.value = false
-                emitSnackbar("Admin reset your daily listening timer!")
+                emitSnackbar("Admin reset your listening timer!")
             }
         }
 
@@ -1584,6 +1607,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 put("isPremium", false)
             }
             put("dailyListenedSeconds", _dailyListenedSeconds.value)
+            put("limitWindowStartMs", prefs.getLong("limit_window_start_ms", 0L))
         }
 
         firebaseService.syncUserProfileToCloud(
@@ -3453,29 +3477,55 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         val userId = getOrCreateCloudUserId(currentName)
         val totalSecs = _dailyListenedSeconds.value.coerceAtLeast(0)
         val hourlyMap = loadTodayHourlySecondsMap()
+        val windowStartMs = prefs.getLong("limit_window_start_ms", 0L)
         firebaseService.syncUserTimeUsageToCloud(
             userId = userId,
             userName = currentName,
             utcDateKey = utcTodayDateKey(),
             localDateKey = todayDateKey(),
             totalSeconds = totalSecs,
-            hourlySecondsMap = hourlyMap
+            hourlySecondsMap = hourlyMap,
+            limitWindowStartMs = windowStartMs
         )
     }
 
+    private fun resolveActiveWindowStartMs(nowMs: Long = System.currentTimeMillis(), userName: String = _userName.value): Long {
+        val normUser = userName.trim().lowercase(Locale.US)
+        val globalWin = prefs.getLong("limit_window_start_ms", 0L)
+        val userWin = if (normUser.isNotBlank()) prefs.getLong("user_hard_window_start_$normUser", 0L) else 0L
+        return when {
+            globalWin > 0L && userWin > 0L -> minOf(globalWin, userWin)
+            globalWin > 0L -> globalWin
+            else -> userWin
+        }
+    }
+
     private fun persistTodayListenedSecondsAntiBypass(seconds: Int, userName: String = _userName.value) {
+        val nowMs = System.currentTimeMillis()
         val today = todayDateKey()
         val normUser = userName.trim().lowercase(Locale.US)
         val safeSecs = seconds.coerceAtLeast(0)
-        val prevDeviceSecs = prefs.getInt("device_hard_daily_listened_seconds_$today", 0).coerceAtLeast(0)
+        val existingWinStart = resolveActiveWindowStartMs(nowMs, userName)
+        val windowValid = existingWinStart > 0L && (nowMs - existingWinStart) < LIMIT_RESET_WINDOW_MS
+        val activeWinStart = when {
+            windowValid -> existingWinStart
+            safeSecs > 0 -> nowMs
+            else -> 0L
+        }
+        val prevDeviceSecs = if (windowValid) prefs.getInt("device_hard_limit_used_seconds", 0).coerceAtLeast(0) else 0
         val bestSecs = maxOf(safeSecs, prevDeviceSecs)
         prefs.edit()
             .putString("daily_limit_date_key", today)
+            .putLong("limit_window_start_ms", activeWinStart)
+            .putInt("limit_used_seconds", bestSecs)
+            .putInt("device_hard_limit_used_seconds", bestSecs)
             .putInt("daily_listened_seconds", bestSecs)
             .putInt("device_hard_daily_listened_seconds_$today", bestSecs)
             .apply {
                 if (normUser.isNotBlank()) {
-                    val prevUserSecs = prefs.getInt("user_daily_listened_${normUser}_$today", 0).coerceAtLeast(0)
+                    val prevUserSecs = if (windowValid) prefs.getInt("user_hard_limit_used_$normUser", 0).coerceAtLeast(0) else 0
+                    putInt("user_hard_limit_used_$normUser", maxOf(bestSecs, prevUserSecs))
+                    putLong("user_hard_window_start_$normUser", activeWinStart)
                     putInt("user_daily_listened_${normUser}_$today", maxOf(bestSecs, prevUserSecs))
                 }
             }
@@ -3483,40 +3533,68 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun loadTodayListenedSeconds(): Int {
+        val nowMs = System.currentTimeMillis()
         val today = todayDateKey()
-        val savedDay = prefs.getString("daily_limit_date_key", "") ?: ""
         val normUser = _userName.value.trim().lowercase(Locale.US)
-        val deviceHardToday = prefs.getInt("device_hard_daily_listened_seconds_$today", 0).coerceAtLeast(0)
-        val userHardToday = if (normUser.isNotBlank()) {
+        var winStart = resolveActiveWindowStartMs(nowMs, _userName.value)
+
+        // Seamless migration from legacy pre-12h keys if an active session already existed
+        val legacySavedSecs = prefs.getInt("daily_listened_seconds", 0).coerceAtLeast(0)
+        val legacyDeviceHard = prefs.getInt("device_hard_daily_listened_seconds_$today", 0).coerceAtLeast(0)
+        val legacyUserHard = if (normUser.isNotBlank()) {
             prefs.getInt("user_daily_listened_${normUser}_$today", 0).coerceAtLeast(0)
         } else {
             0
         }
-        return if (savedDay == today) {
-            val savedSecs = prefs.getInt("daily_listened_seconds", 0).coerceAtLeast(0)
-            maxOf(savedSecs, deviceHardToday, userHardToday)
-        } else {
-            val carryToday = maxOf(deviceHardToday, userHardToday)
+        val legacyBest = maxOf(legacySavedSecs, legacyDeviceHard, legacyUserHard)
+
+        if (winStart <= 0L && legacyBest > 0) {
+            winStart = nowMs
+            prefs.edit()
+                .putLong("limit_window_start_ms", winStart)
+                .putInt("limit_used_seconds", legacyBest)
+                .putInt("device_hard_limit_used_seconds", legacyBest)
+                .apply()
+            return legacyBest
+        }
+
+        // Only reset after a FULL 12 hours (LIMIT_RESET_WINDOW_MS) have elapsed!
+        if (winStart > 0L && (nowMs - winStart) >= LIMIT_RESET_WINDOW_MS) {
             prefs.edit()
                 .putString("daily_limit_date_key", today)
-                .putInt("daily_listened_seconds", carryToday)
+                .putLong("limit_window_start_ms", 0L)
+                .putInt("limit_used_seconds", 0)
+                .putInt("device_hard_limit_used_seconds", 0)
+                .putInt("daily_listened_seconds", 0)
+                .putInt("device_hard_daily_listened_seconds_$today", 0)
+                .apply {
+                    if (normUser.isNotBlank()) {
+                        putInt("user_hard_limit_used_$normUser", 0)
+                        putLong("user_hard_window_start_$normUser", 0L)
+                        putInt("user_daily_listened_${normUser}_$today", 0)
+                    }
+                }
                 .remove("daily_hourly_seconds_json")
                 .apply()
-            carryToday
+            return 0
         }
+
+        val currentSaved = prefs.getInt("limit_used_seconds", 0).coerceAtLeast(0)
+        val deviceHard = prefs.getInt("device_hard_limit_used_seconds", 0).coerceAtLeast(0)
+        val userHard = if (normUser.isNotBlank()) {
+            prefs.getInt("user_hard_limit_used_$normUser", 0).coerceAtLeast(0)
+        } else {
+            0
+        }
+        return maxOf(currentSaved, deviceHard, userHard, legacyBest)
     }
 
     private fun refreshDailyLimitBucketIfNeeded() {
-        val today = todayDateKey()
-        val savedDay = prefs.getString("daily_limit_date_key", "") ?: ""
-        if (savedDay != today) {
-            prefs.edit()
-                .putString("daily_limit_date_key", today)
-                .putInt("daily_listened_seconds", 0)
-                .putInt("device_hard_daily_listened_seconds_$today", 0)
-                .remove("daily_hourly_seconds_json")
-                .apply()
-            _dailyListenedSeconds.value = 0
+        val nowMs = System.currentTimeMillis()
+        val winStart = resolveActiveWindowStartMs(nowMs, _userName.value)
+        if (winStart > 0L && (nowMs - winStart) >= LIMIT_RESET_WINDOW_MS) {
+            val resetSecs = loadTodayListenedSeconds()
+            _dailyListenedSeconds.value = resetSecs
             _isDailyLimitReachedModalOpen.value = false
             syncCurrentUserTimeUsageToAdminCloud()
         } else {
@@ -3688,7 +3766,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     hourlyMap[hrSlot] = (hourlyMap[hrSlot] ?: 0) + 1
                     saveTodayHourlySecondsMap(hourlyMap)
 
-                    if (nextSec % 3 == 0 || nextSec >= limitSecs) {
+                    if (nextSec == 1 || nextSec % 3 == 0 || nextSec >= limitSecs) {
                         persistTodayListenedSecondsAntiBypass(nextSec)
                     }
                     if (nextSec % 15 == 0 || nextSec == 1 || nextSec >= limitSecs) {
@@ -3718,13 +3796,13 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         _isDailyLimitReachedModalOpen.value = true
         syncCurrentUserTimeUsageToAdminCloud()
         val limitMins = (currentFreeDailyLimitSeconds() / 60).coerceAtLeast(1)
-        emitSnackbar("Your daily ${limitMins}m free limit has been reached! Buy a subscription or wait for next day.")
+        emitSnackbar("Your ${limitMins}m free limit has been reached! Buy a VIP plan or wait 12 hours for reset.")
     }
 
     /**
      * Called when the user enters the Home screen after onboarding/splash.
      * Waits until the Admin Panel configuration (/subscriptionPlans & /premiumBanners) is loaded from Firebase
-     * before showing the Crazy Deals popup so it NEVER flashes default values!
+     * and opens the full SubscriptionPlansDialog (which highlights the First User Deal at the top!).
      */
     fun onHomeScreenEntered() {
         viewModelScope.launch {
@@ -3741,16 +3819,15 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
             if (_subscriptionState.value.isActive()) return@launch
             val cfg = subscriptionConfig.value
-            if (!cfg.crazyDealEnabled) return@launch
             updateSubscriptionAndCrazyDealTimers()
-            if (_crazyDealRemainingSeconds.value <= 0L) return@launch
 
             val userId = getOrCreateCloudUserId(currentName)
-            val seenKey = "crazy_deal_popup_seen_${userId}_${cfg.crazyDealUpdatedAt}"
+            val seenKey = "first_user_plans_popup_seen_${userId}_${cfg.crazyDealUpdatedAt}"
             val alreadySeen = prefs.getBoolean(seenKey, false)
             if (!alreadySeen) {
                 prefs.edit().putBoolean(seenKey, true).apply()
-                _isCrazyDealsPopupOpen.value = true
+                _isCrazyDealsPopupOpen.value = false
+                _isSubscriptionModalOpen.value = true
             }
         }
     }

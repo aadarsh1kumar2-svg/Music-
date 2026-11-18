@@ -626,7 +626,7 @@ fun AKMusicAppRoot(
                                     )
                                 } else {
                                     Text(
-                                        text = "Hi There, $userName",
+                                        text = "Welcome, $userName",
                                         style = MaterialTheme.typography.bodyMedium.copy(
                                             color = PrimaryWhite,
                                             fontFamily = luxuryDrawerFont,
@@ -1971,7 +1971,153 @@ fun DeveloperProfileDialog(
                     textAlign = TextAlign.Center
                 )
 
+                Spacer(modifier = Modifier.height(6.dp))
+
+                Surface(
+                    color = Color(0xFF0A1D13),
+                    shape = RoundedCornerShape(50),
+                    modifier = Modifier.border(
+                        width = 0.8.dp,
+                        color = SpotifyVibrantGreen.copy(alpha = 0.65f),
+                        shape = RoundedCornerShape(50)
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(7.dp)
+                                .clip(CircleShape)
+                                .background(SpotifyVibrantGreen)
+                        )
+                        Text(
+                            text = "SYSTEM OPTIMAL • 100K+ LOAD BALANCED",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                color = SpotifyVibrantGreen,
+                                fontFamily = typewriterFont,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 9.5.sp,
+                                letterSpacing = 0.5.sp
+                            )
+                        )
+                    }
+                }
+
                 Spacer(modifier = Modifier.height(14.dp))
+
+                // Genius Engineering Telemetry Matrix
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Surface(
+                        color = SurfaceDarkCard,
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .border(1.dp, DividerDark, RoundedCornerShape(14.dp))
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(
+                                text = "SMART CACHE",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    color = MutedGray,
+                                    fontFamily = typewriterFont,
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold
+                                ),
+                                maxLines = 1
+                            )
+                            Spacer(modifier = Modifier.height(3.dp))
+                            Text(
+                                text = "L1+L2 15MB",
+                                style = MaterialTheme.typography.labelMedium.copy(
+                                    color = SpotifyVibrantGreen,
+                                    fontFamily = typewriterFont,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    fontSize = 11.5.sp
+                                ),
+                                maxLines = 1
+                            )
+                        }
+                    }
+                    Surface(
+                        color = SurfaceDarkCard,
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .border(1.dp, DividerDark, RoundedCornerShape(14.dp))
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(
+                                text = "FIREBASE SYNC",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    color = MutedGray,
+                                    fontFamily = typewriterFont,
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold
+                                ),
+                                maxLines = 1
+                            )
+                            Spacer(modifier = Modifier.height(3.dp))
+                            Text(
+                                text = "RTDB Pool 16x",
+                                style = MaterialTheme.typography.labelMedium.copy(
+                                    color = Color(0xFFFFD700),
+                                    fontFamily = typewriterFont,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    fontSize = 11.5.sp
+                                ),
+                                maxLines = 1
+                            )
+                        }
+                    }
+                    Surface(
+                        color = SurfaceDarkCard,
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .border(1.dp, DividerDark, RoundedCornerShape(14.dp))
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(
+                                text = "SECURITY",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    color = MutedGray,
+                                    fontFamily = typewriterFont,
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold
+                                ),
+                                maxLines = 1
+                            )
+                            Spacer(modifier = Modifier.height(3.dp))
+                            Text(
+                                text = "AES-256 Vault",
+                                style = MaterialTheme.typography.labelMedium.copy(
+                                    color = SpotifyVibrantGreen,
+                                    fontFamily = typewriterFont,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    fontSize = 11.5.sp
+                                ),
+                                maxLines = 1
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
 
                 // Live Typewriter Story Terminal Box
                 Surface(
@@ -1996,7 +2142,7 @@ fun DeveloperProfileDialog(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "about_aadarsh.sh",
+                                text = "root@aadify:~/about_aadarsh.sh",
                                 style = MaterialTheme.typography.labelSmall.copy(
                                     color = SpotifyVibrantGreen,
                                     fontFamily = typewriterFont,
@@ -2030,17 +2176,31 @@ fun DeveloperProfileDialog(
                             style = MaterialTheme.typography.bodyMedium.copy(
                                 color = PrimaryWhite,
                                 fontFamily = typewriterFont,
-                                fontSize = 12.8.sp,
-                                lineHeight = 20.sp
+                                fontSize = 12.5.sp,
+                                lineHeight = 19.5.sp
                             ),
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .testTag("developer_typewriter_text")
                         )
+
+                        Spacer(modifier = Modifier.height(10.dp))
+                        HorizontalDivider(color = DividerDark.copy(alpha = 0.6f))
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Text(
+                            text = "STACK: Compose M3 • Media3 ExoPlayer • Firebase RTDB • Room SQL • Anti-Tamper Vault",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                color = MutedGray,
+                                fontFamily = typewriterFont,
+                                fontSize = 10.sp,
+                                lineHeight = 14.sp
+                            )
+                        )
                     }
                 }
 
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(14.dp))
 
                 // Contact Card
                 Surface(

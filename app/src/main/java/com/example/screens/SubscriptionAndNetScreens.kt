@@ -641,7 +641,7 @@ fun DailyLimitReachedDialog(
 
                 val totalMins = (freeDailyLimitSeconds.coerceAtLeast(60)) / 60
                 Text(
-                    text = "Daily Free Limit (${totalMins}m) Reached",
+                    text = "Free Limit (${totalMins}m) Reached",
                     style = MaterialTheme.typography.headlineMedium.copy(
                         color = PrimaryWhite,
                         fontWeight = FontWeight.ExtraBold,
@@ -653,7 +653,7 @@ fun DailyLimitReachedDialog(
                 Spacer(modifier = Modifier.height(10.dp))
 
                 Text(
-                    text = "Your limit has been reached! Buy subscription or wait for next day.",
+                    text = "Your free limit has been reached! Buy VIP subscription for unlimited music or wait 12 hours for automatic reset.",
                     style = MaterialTheme.typography.bodyLarge.copy(
                         color = MutedGray,
                         fontSize = 15.sp,
@@ -695,7 +695,7 @@ fun DailyLimitReachedDialog(
 
                 TextButton(onClick = onDismiss) {
                     Text(
-                        text = "Wait for Next Day",
+                        text = "Wait 12 Hours for Reset",
                         color = MutedGray
                     )
                 }

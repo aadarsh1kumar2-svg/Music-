@@ -44,7 +44,8 @@ data class CloudUserAuthResult(
     val isNewAccount: Boolean,
     val subscriptionState: UserSubscriptionState? = null,
     val secretCode: String = "",
-    val todayListenedSeconds: Int = 0
+    val todayListenedSeconds: Int = 0,
+    val limitWindowStartMs: Long = 0L
 )
 
 class FirebaseSongsService(private val context: Context) {
@@ -115,6 +116,8 @@ class FirebaseSongsService(private val context: Context) {
     )
     private val previousExplicitRanks = ConcurrentHashMap<String, Int>()
     private val previousResolvedRanks = ConcurrentHashMap<String, Int>()
+    private val ytArtistCache = ConcurrentHashMap<String, String>()
+    private val ytArtistAttempted = ConcurrentHashMap<String, Long>()
 
     // Strictly Admin-uploaded songs ONLY (no extra default songs mixed into Admin catalog / Top Charts!)
     private val _songs = MutableStateFlow<List<Song>>(emptyList())
@@ -162,14 +165,129 @@ class FirebaseSongsService(private val context: Context) {
     @Volatile
     private var hasUploadedTimeUsageNonZero: Boolean = false
     @Volatile
+    private var lastTimeUsagePatchAtMs: Long = 0L
+    @Volatile
     private var isCurrentUserDeletedByAdmin: Boolean = false
     @Volatile
     private var lastUserUploadTimestampMs: Long = 0L
 
     init {
         loadSavedRankHistory()
+        loadSavedYtArtistCache()
         loadCachedSongsCatalog()
         initializeCloudAndListen()
+    }
+
+    private fun isGenericArtistLabel(rawArtist: String): Boolean {
+        val norm = rawArtist.trim().lowercase(Locale.US)
+        if (norm.isEmpty()) return true
+        return norm in setOf(
+            "ak music",
+            "aadify",
+            "aadify music",
+            "unknown artist",
+            "unknown",
+            "spotify artist",
+            "aadarsh",
+            "aadarsh kumar",
+            "music",
+            "song"
+        )
+    }
+
+    private fun loadSavedYtArtistCache() {
+        try {
+            val raw = configCachePrefs.getString("yt_artist_cache_json", null)
+            if (!raw.isNullOrBlank() && raw.startsWith("{")) {
+                val obj = JSONObject(raw)
+                val keys = obj.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    val v = obj.optString(k, "").trim()
+                    if (k.length == 11 && v.isNotBlank() && !isGenericArtistLabel(v)) {
+                        ytArtistCache[k] = v
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun persistYtArtistCache() {
+        try {
+            val obj = JSONObject()
+            for ((k, v) in ytArtistCache) {
+                obj.put(k, v)
+            }
+            configCachePrefs.edit().putString("yt_artist_cache_json", obj.toString()).apply()
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun resolveArtistWithCache(rawArtist: String, videoId: String): String {
+        val cleaned = rawArtist.trim()
+        if (!isGenericArtistLabel(cleaned)) return cleaned
+        val vid = Song.extractYoutubeVideoId(videoId)
+        if (vid.length == 11) {
+            ytArtistCache[vid]?.takeIf { it.isNotBlank() }?.let { return it }
+        }
+        return cleaned.ifBlank { "Unknown Artist" }
+    }
+
+    private fun enrichGenericArtistsAsync(songsList: List<Song>) {
+        val candidates = songsList.filter { song ->
+            val vid = song.cleanVideoId
+            vid.length == 11 &&
+                isGenericArtistLabel(song.artist) &&
+                !ytArtistCache.containsKey(vid) &&
+                (System.currentTimeMillis() - (ytArtistAttempted[vid] ?: 0L)) > 300_000L
+        }
+        if (candidates.isEmpty()) return
+        scope.launch {
+            var updatedAny = false
+            for (song in candidates.take(25)) {
+                val vid = song.cleanVideoId
+                ytArtistAttempted[vid] = System.currentTimeMillis()
+                try {
+                    val oembedUrl = "https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=$vid&format=json"
+                    val req = Request.Builder()
+                        .url(oembedUrl)
+                        .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36")
+                        .get()
+                        .build()
+                    httpClient.newCall(req).execute().use { resp ->
+                        if (resp.isSuccessful) {
+                            val body = resp.body?.string().orEmpty()
+                            if (body.startsWith("{")) {
+                                val json = JSONObject(body)
+                                val rawAuthor = json.optString("author_name", "").trim()
+                                val cleanAuthor = rawAuthor
+                                    .replace(Regex("\\s*-\\s*Topic$", RegexOption.IGNORE_CASE), "")
+                                    .trim()
+                                if (cleanAuthor.isNotBlank() && !isGenericArtistLabel(cleanAuthor)) {
+                                    ytArtistCache[vid] = cleanAuthor
+                                    updatedAny = true
+                                }
+                            }
+                        }
+                    }
+                } catch (_: Exception) {
+                }
+            }
+            if (updatedAny) {
+                persistYtArtistCache()
+                val patched = _songs.value.map { s ->
+                    val vid = s.cleanVideoId
+                    val cached = if (vid.length == 11) ytArtistCache[vid] else null
+                    if (cached != null && isGenericArtistLabel(s.artist)) {
+                        s.copy(artist = cached)
+                    } else {
+                        s
+                    }
+                }
+                _songs.value = patched
+            }
+        }
     }
 
     private fun loadCachedSongsCatalog() {
@@ -249,7 +367,9 @@ class FirebaseSongsService(private val context: Context) {
             val listener = object : ValueEventListener {
                 override fun onDataChange(snapshot: DataSnapshot) {
                     val rawList = parseSnapshot(snapshot)
-                    _songs.value = resolveSmartSwapsAndSort(rawList)
+                    val finalSongs = resolveSmartSwapsAndSort(rawList)
+                    _songs.value = finalSongs
+                    enrichGenericArtistsAsync(finalSongs)
                     _isLoading.value = false
                     _connectionError.value = null
                 }
@@ -366,7 +486,9 @@ class FirebaseSongsService(private val context: Context) {
             fetchAppControlViaRest()
             fetchNotificationsViaRest()
             while (true) {
-                delay(6_000L)
+                // Smart Load-Balanced Sync: WebSocket ValueEventListeners handle real-time pushes;
+                // fallback REST reconciliation only runs once every 60s to keep Firebase bandwidth low for 100k+ users.
+                delay(60_000L)
                 try {
                     firebaseDatabase?.goOnline()
                 } catch (_: Exception) {
@@ -605,13 +727,15 @@ class FirebaseSongsService(private val context: Context) {
             val title = child.child("title").getValue(String::class.java)
                 ?: child.child("name").getValue(String::class.java)
                 ?: ""
-            val artist = child.child("artist").getValue(String::class.java)
+            val rawArtist = child.child("artist").getValue(String::class.java)
                 ?: child.child("subtitle").getValue(String::class.java)
-                ?: "Unknown Artist"
-            val videoId = child.child("videoId").getValue(String::class.java)
+                ?: ""
+            val rawVideoId = child.child("videoId").getValue(String::class.java)
                 ?: child.child("youtubeId").getValue(String::class.java)
                 ?: child.child("url").getValue(String::class.java)
                 ?: ""
+            val extractedVideoId = Song.extractYoutubeVideoId(rawVideoId)
+            val artist = resolveArtistWithCache(rawArtist, extractedVideoId)
             val bannerUrl = child.child("bannerUrl").getValue(String::class.java)
                 ?: child.child("thumbnail").getValue(String::class.java)
                 ?: child.child("image").getValue(String::class.java)
@@ -671,7 +795,7 @@ class FirebaseSongsService(private val context: Context) {
                 id = id,
                 title = title,
                 artist = artist,
-                videoId = Song.extractYoutubeVideoId(videoId),
+                videoId = extractedVideoId,
                 bannerUrl = bannerUrl,
                 rank = explicitRank,
                 isTopChart = isTopChart,
@@ -694,8 +818,8 @@ class FirebaseSongsService(private val context: Context) {
 
     suspend fun fetchSongsViaRest(silent: Boolean = false) = withContext(Dispatchers.IO) {
         val nowMs = System.currentTimeMillis()
-        // Smart Load-Balanced Cache: Avoid repeated network hits if songs were already fetched within 15 seconds
-        if (silent && _songs.value.isNotEmpty() && (nowMs - lastSongsRestFetchMs) < 15_000L) {
+        // Smart Load-Balanced Cache: Avoid repeated network hits if songs were already fetched within 45 seconds
+        if (silent && _songs.value.isNotEmpty() && (nowMs - lastSongsRestFetchMs) < 45_000L) {
             return@withContext
         }
         if (!silent && _songs.value.isEmpty()) {
@@ -727,6 +851,7 @@ class FirebaseSongsService(private val context: Context) {
                 val rawList = parseSongsJsonRaw(bodyStr)
                 val sorted = resolveSmartSwapsAndSort(rawList)
                 _songs.value = sorted
+                enrichGenericArtistsAsync(sorted)
                 lastSongsRestFetchMs = System.currentTimeMillis()
                 try {
                     configCachePrefs.edit().putString("cached_songs_catalog_json", bodyStr).apply()
@@ -784,11 +909,12 @@ class FirebaseSongsService(private val context: Context) {
     private fun parseJsonObject(fallbackKey: String, obj: JSONObject, snapshotOrder: Int): RawAdminSong? {
         val id = obj.optString("id").ifBlank { fallbackKey }
         val title = obj.optString("title").ifBlank { obj.optString("name") }
-        val artist = obj.optString("artist").ifBlank { obj.optString("subtitle", "Unknown Artist") }
+        val rawArtist = obj.optString("artist").ifBlank { obj.optString("subtitle", "") }
         val rawVideoId = obj.optString("videoId").ifBlank {
             obj.optString("youtubeId").ifBlank { obj.optString("url") }
         }
         val videoId = Song.extractYoutubeVideoId(rawVideoId)
+        val artist = resolveArtistWithCache(rawArtist, videoId)
         val bannerUrl = obj.optString("bannerUrl").ifBlank {
             obj.optString("thumbnail").ifBlank { obj.optString("image") }
         }
@@ -1466,7 +1592,8 @@ class FirebaseSongsService(private val context: Context) {
                         hasUploadedTimeUsageNonZero = true
                     }
                 } else {
-                    if (hasUploadedTimeUsageNonZero) {
+                    val elapsedSincePatch = System.currentTimeMillis() - lastTimeUsagePatchAtMs
+                    if (hasUploadedTimeUsageNonZero && lastTimeUsagePatchAtMs > 0L && elapsedSincePatch > 4_000L) {
                         hasUploadedTimeUsageNonZero = false
                         onAdminTimeUsageResetCallback?.invoke()
                     }
@@ -1518,7 +1645,8 @@ class FirebaseSongsService(private val context: Context) {
                 }
             }
 
-            if (hasUploadedTimeUsageNonZero) {
+            val elapsedSincePatch = System.currentTimeMillis() - lastTimeUsagePatchAtMs
+            if (hasUploadedTimeUsageNonZero && lastTimeUsagePatchAtMs > 0L && elapsedSincePatch > 4_000L) {
                 val timeReq = Request.Builder()
                     .url("$DATABASE_URL/userTimeUsage/$userId.json")
                     .get()
@@ -2462,16 +2590,26 @@ class FirebaseSongsService(private val context: Context) {
                 } catch (_: Exception) {
                 }
 
-                // Also fetch today's cloud listening time for this user so logging out & back in never resets their daily usage
+                // Fetch cloud listening time for this user within the active 12-hour window
+                // so logging out/in or reopening 1-2 hours later NEVER resets their free limit!
+                val twelveHoursMs = 12L * 3600_000L
                 val todayLocalDateKey = java.text.SimpleDateFormat("yyyy-MM-dd", Locale.US).format(java.util.Date(nowMs))
                 val todayUtcDateKey = java.text.SimpleDateFormat("yyyy-MM-dd", Locale.US).apply {
                     timeZone = java.util.TimeZone.getTimeZone("UTC")
                 }.format(java.util.Date(nowMs))
-                var cloudTodayListenedSeconds = 0
+                var cloudListenedSeconds = 0
+                var cloudWindowStartMs = 0L
+                val recordWindowStartMs = matchedRecord.optLong("limitWindowStartMs", 0L)
                 val recordDateKey = matchedRecord.optString("dailyListenedDate", "").trim()
-                if (recordDateKey == todayLocalDateKey || recordDateKey == todayUtcDateKey) {
-                    cloudTodayListenedSeconds = maxOf(
-                        cloudTodayListenedSeconds,
+                val recordWindowStillValid = if (recordWindowStartMs > 0L) {
+                    (nowMs - recordWindowStartMs) < twelveHoursMs
+                } else {
+                    recordDateKey == todayLocalDateKey || recordDateKey == todayUtcDateKey
+                }
+                if (recordWindowStillValid) {
+                    cloudWindowStartMs = recordWindowStartMs
+                    cloudListenedSeconds = maxOf(
+                        cloudListenedSeconds,
                         matchedRecord.optInt("dailyListenedSeconds", 0),
                         matchedRecord.optInt("todaySeconds", 0),
                         matchedRecord.optInt("usedSeconds", 0)
@@ -2487,12 +2625,24 @@ class FirebaseSongsService(private val context: Context) {
                             val usageBody = usageResp.body?.string()?.trim().orEmpty()
                             if (usageBody.isNotEmpty() && usageBody != "null" && usageBody.startsWith("{")) {
                                 val usageObj = JSONObject(usageBody)
+                                val usageWinStart = usageObj.optLong("windowStartMs", 0L)
+                                val usageWinValid = usageWinStart > 0L && (nowMs - usageWinStart) < twelveHoursMs
                                 val dailyObj = usageObj.optJSONObject("daily")
                                 val todayEntry = dailyObj?.optJSONObject(todayLocalDateKey)
                                     ?: dailyObj?.optJSONObject(todayUtcDateKey)
-                                if (todayEntry != null) {
-                                    cloudTodayListenedSeconds = maxOf(
-                                        cloudTodayListenedSeconds,
+
+                                if (usageWinValid) {
+                                    cloudWindowStartMs = if (cloudWindowStartMs > 0L) minOf(cloudWindowStartMs, usageWinStart) else usageWinStart
+                                    cloudListenedSeconds = maxOf(
+                                        cloudListenedSeconds,
+                                        usageObj.optInt("totalSeconds", 0),
+                                        usageObj.optInt("usedSeconds", 0),
+                                        usageObj.optInt("listeningSeconds", 0)
+                                    )
+                                }
+                                if (todayEntry != null && (usageWinStart == 0L || usageWinValid)) {
+                                    cloudListenedSeconds = maxOf(
+                                        cloudListenedSeconds,
                                         todayEntry.optInt("totalSeconds", 0),
                                         todayEntry.optInt("usedSeconds", 0),
                                         todayEntry.optInt("listeningSeconds", 0)
@@ -2513,7 +2663,8 @@ class FirebaseSongsService(private val context: Context) {
                         isNewAccount = false,
                         subscriptionState = cloudSub,
                         secretCode = savedSecretCode,
-                        todayListenedSeconds = cloudTodayListenedSeconds
+                        todayListenedSeconds = cloudListenedSeconds,
+                        limitWindowStartMs = cloudWindowStartMs
                     )
                 )
             }
@@ -2856,16 +3007,15 @@ class FirebaseSongsService(private val context: Context) {
         utcDateKey: String,
         localDateKey: String,
         totalSeconds: Int,
-        hourlySecondsMap: Map<Int, Int>
+        hourlySecondsMap: Map<Int, Int>,
+        limitWindowStartMs: Long = 0L
     ) {
         val cleanId = userId.trim()
         if (cleanId.isEmpty() || isCurrentUserDeletedByAdmin) return
-        if (totalSeconds > 0) {
-            hasUploadedTimeUsageNonZero = true
-        }
         scope.launch {
             try {
                 val now = System.currentTimeMillis()
+                val effectiveWindowStart = if (limitWindowStartMs > 0L) limitWindowStartMs else now
                 val hourlyObj = JSONObject()
                 for ((hourKey, secs) in hourlySecondsMap.toSortedMap()) {
                     if (secs > 0) {
@@ -2884,6 +3034,7 @@ class FirebaseSongsService(private val context: Context) {
                     put("usedSeconds", totalSeconds)
                     put("listeningSeconds", totalSeconds)
                     put("totalMinutes", totalSeconds / 60)
+                    put("windowStartMs", effectiveWindowStart)
                     put("hourly", hourlyObj)
                     put("updatedAt", now)
                 }
@@ -2901,6 +3052,8 @@ class FirebaseSongsService(private val context: Context) {
                     put("totalSeconds", totalSeconds)
                     put("usedSeconds", totalSeconds)
                     put("listeningSeconds", totalSeconds)
+                    put("windowStartMs", effectiveWindowStart)
+                    put("resetWindowHours", 12)
                     put("hourly", hourlyObj)
                     put("daily", dailyMap)
                     put("updatedAt", now)
@@ -2912,7 +3065,12 @@ class FirebaseSongsService(private val context: Context) {
                         .url("$DATABASE_URL/userTimeUsage/$cleanId.json")
                         .patch(body)
                         .build()
-                ).execute().close()
+                ).execute().use { resp ->
+                    if (resp.isSuccessful && totalSeconds > 0) {
+                        lastTimeUsagePatchAtMs = System.currentTimeMillis()
+                        hasUploadedTimeUsageNonZero = true
+                    }
+                }
             } catch (_: Exception) {
             }
         }
