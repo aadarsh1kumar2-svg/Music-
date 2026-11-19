@@ -370,8 +370,12 @@ fun AKMusicAppRoot(
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP || event == Lifecycle.Event.ON_RESUME) {
-                musicViewModel.keepEngineAwakeInBackground()
+            when (event) {
+                Lifecycle.Event.ON_STOP -> musicViewModel.onAppBackgroundStateChanged(true)
+                Lifecycle.Event.ON_START -> musicViewModel.onAppBackgroundStateChanged(false)
+                Lifecycle.Event.ON_PAUSE -> musicViewModel.keepEngineAwakeInBackground()
+                Lifecycle.Event.ON_RESUME -> musicViewModel.keepEngineAwakeInBackground()
+                else -> {}
             }
             if (event == Lifecycle.Event.ON_RESUME) {
                 // If user copied a shared playlist link (`https://aadify.xo.je/?p=<code>`) or opened the app after clicking a share link,

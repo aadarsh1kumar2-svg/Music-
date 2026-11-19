@@ -2,14 +2,19 @@ package com.example.providers
 
 import android.Manifest
 import android.app.Application
+import android.content.BroadcastReceiver
 import android.content.ContentUris
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
+import android.os.PowerManager
+import android.os.SystemClock
 import android.provider.MediaStore
 import android.util.Log
 import android.view.ViewGroup
@@ -672,10 +677,32 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private var paymentPollingJob: Job? = null
 
     // Playback engine flags (Foreground MediaSessionService handled directly via MusicPlaybackService callbacks)
+    @Volatile
     private var isUsingExoPlayerFallback = false
+    @Volatile
     private var hasHandledEndForCurrentSong = false
+    @Volatile
     private var isCurrentSongLoadedInEngine = false
     private var lastPersistedPosBucket = -1L
+    @Volatile
+    private var isAppInBackground = false
+    @Volatile
+    private var exoErrorRecoveryAttemptsForSong = 0
+    @Volatile
+    private var isPromotingToExoPlayer = false
+    private var screenStateReceiver: BroadcastReceiver? = null
+    private val powerManager by lazy {
+        appContext.getSystemService(Context.POWER_SERVICE) as? PowerManager
+    }
+
+    private fun isScreenOffOrBackground(): Boolean {
+        val screenInteractive = try {
+            powerManager?.isInteractive ?: true
+        } catch (_: Throwable) {
+            true
+        }
+        return isAppInBackground || !screenInteractive
+    }
 
     // Hidden Backstage YouTube Player Controller (Primary Engine for all Admin & Online Songs!)
     private val backstagePlayer: BackstageYouTubePlayerController = BackstageYouTubePlayerController(
@@ -790,8 +817,83 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         },
         onUnexpectedPauseDetected = {
             MusicPlaybackService.notifyUnexpectedOnlinePause()
+        },
+        onPlaybackStalledCallback = { resumeAtSec, rendererGone ->
+            handleBackstagePlayerStallOrCrash(resumeAtSec, rendererGone)
         }
     )
+
+    private fun handleBackstagePlayerStallOrCrash(resumeAtSec: Double, rendererGone: Boolean) {
+        val active = _currentSong.value ?: return
+        if (isUsingExoPlayerFallback || hasHandledEndForCurrentSong || !_isPlaying.value) return
+        val vid = active.cleanVideoId
+        val resumePosMs = (resumeAtSec * 1000.0).toLong().coerceAtLeast(_currentPositionMs.value).coerceAtLeast(0L)
+        viewModelScope.launch {
+            if (vid.length == 11) {
+                val stream = audioExtractor.extractExactYoutubeDirectAudioForPlayback(
+                    rawVideoId = vid,
+                    forceFresh = rendererGone
+                )
+                if (stream != null && _currentSong.value?.id == active.id && !hasHandledEndForCurrentSong) {
+                    isUsingExoPlayerFallback = true
+                    backstagePlayer.stopAndClear()
+                    _activeStreamEngine.value = "ExoPlayer Direct Stream"
+                    startExoPlayerWithUri(active, stream.streamUrl, resumePosMs)
+                    return@launch
+                }
+            }
+            if (rendererGone && vid.isNotBlank() && _currentSong.value?.id == active.id && !hasHandledEndForCurrentSong) {
+                backstagePlayer.loadVideoById(
+                    rawVideoId = vid,
+                    startSeconds = resumePosMs / 1000.0,
+                    songTitle = active.title,
+                    songArtist = active.artist,
+                    artworkUrl = active.highResBannerUrl
+                )
+            }
+        }
+    }
+
+    private fun promoteOnlinePlaybackToExoPlayerIfReady(forceResolveIfMissing: Boolean = false) {
+        val active = _currentSong.value ?: return
+        if (isUsingExoPlayerFallback || hasHandledEndForCurrentSong || !_isPlaying.value) return
+        if (isPromotingToExoPlayer) return
+        val vid = active.cleanVideoId
+        if (vid.length != 11) return
+
+        val cached = audioExtractor.getCachedExactYoutubeAudioForPlayback(vid)
+        if (cached != null) {
+            val resumePosMs = maxOf(_currentPositionMs.value, backstagePlayer.getLastKnownPositionMs()).coerceAtLeast(0L)
+            isUsingExoPlayerFallback = true
+            backstagePlayer.stopAndClear()
+            _activeStreamEngine.value = "ExoPlayer Background Stream"
+            startExoPlayerWithUri(active, cached.streamUrl, resumePosMs)
+            return
+        }
+
+        if (!forceResolveIfMissing) return
+        isPromotingToExoPlayer = true
+        viewModelScope.launch {
+            try {
+                val resolved = audioExtractor.extractExactYoutubeDirectAudioForPlayback(vid)
+                if (resolved != null &&
+                    _currentSong.value?.id == active.id &&
+                    !isUsingExoPlayerFallback &&
+                    !hasHandledEndForCurrentSong &&
+                    _isPlaying.value &&
+                    isScreenOffOrBackground()
+                ) {
+                    val resumePosMs = maxOf(_currentPositionMs.value, backstagePlayer.getLastKnownPositionMs()).coerceAtLeast(0L)
+                    isUsingExoPlayerFallback = true
+                    backstagePlayer.stopAndClear()
+                    _activeStreamEngine.value = "ExoPlayer Background Stream"
+                    startExoPlayerWithUri(active, resolved.streamUrl, resumePosMs)
+                }
+            } finally {
+                isPromotingToExoPlayer = false
+            }
+        }
+    }
 
     fun attachBackstagePlayer(container: ViewGroup) {
         try {
@@ -802,12 +904,24 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun onAppBackgroundStateChanged(inBackground: Boolean) {
+        isAppInBackground = inBackground
+        if (inBackground && _isPlaying.value && !isUsingExoPlayerFallback) {
+            promoteOnlinePlaybackToExoPlayerIfReady(forceResolveIfMissing = true)
+        }
+        keepEngineAwakeInBackground()
+    }
+
     fun keepEngineAwakeInBackground() {
-        if (_currentSong.value != null && !isUsingExoPlayerFallback) {
+        val active = _currentSong.value ?: return
+        if (_isPlaying.value) {
+            MusicPlaybackService.syncPlayState(true)
+        }
+        if (isScreenOffOrBackground() && !isUsingExoPlayerFallback && _isPlaying.value) {
+            promoteOnlinePlaybackToExoPlayerIfReady(forceResolveIfMissing = true)
+        }
+        if (!isUsingExoPlayerFallback && active.cleanVideoId.isNotBlank()) {
             backstagePlayer.keepAwake()
-            if (_isPlaying.value) {
-                MusicPlaybackService.syncPlayState(true)
-            }
         }
     }
 
@@ -1051,9 +1165,19 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         MusicPlaybackService.onExoPlayerStreamErrorCallback = {
             viewModelScope.launch {
                 val active = _currentSong.value
-                if (active != null && isUsingExoPlayerFallback) {
+                if (active != null && isUsingExoPlayerFallback && !hasHandledEndForCurrentSong) {
                     val vid = active.cleanVideoId
                     val resumePosMs = _currentPositionMs.value.coerceAtLeast(0L)
+                    if (vid.length == 11 && exoErrorRecoveryAttemptsForSong < 2) {
+                        exoErrorRecoveryAttemptsForSong++
+                        audioExtractor.invalidateCachedStream(vid)
+                        val freshStream = audioExtractor.extractExactYoutubeDirectAudioForPlayback(vid, forceFresh = true)
+                        if (freshStream != null && _currentSong.value?.id == active.id && !hasHandledEndForCurrentSong) {
+                            _activeStreamEngine.value = "ExoPlayer Direct Stream"
+                            startExoPlayerWithUri(active, freshStream.streamUrl, resumePosMs)
+                            return@launch
+                        }
+                    }
                     if (vid.isNotBlank()) {
                         isUsingExoPlayerFallback = false
                         _activeStreamEngine.value = "Backstage YouTube Engine"
@@ -1115,6 +1239,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             Log.w(TAG, "Backstage WebView init deferred/skipped safely", t)
         }
         restorePersistedPlaybackState()
+        registerScreenStateReceiver()
         startProgressPoller()
         startSubscriptionAndDailyLimitMonitor()
         registerNetworkCallbackMonitor()
@@ -1125,6 +1250,54 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         setupCloudUserSyncAndAdminControl()
     }
 
+    private fun registerScreenStateReceiver() {
+        if (screenStateReceiver != null) return
+        try {
+            val receiver = object : BroadcastReceiver() {
+                override fun onReceive(context: Context?, intent: Intent?) {
+                    when (intent?.action) {
+                        Intent.ACTION_SCREEN_OFF -> {
+                            isAppInBackground = true
+                            if (_isPlaying.value && !isUsingExoPlayerFallback) {
+                                promoteOnlinePlaybackToExoPlayerIfReady(forceResolveIfMissing = true)
+                            }
+                            if (_isPlaying.value) {
+                                MusicPlaybackService.syncPlayState(true)
+                            }
+                        }
+                        Intent.ACTION_SCREEN_ON -> {
+                            if (_isPlaying.value) {
+                                keepEngineAwakeInBackground()
+                            }
+                        }
+                    }
+                }
+            }
+            val filter = IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_OFF)
+                addAction(Intent.ACTION_SCREEN_ON)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                appContext.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                appContext.registerReceiver(receiver, filter)
+            }
+            screenStateReceiver = receiver
+        } catch (_: Throwable) {
+        }
+    }
+
+    private fun syncPlaybackSnapshotToService() {
+        MusicPlaybackService.updateQueueStateSnapshot(
+            queue = _queue.value,
+            isRepeatOne = _repeatMode.value == RepeatModeState.ONE,
+            isRepeatAll = _repeatMode.value == RepeatModeState.ALL,
+            isShuffle = _isShuffleEnabled.value,
+            freeDailyLimitSeconds = currentFreeDailyLimitSeconds(),
+            userName = _userName.value
+        )
+    }
+
     private fun setupCloudUserSyncAndAdminControl() {
         firebaseService.onUserDeletedByAdminCallback = {
             viewModelScope.launch {
@@ -1132,36 +1305,45 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        firebaseService.onAdminVipStateSyncedCallback = { cloudVipState ->
+        firebaseService.onAdminVipStateSyncedCallback = { vipSyncOutcome ->
             viewModelScope.launch {
                 val current = _subscriptionState.value
-                if (cloudVipState != null && cloudVipState.isActive()) {
-                    val isNewOrChanged = !current.isActive() ||
-                        current.planType != cloudVipState.planType ||
-                        kotlin.math.abs(current.expiresAtMs - cloudVipState.expiresAtMs) > 60_000L
-                    if (isNewOrChanged) {
-                        saveSubscriptionStateLocally(cloudVipState)
-                        _isDailyLimitReachedModalOpen.value = false
-                        val currentName = _userName.value.trim()
-                        if (currentName.isNotEmpty()) {
-                            val uid = getOrCreateCloudUserId(currentName)
-                            restoreUserPlaylistsFromCloud(uid, currentName)
-                            syncCurrentUserDataToAdminCloud(isExplicitLogin = false)
+                when (vipSyncOutcome) {
+                    is FirebaseSongsService.CloudVipSyncResult.Active -> {
+                        val cloudVipState = vipSyncOutcome.state
+                        val isNewOrChanged = !current.isActive() ||
+                            current.planType != cloudVipState.planType ||
+                            kotlin.math.abs(current.expiresAtMs - cloudVipState.expiresAtMs) > 60_000L
+                        if (isNewOrChanged) {
+                            saveSubscriptionStateLocally(cloudVipState)
+                            _isDailyLimitReachedModalOpen.value = false
+                            val currentName = _userName.value.trim()
+                            if (currentName.isNotEmpty()) {
+                                val uid = getOrCreateCloudUserId(currentName)
+                                restoreUserPlaylistsFromCloud(uid, currentName)
+                                syncCurrentUserDataToAdminCloud(isExplicitLogin = false)
+                            }
+                            emitSnackbar("👑 VIP Activated (${cloudVipState.planType.displayName})!")
                         }
-                        emitSnackbar("👑 VIP Activated (${cloudVipState.planType.displayName})!")
                     }
-                } else if (current.isActive()) {
-                    // Admin deactivated the user's plan (`subscription.status == 'inactive'`)
-                    val sincePayment = System.currentTimeMillis() - lastLocalPaymentActivationMs
-                    if (sincePayment > 8_000L) {
-                        saveSubscriptionStateLocally(UserSubscriptionState())
-                        _repeatMode.value = RepeatModeState.OFF
-                        val currentName = _userName.value.trim()
-                        if (currentName.isNotEmpty()) {
-                            val uid = getOrCreateCloudUserId(currentName)
-                            firebaseService.clearDeactivatedSubscriptionFlagsInCloud(uid, currentName)
+                    is FirebaseSongsService.CloudVipSyncResult.ExplicitlyDeactivated -> {
+                        if (current.isActive()) {
+                            // Admin explicitly deactivated the user's plan (`subscription.status == 'inactive'`)
+                            val sincePayment = System.currentTimeMillis() - lastLocalPaymentActivationMs
+                            if (sincePayment > 8_000L) {
+                                saveSubscriptionStateLocally(UserSubscriptionState())
+                                _repeatMode.value = RepeatModeState.OFF
+                                val currentName = _userName.value.trim()
+                                if (currentName.isNotEmpty()) {
+                                    val uid = getOrCreateCloudUserId(currentName)
+                                    firebaseService.clearDeactivatedSubscriptionFlagsInCloud(uid, currentName)
+                                }
+                                emitSnackbar("Your subscription plan was deactivated by Admin.")
+                            }
                         }
-                        emitSnackbar("Your subscription plan was deactivated by Admin.")
+                    }
+                    is FirebaseSongsService.CloudVipSyncResult.AbsentOrUnchanged -> {
+                        // Do not falsely revoke an active VIP subscription on partial/absent snapshots!
                     }
                 }
             }
@@ -1920,12 +2102,20 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             if (activeFromService != null) {
                 _currentSong.value = activeFromService
                 _queue.value = restoredQueue.ifEmpty { listOf(activeFromService) }
-                val engineReadyNow = isUsingExoPlayerFallback ||
+                val directMode = MusicPlaybackService.isDirectAudioModeActive()
+                if (directMode) {
+                    isUsingExoPlayerFallback = true
+                    _currentPositionMs.value = MusicPlaybackService.getCurrentExoPositionMs()
+                    _durationMs.value = MusicPlaybackService.getCurrentExoDurationMs()
+                }
+                val engineReadyNow = directMode ||
+                    isUsingExoPlayerFallback ||
                     backstagePlayer.isVideoReadyForPlay(activeFromService.cleanVideoId)
                 val actuallyPlaying = MusicPlaybackService.isCurrentlyPlaying() && engineReadyNow
                 _isPlaying.value = actuallyPlaying
                 _isBuffering.value = false
                 isCurrentSongLoadedInEngine = actuallyPlaying
+                syncPlaybackSnapshotToService()
                 return
             }
 
@@ -2256,6 +2446,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
         hasRetriedCurrentTrack = false
         hasHandledEndForCurrentSong = false
+        exoErrorRecoveryAttemptsForSong = 0
+        isPromotingToExoPlayer = false
         isCurrentSongLoadedInEngine = true
         _currentSong.value = song
         _currentPositionMs.value = resolvedStartMs
@@ -2264,6 +2456,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
         _isBuffering.value = true
         _isPlaying.value = true
+        syncPlaybackSnapshotToService()
 
         // Immediately sync Foreground Service notification & WakeLock so there is zero gap between tracks
         MusicPlaybackService.syncNowPlaying(
@@ -2372,7 +2565,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 return@launch
             }
 
-            // 4. Primary Engine for ALL Admin & Online Songs — Start playback IMMEDIATELY without waiting on cover art!
+            // 4. Primary Engine Strategy:
+            // - If rawTarget is a direct audio URL, play on Native ExoPlayer.
+            // - If exact YouTube videoId stream is ALREADY cached OR device is currently in background / screen-off,
+            //   resolve & play directly on Native ExoPlayer (100% immune to Doze & Chromium screen-off throttling!).
+            // - Otherwise start INSTANTLY on BackstageYouTubePlayerController, while pre-resolving exact stream in background!
             val rawTarget = activeSongToPlay.videoId.trim()
             val isDirectAudioUrl = (rawTarget.startsWith("http://", ignoreCase = true) ||
                 rawTarget.startsWith("https://", ignoreCase = true)) &&
@@ -2385,22 +2582,48 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 _activeStreamEngine.value = "ExoPlayer Direct Stream"
                 startExoPlayerWithUri(activeSongToPlay, rawTarget, resolvedStartMs)
             } else {
-                // Instant playback via pre-warmed Backstage YouTube Engine + Foreground MediaSession Notification
-                isUsingExoPlayerFallback = false
-                _activeStreamEngine.value = "Backstage YouTube Engine"
-                backstagePlayer.loadVideoById(
-                    rawVideoId = playableVideoId,
-                    startSeconds = resolvedStartMs / 1000.0,
-                    songTitle = activeSongToPlay.title,
-                    songArtist = activeSongToPlay.artist,
-                    artworkUrl = activeSongToPlay.highResBannerUrl
-                )
+                val cachedDirectStream = audioExtractor.getCachedExactYoutubeAudioForPlayback(playableVideoId)
+                    ?: if (isScreenOffOrBackground()) {
+                        audioExtractor.extractExactYoutubeDirectAudioForPlayback(playableVideoId)
+                    } else {
+                        null
+                    }
+                if (cachedDirectStream != null) {
+                    isUsingExoPlayerFallback = true
+                    backstagePlayer.stopAndClear()
+                    _activeStreamEngine.value = "ExoPlayer Native Audio"
+                    startExoPlayerWithUri(activeSongToPlay, cachedDirectStream.streamUrl, resolvedStartMs)
+                } else {
+                    isUsingExoPlayerFallback = false
+                    _activeStreamEngine.value = "Backstage YouTube Engine"
+                    backstagePlayer.loadVideoById(
+                        rawVideoId = playableVideoId,
+                        startSeconds = resolvedStartMs / 1000.0,
+                        songTitle = activeSongToPlay.title,
+                        songArtist = activeSongToPlay.artist,
+                        artworkUrl = activeSongToPlay.highResBannerUrl
+                    )
+                }
             }
 
-            // 5. Deferred background cover hydration & upcoming queue videoId pre-fetching
-            // Wait until the current song has finished buffering and started playing so ZERO network requests compete with startup!
+            // 5. Deferred background cover hydration, exact stream caching for screen-off safety, & upcoming queue pre-fetching
             val resolvedVidForAsync = playableVideoId
             viewModelScope.launch(Dispatchers.IO) {
+                if (!isDirectAudioUrl && resolvedVidForAsync.length == 11) {
+                    // Pre-cache exact stream for current song silently so instant Screen-Off / Background promotion works at 0ms!
+                    val resolvedNow = audioExtractor.extractExactYoutubeDirectAudioForPlayback(resolvedVidForAsync)
+                    if (resolvedNow != null &&
+                        isScreenOffOrBackground() &&
+                        !isUsingExoPlayerFallback &&
+                        _currentSong.value?.id == activeSongToPlay.id &&
+                        !hasHandledEndForCurrentSong &&
+                        _isPlaying.value
+                    ) {
+                        withContext(Dispatchers.Main) {
+                            promoteOnlinePlaybackToExoPlayerIfReady(forceResolveIfMissing = false)
+                        }
+                    }
+                }
                 if (song.id.startsWith("spotify_") && song.cleanVideoId.isBlank()) {
                     try {
                         libraryDao.updateSpotifyPlaylistSongVideoId(
@@ -2411,7 +2634,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     } catch (_: Exception) {
                     }
                 }
-                delay(4500L)
+                delay(3500L)
                 while (_isBuffering.value) {
                     delay(1000L)
                 }
@@ -2443,7 +2666,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
 
-                // Pre-resolve videoIds for the next 3 tracks in the queue once current song is playing smoothly
+                // Pre-resolve videoIds AND exact direct audio streams for the next 3 tracks in the queue
+                // so track transitions with screen OFF or in background happen instantaneously on Native ExoPlayer!
                 val currentIdx = resolvedQueue.indexOfFirst { it.id == song.id }
                 if (currentIdx >= 0) {
                     val upcoming = resolvedQueue.drop(currentIdx + 1).take(3)
@@ -2451,8 +2675,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                         while (_isBuffering.value) {
                             delay(1000L)
                         }
-                        if (nextTrack.cleanVideoId.isBlank() && nextTrack.resolvedLocalUri.isBlank()) {
-                            val nextVid = audioExtractor.findPlayableVideoIdForSong(nextTrack).orEmpty()
+                        var nextVid = nextTrack.cleanVideoId
+                        if (nextVid.isBlank() && nextTrack.resolvedLocalUri.isBlank()) {
+                            nextVid = audioExtractor.findPlayableVideoIdForSong(nextTrack).orEmpty()
                             if (nextVid.isNotBlank() && nextTrack.id.startsWith("spotify_")) {
                                 try {
                                     libraryDao.updateSpotifyPlaylistSongVideoId(
@@ -2465,6 +2690,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                                 } catch (_: Exception) {
                                 }
                             }
+                        }
+                        if (nextVid.length == 11 && nextTrack.resolvedLocalUri.isBlank()) {
+                            audioExtractor.extractExactYoutubeDirectAudioForPlayback(nextVid)
                         }
                     }
                 }
@@ -2782,6 +3010,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     fun toggleShuffle() {
         val next = !_isShuffleEnabled.value
         _isShuffleEnabled.value = next
+        syncPlaybackSnapshotToService()
         emitSnackbar(if (next) "Shuffle enabled" else "Shuffle disabled")
     }
 
@@ -2798,6 +3027,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             RepeatModeState.ONE -> RepeatModeState.OFF
         }
         _repeatMode.value = next
+        syncPlaybackSnapshotToService()
         val label = when (next) {
             RepeatModeState.OFF -> "Repeat Off"
             RepeatModeState.ALL -> "Repeat All (Playlist Loop)"
@@ -3719,36 +3949,57 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             if (_userName.value.isNotBlank()) {
                 syncCurrentUserTimeUsageToAdminCloud()
             }
+            var lastPlayCountElapsedMs = 0L
+            var secCarryMs = 0L
             while (isActive) {
                 delay(1000L)
                 _isInternetAvailable.value = checkNetworkConnected()
                 refreshDailyLimitBucketIfNeeded()
                 updateSubscriptionAndCrazyDealTimers()
 
-                // Track active listening seconds for Free users (Admin-controllable daily limit)
+                // Track active listening seconds STRICTLY for Free users (Prime/VIP users get 100% unlimited playback!).
+                // Uses SystemClock.elapsedRealtime() delta so background / Doze coalescing never slows down Free limit!
                 val limitSecs = currentFreeDailyLimitSeconds()
-                if (!_subscriptionState.value.isActive() && _dailyListenedSeconds.value < limitSecs && _isDailyLimitReachedModalOpen.value) {
+                val isVipNow = _subscriptionState.value.isActive()
+                if (!isVipNow && _dailyListenedSeconds.value < limitSecs && _isDailyLimitReachedModalOpen.value) {
                     _isDailyLimitReachedModalOpen.value = false
                 }
-                if (_isPlaying.value && !_isBuffering.value && !_subscriptionState.value.isActive()) {
-                    val nextSec = _dailyListenedSeconds.value + 1
-                    _dailyListenedSeconds.value = nextSec
+                if (_isPlaying.value && !_isBuffering.value && !isVipNow) {
+                    val nowElapsed = SystemClock.elapsedRealtime()
+                    val deltaMs = if (lastPlayCountElapsedMs > 0L) {
+                        (nowElapsed - lastPlayCountElapsedMs).coerceIn(0L, 5_000L)
+                    } else {
+                        1_000L
+                    }
+                    lastPlayCountElapsedMs = nowElapsed
+                    secCarryMs += deltaMs
+                    val elapsedWholeSecs = (secCarryMs / 1000L).toInt()
+                    secCarryMs %= 1000L
+                    if (elapsedWholeSecs > 0) {
+                        val nextSec = _dailyListenedSeconds.value + elapsedWholeSecs
+                        _dailyListenedSeconds.value = nextSec
 
-                    val hourlyMap = loadTodayHourlySecondsMap()
-                    val hrSlot = currentHourSlot1To24()
-                    hourlyMap[hrSlot] = (hourlyMap[hrSlot] ?: 0) + 1
-                    saveTodayHourlySecondsMap(hourlyMap)
+                        val hourlyMap = loadTodayHourlySecondsMap()
+                        val hrSlot = currentHourSlot1To24()
+                        hourlyMap[hrSlot] = (hourlyMap[hrSlot] ?: 0) + elapsedWholeSecs
+                        saveTodayHourlySecondsMap(hourlyMap)
 
-                    if (nextSec == 1 || nextSec % 3 == 0 || nextSec >= limitSecs) {
-                        persistTodayListenedSecondsAntiBypass(nextSec)
+                        if (nextSec <= elapsedWholeSecs || nextSec % 3 == 0 || nextSec >= limitSecs) {
+                            persistTodayListenedSecondsAntiBypass(nextSec)
+                        }
+                        if (nextSec % 15 == 0 || nextSec <= elapsedWholeSecs || nextSec >= limitSecs) {
+                            syncCurrentUserTimeUsageToAdminCloud()
+                        }
+                        if (nextSec >= limitSecs) {
+                            persistTodayListenedSecondsAntiBypass(nextSec)
+                            pausePlaybackForDailyLimit()
+                            lastPlayCountElapsedMs = 0L
+                            secCarryMs = 0L
+                        }
                     }
-                    if (nextSec % 15 == 0 || nextSec == 1 || nextSec >= limitSecs) {
-                        syncCurrentUserTimeUsageToAdminCloud()
-                    }
-                    if (nextSec >= limitSecs) {
-                        persistTodayListenedSecondsAntiBypass(nextSec)
-                        pausePlaybackForDailyLimit()
-                    }
+                } else {
+                    lastPlayCountElapsedMs = 0L
+                    secCarryMs = 0L
                 }
             }
         }
@@ -4036,6 +4287,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     override fun onCleared() {
         super.onCleared()
         paymentPollingJob?.cancel()
+        try {
+            screenStateReceiver?.let { appContext.unregisterReceiver(it) }
+        } catch (_: Throwable) {
+        }
+        screenStateReceiver = null
         firebaseService.onUserDeletedByAdminCallback = null
         firebaseService.onAdminVipStateSyncedCallback = null
         firebaseService.onAdminFreeLimitSyncedCallback = null

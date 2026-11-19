@@ -54,6 +54,7 @@ public final class BackgroundGamingAudioKeeper {
 
     private volatile boolean isKeeperActive = false;
     private volatile boolean isNetworkRegistered = false;
+    private volatile long lastWakeLockAcquireElapsedMs = 0L;
     @Nullable
     private volatile WebView attachedWebView;
     @Nullable
@@ -169,8 +170,7 @@ public final class BackgroundGamingAudioKeeper {
 
     /**
      * Activates high-priority CPU, Wi-Fi Low-Latency, Background Network Pinning, and
-     * 300ms urgent audio heartbeat so heavy games (Free Fire, PUBG) never pause music
-     * or put the app offline.
+     * urgent audio heartbeat so long sessions & screen-off playback never stall.
      */
     public void startGamingKeepAlive() {
         isKeeperActive = true;
@@ -189,8 +189,10 @@ public final class BackgroundGamingAudioKeeper {
 
     public void ensureLocksAcquired() {
         try {
-            if (cpuWakeLock != null && !cpuWakeLock.isHeld()) {
+            long nowElapsed = android.os.SystemClock.elapsedRealtime();
+            if (cpuWakeLock != null && (!cpuWakeLock.isHeld() || (nowElapsed - lastWakeLockAcquireElapsedMs) > 20L * 60L * 1000L)) {
                 cpuWakeLock.acquire(12 * 60 * 60 * 1000L);
+                lastWakeLockAcquireElapsedMs = nowElapsed;
             }
         } catch (Throwable ignored) {
         }

@@ -14,6 +14,7 @@ import android.view.ViewGroup
 import android.webkit.ConsoleMessage
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -60,7 +61,8 @@ class BackstageYouTubePlayerController(
     private val onStateChangeUpdate: (Int) -> Unit,
     private val onErrorUpdate: (Int) -> Unit,
     private val onMediaButtonAction: ((String) -> Unit)? = null,
-    private val onUnexpectedPauseDetected: (() -> Unit)? = null
+    private val onUnexpectedPauseDetected: (() -> Unit)? = null,
+    private val onPlaybackStalledCallback: ((Double, Boolean) -> Unit)? = null
 ) {
     companion object {
         private const val TAG = "BackstageYTPlayer"
@@ -118,6 +120,18 @@ class BackstageYouTubePlayerController(
 
     @Volatile
     private var pendingResumeTargetSeconds: Double = 0.0
+
+    @Volatile
+    private var lastProgressAdvanceElapsedMs: Long = 0L
+
+    @Volatile
+    private var lastObservedProgressSeconds: Double = -1.0
+
+    @Volatile
+    private var stallRecoveryAttemptsForToken: Int = 0
+
+    @Volatile
+    private var lastStallTriggerElapsedMs: Long = 0L
 
     fun getLastKnownPositionMs(): Long = (lastKnownPositionSeconds * 1000.0).toLong().coerceAtLeast(0L)
 
@@ -193,6 +207,31 @@ class BackstageYouTubePlayerController(
             } catch (_: Exception) {
             }
             if (currentLoadedVideoId.isNotBlank() && !hasFiredEndedForCurrentTrack) {
+                if (!isUserPaused && !isPausedByExternalAudio) {
+                    val nowElapsed = SystemClock.elapsedRealtime()
+                    val stalledForMs = nowElapsed - lastProgressAdvanceElapsedMs
+                    val stallThresholdMs = if (hasSeenValidStartForCurrentToken) 12_000L else 10_000L
+                    if (lastProgressAdvanceElapsedMs > 0L &&
+                        stalledForMs >= stallThresholdMs &&
+                        (nowElapsed - lastStallTriggerElapsedMs) >= 7_000L
+                    ) {
+                        lastStallTriggerElapsedMs = nowElapsed
+                        stallRecoveryAttemptsForToken++
+                        val resumeAt = lastKnownPositionSeconds.coerceAtLeast(0.0)
+                        if (onPlaybackStalledCallback != null && stallRecoveryAttemptsForToken <= 2) {
+                            onPlaybackStalledCallback.invoke(resumeAt, false)
+                        } else if (stallRecoveryAttemptsForToken <= 4) {
+                            loadVideoById(
+                                rawVideoId = targetId,
+                                startSeconds = resumeAt,
+                                songTitle = currentSongTitle,
+                                songArtist = currentSongArtist,
+                                artworkUrl = currentSongArtworkUrl
+                            )
+                            return
+                        }
+                    }
+                }
                 val nextDelay = if (hasSeenValidStartForCurrentToken) 600L else 180L
                 mainHandler.postDelayed(this, nextDelay)
             }
@@ -217,7 +256,6 @@ class BackstageYouTubePlayerController(
             isHorizontalScrollBarEnabled = false
             isFocusable = false
             isFocusableInTouchMode = false
-            keepScreenOn = true
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 try {
@@ -384,6 +422,40 @@ class BackstageYouTubePlayerController(
                             reqUrl.contains("googlevideo.com") ||
                             reqUrl.startsWith("about:blank"))
                 }
+
+                override fun onRenderProcessGone(
+                    view: WebView?,
+                    detail: RenderProcessGoneDetail?
+                ): Boolean {
+                    Log.w(TAG, "Backstage WebView renderer process terminated; recovering cleanly")
+                    val vidToRecover = currentLoadedVideoId
+                    val resumeAt = lastKnownPositionSeconds.coerceAtLeast(0.0)
+                    val shouldResume = vidToRecover.isNotBlank() && !isUserPaused && !hasFiredEndedForCurrentTrack
+                    mainHandler.post {
+                        try {
+                            (view?.parent as? ViewGroup)?.removeView(view)
+                            view?.destroy()
+                        } catch (_: Throwable) {
+                        }
+                        if (webView === view) {
+                            webView = null
+                        }
+                        if (shouldResume) {
+                            if (onPlaybackStalledCallback != null) {
+                                onPlaybackStalledCallback.invoke(resumeAt, true)
+                            } else {
+                                loadVideoById(
+                                    rawVideoId = vidToRecover,
+                                    startSeconds = resumeAt,
+                                    songTitle = currentSongTitle,
+                                    songArtist = currentSongArtist,
+                                    artworkUrl = currentSongArtworkUrl
+                                )
+                            }
+                        }
+                    }
+                    return true
+                }
             }
 
             resumeTimers()
@@ -454,6 +526,10 @@ class BackstageYouTubePlayerController(
         hasSeenValidStartForCurrentToken = false
         lastKnownPositionSeconds = 0.0
         pendingResumeTargetSeconds = 0.0
+        lastObservedProgressSeconds = -1.0
+        lastProgressAdvanceElapsedMs = 0L
+        stallRecoveryAttemptsForToken = 0
+        lastStallTriggerElapsedMs = 0L
         fallbackUrlReloadRunnable?.let { mainHandler.removeCallbacks(it) }
         fallbackUrlReloadRunnable = null
         mainHandler.removeCallbacks(nativeHeartbeatRunnable)
@@ -512,6 +588,9 @@ class BackstageYouTubePlayerController(
         hasSeenValidStartForCurrentToken = safeStartSec >= 1.0
         lastKnownPositionSeconds = safeStartSec
         pendingResumeTargetSeconds = safeStartSec
+        lastObservedProgressSeconds = -1.0
+        lastProgressAdvanceElapsedMs = SystemClock.elapsedRealtime()
+        lastStallTriggerElapsedMs = 0L
         lastLoadTimestampMs = SystemClock.elapsedRealtime()
 
         val safeTitle = escapeJsSingleQuoted(currentSongTitle)
@@ -638,6 +717,7 @@ class BackstageYouTubePlayerController(
         isUserPaused = false
         isPausedByExternalAudio = false
         hasFiredEndedForCurrentTrack = false
+        lastProgressAdvanceElapsedMs = SystemClock.elapsedRealtime()
         val savedSec = lastKnownPositionSeconds.coerceAtLeast(0.0)
         mainHandler.post {
             val view = webView
@@ -1699,6 +1779,11 @@ class BackstageYouTubePlayerController(
             val posMs = (currentTimeSeconds * 1000.0).toLong()
             if (posMs >= 100L) {
                 hasSeenValidStartForCurrentToken = true
+            }
+            if (kotlin.math.abs(currentTimeSeconds - lastObservedProgressSeconds) >= 0.15) {
+                lastObservedProgressSeconds = currentTimeSeconds
+                lastProgressAdvanceElapsedMs = SystemClock.elapsedRealtime()
+                stallRecoveryAttemptsForToken = 0
             }
             mainHandler.post {
                 if (tokenSnapshot == currentLoadToken && !hasFiredEndedForCurrentTrack && currentLoadedVideoId.isNotBlank()) {

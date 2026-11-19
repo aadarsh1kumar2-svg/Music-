@@ -102,6 +102,35 @@ class MusicPlaybackService : MediaSessionService() {
         private var pendingSync: SyncRequest? = null
 
         @Volatile
+        private var requestedSyncRevision: Long = 0L
+
+        @Volatile
+        private var appliedSyncRevision: Long = 0L
+
+        @Volatile
+        private var appliedMediaId: String = ""
+
+        @Volatile
+        private var queueSnapshot: List<Song> = emptyList()
+
+        @Volatile
+        private var repeatOneSnapshot: Boolean = false
+
+        @Volatile
+        private var repeatAllSnapshot: Boolean = false
+
+        @Volatile
+        private var shuffleSnapshot: Boolean = false
+
+        @Volatile
+        private var freeDailyLimitSecondsSnapshot: Int = 3600
+
+        @Volatile
+        private var activeUserNameSnapshot: String = ""
+
+        private val autonomousAudioExtractor by lazy { AudioStreamExtractor() }
+
+        @Volatile
         var onSkipNextCallback: (() -> Unit)? = null
 
         @Volatile
@@ -138,9 +167,13 @@ class MusicPlaybackService : MediaSessionService() {
         private val serviceKeepAliveRunnable = object : Runnable {
             override fun run() {
                 mainHandler.removeCallbacks(this)
-                if (pendingSync != null && !isPausedByExternalMedia) {
+                val currentReq = pendingSync
+                if (currentReq != null && currentReq.isPlaying && !isPausedByExternalMedia) {
                     isKeepAliveScheduled = true
-                    onKeepOnlineEngineAwakeCallback?.invoke()
+                    instance?.ensureServiceLocksAndCheckBufferingStall()
+                    if (instance?.isDirectAudioMode != true) {
+                        onKeepOnlineEngineAwakeCallback?.invoke()
+                    }
                     mainHandler.postDelayed(this, 1500L)
                 } else {
                     isKeepAliveScheduled = false
@@ -151,6 +184,24 @@ class MusicPlaybackService : MediaSessionService() {
         fun getCurrentSyncedSong(): Song? = pendingSync?.song
 
         fun isCurrentlyPlaying(): Boolean = pendingSync?.isPlaying == true
+
+        fun isDirectAudioModeActive(): Boolean = instance?.isDirectAudioMode == true
+
+        fun updateQueueStateSnapshot(
+            queue: List<Song>,
+            isRepeatOne: Boolean,
+            isRepeatAll: Boolean,
+            isShuffle: Boolean,
+            freeDailyLimitSeconds: Int,
+            userName: String
+        ) {
+            queueSnapshot = queue
+            repeatOneSnapshot = isRepeatOne
+            repeatAllSnapshot = isRepeatAll
+            shuffleSnapshot = isShuffle
+            freeDailyLimitSecondsSnapshot = freeDailyLimitSeconds.coerceAtLeast(60)
+            activeUserNameSnapshot = userName
+        }
 
         /**
          * Starts a persistent background notification watcher so that once the user opens the app
@@ -287,18 +338,23 @@ class MusicPlaybackService : MediaSessionService() {
             if (isPlaying) {
                 isPausedByExternalMedia = false
             }
+            val rev = ++requestedSyncRevision
             val req = SyncRequest(song, isPlaying, directStreamUri, playbackSpeed, startPositionMs.coerceAtLeast(0L))
             pendingSync = req
             mainHandler.post {
                 mainHandler.removeCallbacks(serviceKeepAliveRunnable)
-                isKeepAliveScheduled = true
-                mainHandler.postDelayed(serviceKeepAliveRunnable, 1200L)
+                if (isPlaying) {
+                    isKeepAliveScheduled = true
+                    mainHandler.postDelayed(serviceKeepAliveRunnable, 1200L)
+                } else {
+                    isKeepAliveScheduled = false
+                }
                 if (!isForegroundServiceStarted) {
                     BackgroundGamingAudioKeeper.ensureForegroundMediaServiceStarted(context)
                 }
                 val svc = instance
                 if (svc != null) {
-                    svc.applySyncRequest(req)
+                    svc.applySyncRequest(req, rev)
                 } else {
                     BackgroundGamingAudioKeeper.ensureForegroundMediaServiceStarted(context)
                 }
@@ -311,11 +367,14 @@ class MusicPlaybackService : MediaSessionService() {
                 if (isPlaying) {
                     isPausedByExternalMedia = false
                     instance?.cancelExternalMediaResumeWatch()
-                }
-                if (!isKeepAliveScheduled && pendingSync != null) {
-                    isKeepAliveScheduled = true
+                    if (!isKeepAliveScheduled && pendingSync != null) {
+                        isKeepAliveScheduled = true
+                        mainHandler.removeCallbacks(serviceKeepAliveRunnable)
+                        mainHandler.postDelayed(serviceKeepAliveRunnable, 1200L)
+                    }
+                } else {
+                    isKeepAliveScheduled = false
                     mainHandler.removeCallbacks(serviceKeepAliveRunnable)
-                    mainHandler.postDelayed(serviceKeepAliveRunnable, 1200L)
                 }
                 instance?.applyPlayStateInternal(isPlaying, forceNotificationUpdate = true)
             }
@@ -340,19 +399,30 @@ class MusicPlaybackService : MediaSessionService() {
             }
         }
 
+        private fun isExoStateFreshForCurrentSong(): Boolean {
+            val svc = instance ?: return false
+            if (!svc.isDirectAudioMode) return false
+            val targetSongId = pendingSync?.song?.id ?: return false
+            return appliedSyncRevision == requestedSyncRevision && appliedMediaId == targetSongId
+        }
+
         fun getCurrentExoPositionMs(): Long {
+            if (!isExoStateFreshForCurrentSong()) return 0L
             return instance?.exoPlayerInstance?.currentPosition?.coerceAtLeast(0L) ?: 0L
         }
 
         fun getCurrentExoDurationMs(): Long {
+            if (!isExoStateFreshForCurrentSong()) return 0L
             return instance?.exoPlayerInstance?.duration?.coerceAtLeast(0L) ?: 0L
         }
 
         fun isExoPlaying(): Boolean {
+            if (!isExoStateFreshForCurrentSong()) return false
             return instance?.exoPlayerInstance?.isPlaying == true
         }
 
         fun isExoBuffering(): Boolean {
+            if (!isExoStateFreshForCurrentSong()) return true
             return instance?.exoPlayerInstance?.playbackState == Player.STATE_BUFFERING
         }
 
@@ -425,6 +495,10 @@ class MusicPlaybackService : MediaSessionService() {
     private var syncedOnlinePositionMs: Long = 0L
     private var syncedOnlineDurationMs: Long = 0L
     private var zeroExternalMediaConsecutiveChecks: Int = 0
+    private var lastServiceWakeLockRefreshElapsedMs: Long = 0L
+    private var lastDirectExoPosMs: Long = -1L
+    private var directExoStallSinceElapsedMs: Long = 0L
+    private var lastAutonomousFreeTickElapsedMs: Long = 0L
 
     private val externalMediaResumeWatcherRunnable = object : Runnable {
         override fun run() {
@@ -526,14 +600,9 @@ class MusicPlaybackService : MediaSessionService() {
 
         val resolvingHttpFactory = ResolvingDataSource.Factory(httpDataSourceFactory) { dataSpec ->
             val streamUrl = dataSpec.uri.toString()
-            val resolvedUserAgent = AudioStreamExtractor.resolveUserAgentForStreamUrl(streamUrl)
+            val resolvedHeaders = AudioStreamExtractor.resolveHeadersForStreamUrl(streamUrl)
             dataSpec.buildUpon()
-                .setHttpRequestHeaders(
-                    mapOf(
-                        "User-Agent" to resolvedUserAgent,
-                        "Accept" to "*/*"
-                    )
-                )
+                .setHttpRequestHeaders(resolvedHeaders)
                 .build()
         }
 
@@ -554,8 +623,7 @@ class MusicPlaybackService : MediaSessionService() {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 try {
                     if (isPlaying || pendingSync?.isPlaying == true) {
-                        if (wakeLock?.isHeld == false) wakeLock?.acquire(6 * 60 * 60 * 1000L)
-                        if (wifiLock?.isHeld == false) wifiLock?.acquire()
+                        ensureServiceLocksHeld()
                     }
                 } catch (_: Exception) {
                 }
@@ -566,15 +634,15 @@ class MusicPlaybackService : MediaSessionService() {
                 val itemId = mediaItem?.mediaId.orEmpty()
                 if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_SEEK) {
                     if (itemId.endsWith("_next")) {
-                        onSkipNextCallback?.invoke()
+                        dispatchSkipNext()
                         return
                     } else if (itemId.endsWith("_prev")) {
-                        onSkipPreviousCallback?.invoke()
+                        dispatchSkipPrevious()
                         return
                     }
                 }
                 if (isDirectAudioMode && reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
-                    onExoPlayerTrackEndedCallback?.invoke()
+                    dispatchDirectTrackEnded()
                 } else if (!isDirectAudioMode && reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO && pendingSync?.isPlaying == true) {
                     isInternalSync = true
                     try {
@@ -590,7 +658,7 @@ class MusicPlaybackService : MediaSessionService() {
             override fun onPlaybackStateChanged(playbackState: Int) {
                 if (isInternalSync) return
                 if (isDirectAudioMode && playbackState == Player.STATE_ENDED) {
-                    onExoPlayerTrackEndedCallback?.invoke()
+                    dispatchDirectTrackEnded()
                 } else if (!isDirectAudioMode && playbackState == Player.STATE_ENDED && pendingSync?.isPlaying == true) {
                     isInternalSync = true
                     try {
@@ -606,7 +674,12 @@ class MusicPlaybackService : MediaSessionService() {
             override fun onPlayerError(error: PlaybackException) {
                 if (isDirectAudioMode) {
                     isDirectAudioMode = false
-                    onExoPlayerStreamErrorCallback?.invoke()
+                    val cb = onExoPlayerStreamErrorCallback
+                    if (cb != null) {
+                        cb.invoke()
+                    } else {
+                        recoverAutonomousDirectStream()
+                    }
                 }
             }
         })
@@ -727,35 +800,35 @@ class MusicPlaybackService : MediaSessionService() {
 
             override fun seekToNext() {
                 if (!isInternalSync) {
-                    onSkipNextCallback?.invoke()
+                    dispatchSkipNext()
                 }
             }
 
             override fun seekToNextMediaItem() {
                 if (!isInternalSync) {
-                    onSkipNextCallback?.invoke()
+                    dispatchSkipNext()
                 }
             }
 
             override fun seekToPrevious() {
                 if (!isInternalSync) {
-                    onSkipPreviousCallback?.invoke()
+                    dispatchSkipPrevious()
                 }
             }
 
             override fun seekToPreviousMediaItem() {
                 if (!isInternalSync) {
-                    onSkipPreviousCallback?.invoke()
+                    dispatchSkipPrevious()
                 }
             }
 
             override fun seekToDefaultPosition(mediaItemIndex: Int) {
                 if (!isInternalSync) {
                     if (mediaItemIndex > 1) {
-                        onSkipNextCallback?.invoke()
+                        dispatchSkipNext()
                         return
                     } else if (mediaItemIndex < 1) {
-                        onSkipPreviousCallback?.invoke()
+                        dispatchSkipPrevious()
                         return
                     }
                 }
@@ -775,10 +848,10 @@ class MusicPlaybackService : MediaSessionService() {
             override fun seekTo(mediaItemIndex: Int, positionMs: Long) {
                 if (!isInternalSync) {
                     if (mediaItemIndex > 1) {
-                        onSkipNextCallback?.invoke()
+                        dispatchSkipNext()
                         return
                     } else if (mediaItemIndex < 1) {
-                        onSkipPreviousCallback?.invoke()
+                        dispatchSkipPrevious()
                         return
                     }
                     if (!isDirectAudioMode) {
@@ -918,7 +991,7 @@ class MusicPlaybackService : MediaSessionService() {
             .build()
 
         pendingSync?.let { req ->
-            applySyncRequest(req)
+            applySyncRequest(req, requestedSyncRevision)
         }
     }
 
@@ -931,11 +1004,14 @@ class MusicPlaybackService : MediaSessionService() {
                 return START_STICKY
             }
             ACTION_NOTIFICATION_PREV -> {
-                onSkipPreviousCallback?.invoke()
+                dispatchSkipPrevious()
                 return START_STICKY
             }
             ACTION_NOTIFICATION_PLAY_PAUSE -> {
                 val nextPlay = !(pendingSync?.isPlaying ?: false)
+                if (nextPlay && onTogglePlayPauseCallback == null && !canFreeOrVipUserContinuePlayback()) {
+                    return START_STICKY
+                }
                 isPausedByExternalMedia = false
                 cancelExternalMediaResumeWatch()
                 pendingSync = pendingSync?.copy(isPlaying = nextPlay)
@@ -944,7 +1020,7 @@ class MusicPlaybackService : MediaSessionService() {
                 return START_STICKY
             }
             ACTION_NOTIFICATION_NEXT -> {
-                onSkipNextCallback?.invoke()
+                dispatchSkipNext()
                 return START_STICKY
             }
             ACTION_NOTIFICATION_STOP -> {
@@ -1308,13 +1384,284 @@ class MusicPlaybackService : MediaSessionService() {
         }
     }
 
-    private fun applySyncRequest(req: SyncRequest) {
+    private fun ensureServiceLocksHeld() {
+        try {
+            val nowElapsed = android.os.SystemClock.elapsedRealtime()
+            if (wakeLock?.isHeld == false || (nowElapsed - lastServiceWakeLockRefreshElapsedMs) > 20L * 60L * 1000L) {
+                wakeLock?.acquire(6 * 60 * 60 * 1000L)
+                lastServiceWakeLockRefreshElapsedMs = nowElapsed
+            }
+            if (wifiLock?.isHeld == false) {
+                wifiLock?.acquire()
+            }
+            BackgroundGamingAudioKeeper.getInstance(this).startGamingKeepAlive()
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun releaseServiceLocksWhenPaused() {
+        try {
+            if (wakeLock?.isHeld == true) wakeLock?.release()
+            if (wifiLock?.isHeld == true) wifiLock?.release()
+        } catch (_: Exception) {
+        }
+        try {
+            BackgroundGamingAudioKeeper.getInstance(this).stopGamingKeepAlive()
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun ensureServiceLocksAndCheckBufferingStall() {
+        ensureServiceLocksHeld()
+        if (onExoPlayerTrackEndedCallback == null && !canFreeOrVipUserContinuePlayback()) {
+            // UI ViewModel was destroyed while in background and Free user hit daily limit -> pause cleanly
+            pendingSync = pendingSync?.copy(isPlaying = false)
+            applyPlayStateInternal(shouldPlay = false, forceNotificationUpdate = true)
+            return
+        }
+        if (isDirectAudioMode && pendingSync?.isPlaying == true) {
+            val player = exoPlayerInstance ?: return
+            val curPos = player.currentPosition
+            val nowElapsed = android.os.SystemClock.elapsedRealtime()
+            if (player.playbackState == Player.STATE_BUFFERING && curPos == lastDirectExoPosMs) {
+                if (directExoStallSinceElapsedMs == 0L) {
+                    directExoStallSinceElapsedMs = nowElapsed
+                } else if (nowElapsed - directExoStallSinceElapsedMs >= 16_000L) {
+                    directExoStallSinceElapsedMs = nowElapsed
+                    val cb = onExoPlayerStreamErrorCallback
+                    if (cb != null) {
+                        cb.invoke()
+                    } else {
+                        recoverAutonomousDirectStream()
+                    }
+                }
+            } else {
+                lastDirectExoPosMs = curPos
+                directExoStallSinceElapsedMs = 0L
+            }
+        }
+    }
+
+    private fun dispatchSkipNext() {
+        val cb = onSkipNextCallback
+        if (cb != null) {
+            cb.invoke()
+        } else {
+            advanceAutonomousQueue(forward = true)
+        }
+    }
+
+    private fun dispatchSkipPrevious() {
+        val cb = onSkipPreviousCallback
+        if (cb != null) {
+            cb.invoke()
+        } else {
+            advanceAutonomousQueue(forward = false)
+        }
+    }
+
+    private fun dispatchDirectTrackEnded() {
+        val cb = onExoPlayerTrackEndedCallback
+        if (cb != null) {
+            cb.invoke()
+        } else {
+            handleAutonomousTrackEnded()
+        }
+    }
+
+    private fun isPersistedVipActiveNow(): Boolean {
+        return try {
+            val prefs = applicationContext.getSharedPreferences("ak_music_user_prefs", Context.MODE_PRIVATE)
+            val planId = prefs.getString("sub_plan_id", "none") ?: "none"
+            val activatedAt = prefs.getLong("sub_activated_at_ms", 0L)
+            val expiresAt = prefs.getLong("sub_expires_at_ms", 0L)
+            val orderId = prefs.getString("sub_order_id", "") ?: ""
+            val utr = prefs.getString("sub_utr", "") ?: ""
+            val state = com.example.models.UserSubscriptionState(
+                planType = com.example.models.SubscriptionPlanType.fromId(planId),
+                activatedAtMs = activatedAt,
+                expiresAtMs = expiresAt,
+                orderId = orderId,
+                utr = utr
+            )
+            if (!state.isActive(System.currentTimeMillis())) return false
+            val storedSeal = prefs.getString("sub_vault_seal_v6", "").orEmpty()
+            com.example.security.AadifySecurityVault.verifySubscriptionIntegritySeal(
+                storedSeal = storedSeal,
+                planId = state.planType.id,
+                activatedAtMs = activatedAt,
+                expiresAtMs = expiresAt,
+                orderId = orderId,
+                utr = utr
+            )
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun canFreeOrVipUserContinuePlayback(): Boolean {
+        if (isPersistedVipActiveNow()) {
+            lastAutonomousFreeTickElapsedMs = 0L
+            return true
+        }
+        return try {
+            val prefs = applicationContext.getSharedPreferences("ak_music_user_prefs", Context.MODE_PRIVATE)
+            val nowMs = System.currentTimeMillis()
+            val normUser = activeUserNameSnapshot.trim().lowercase(java.util.Locale.US)
+            val globalWin = prefs.getLong("limit_window_start_ms", 0L)
+            val userWin = if (normUser.isNotBlank()) {
+                prefs.getLong("user_hard_window_start_${normUser}", 0L)
+            } else {
+                0L
+            }
+            val winStart = when {
+                globalWin > 0L && userWin > 0L -> minOf(globalWin, userWin)
+                globalWin > 0L -> globalWin
+                else -> userWin
+            }
+            val resetWindowMs = 12L * 60L * 60L * 1000L
+            var used = if (winStart > 0L && (nowMs - winStart) >= resetWindowMs) {
+                0
+            } else {
+                val baseUsed = maxOf(
+                    prefs.getInt("limit_used_seconds", 0),
+                    prefs.getInt("device_hard_limit_used_seconds", 0)
+                )
+                if (normUser.isNotBlank()) {
+                    maxOf(baseUsed, prefs.getInt("user_hard_limit_used_${normUser}", 0))
+                } else {
+                    baseUsed
+                }
+            }
+            val nowElapsed = android.os.SystemClock.elapsedRealtime()
+            if (lastAutonomousFreeTickElapsedMs > 0L) {
+                val deltaSecs = ((nowElapsed - lastAutonomousFreeTickElapsedMs) / 1000L).toInt().coerceIn(0, 5)
+                if (deltaSecs > 0) {
+                    used += deltaSecs
+                    val effectiveWinStart = if (winStart > 0L && (nowMs - winStart) < resetWindowMs) winStart else nowMs
+                    prefs.edit()
+                        .putLong("limit_window_start_ms", effectiveWinStart)
+                        .putInt("limit_used_seconds", used)
+                        .putInt("device_hard_limit_used_seconds", used)
+                        .apply {
+                            if (normUser.isNotBlank()) {
+                                putInt("user_hard_limit_used_${normUser}", used)
+                                putLong("user_hard_window_start_${normUser}", effectiveWinStart)
+                            }
+                        }
+                        .apply()
+                    lastAutonomousFreeTickElapsedMs = nowElapsed
+                }
+            } else {
+                lastAutonomousFreeTickElapsedMs = nowElapsed
+            }
+            used < freeDailyLimitSecondsSnapshot.coerceAtLeast(60)
+        } catch (_: Exception) {
+            true
+        }
+    }
+
+    private fun handleAutonomousTrackEnded() {
+        val current = pendingSync?.song ?: return
+        if (!canFreeOrVipUserContinuePlayback()) {
+            pendingSync = pendingSync?.copy(isPlaying = false)
+            applyPlayStateInternal(shouldPlay = false, forceNotificationUpdate = true)
+            return
+        }
+        val list = queueSnapshot
+        if (repeatOneSnapshot || list.isEmpty()) {
+            playSongAutonomously(current)
+            return
+        }
+        advanceAutonomousQueue(forward = true)
+    }
+
+    private fun advanceAutonomousQueue(forward: Boolean) {
+        val current = pendingSync?.song ?: return
+        if (!canFreeOrVipUserContinuePlayback()) {
+            pendingSync = pendingSync?.copy(isPlaying = false)
+            applyPlayStateInternal(shouldPlay = false, forceNotificationUpdate = true)
+            return
+        }
+        val list = queueSnapshot.ifEmpty { listOf(current) }
+        val nextSong = if (shuffleSnapshot && list.size > 1) {
+            list.filter { it.id != current.id }.randomOrNull() ?: list.first()
+        } else {
+            val idx = list.indexOfFirst { it.id == current.id }
+            val nextIdx = if (forward) {
+                if (idx in 0 until list.lastIndex) idx + 1 else 0
+            } else {
+                if (idx > 0) idx - 1 else list.lastIndex
+            }
+            list[nextIdx]
+        }
+        playSongAutonomously(nextSong)
+    }
+
+    private fun recoverAutonomousDirectStream() {
+        val current = pendingSync?.song ?: return
+        val resumePosMs = exoPlayerInstance?.currentPosition?.coerceAtLeast(0L) ?: 0L
+        if (!canFreeOrVipUserContinuePlayback()) {
+            pendingSync = pendingSync?.copy(isPlaying = false)
+            applyPlayStateInternal(shouldPlay = false, forceNotificationUpdate = true)
+            return
+        }
+        ioScope.launch {
+            val vid = current.cleanVideoId
+            if (vid.length == 11) {
+                autonomousAudioExtractor.invalidateCachedStream(vid)
+                val fresh = autonomousAudioExtractor.extractExactYoutubeDirectAudioForPlayback(vid, forceFresh = true)
+                if (fresh != null) {
+                    syncNowPlaying(
+                        context = applicationContext,
+                        song = current,
+                        isPlaying = true,
+                        directStreamUri = fresh.streamUrl,
+                        playbackSpeed = pendingSync?.playbackSpeed ?: 1.0f,
+                        startPositionMs = resumePosMs
+                    )
+                }
+            }
+        }
+    }
+
+    private fun playSongAutonomously(song: Song) {
+        ioScope.launch {
+            val localUri = song.resolvedLocalUri
+            val streamUri = if (localUri.isNotBlank()) {
+                localUri
+            } else {
+                val vid = song.cleanVideoId
+                if (vid.length == 11) {
+                    autonomousAudioExtractor.extractExactYoutubeDirectAudioForPlayback(vid)?.streamUrl
+                } else {
+                    null
+                }
+            }
+            if (!streamUri.isNullOrBlank()) {
+                syncNowPlaying(
+                    context = applicationContext,
+                    song = song,
+                    isPlaying = true,
+                    directStreamUri = streamUri,
+                    playbackSpeed = pendingSync?.playbackSpeed ?: 1.0f,
+                    startPositionMs = 0L
+                )
+            }
+        }
+    }
+
+    private fun applySyncRequest(req: SyncRequest, revision: Long = requestedSyncRevision) {
         val player = exoPlayerInstance ?: return
         isInternalSync = true
         try {
             val song = req.song
             val directUri = req.directStreamUri?.takeIf { it.isNotBlank() }
             isDirectAudioMode = directUri != null
+            appliedSyncRevision = revision
+            appliedMediaId = song.id
+            lastDirectExoPosMs = -1L
+            directExoStallSinceElapsedMs = 0L
             syncedOnlinePositionMs = req.startPositionMs.coerceAtLeast(0L)
             syncedOnlineDurationMs = 0L
             val silentUri = getOrCreateSilentWavUri(this)
@@ -1361,16 +1708,16 @@ class MusicPlaybackService : MediaSessionService() {
             val startPos = req.startPositionMs.coerceAtLeast(0L)
             player.setMediaItems(listOf(prevItem, currentItem, nextItem), /* startIndex = */ 1, /* startPositionMs = */ startPos)
             player.prepare()
-            if (req.isPlaying || !isDirectAudioMode) {
+            if (req.isPlaying) {
                 player.play()
-                try {
-                    if (wakeLock?.isHeld == false) wakeLock?.acquire(6 * 60 * 60 * 1000L)
-                    if (wifiLock?.isHeld == false) wifiLock?.acquire()
-                    BackgroundGamingAudioKeeper.getInstance(this).startGamingKeepAlive()
-                } catch (_: Exception) {
-                }
+                ensureServiceLocksHeld()
             } else {
-                player.pause()
+                if (!isDirectAudioMode) {
+                    player.play()
+                } else {
+                    player.pause()
+                }
+                releaseServiceLocksWhenPaused()
             }
             mediaSession?.let { session ->
                 try {
@@ -1493,7 +1840,7 @@ class MusicPlaybackService : MediaSessionService() {
                     requestAudioFocusForExternalWait()
                 }
                 if (player.mediaItemCount == 0 && pendingSync != null) {
-                    applySyncRequest(pendingSync!!)
+                    applySyncRequest(pendingSync!!, requestedSyncRevision)
                 } else {
                     if (player.playbackState == Player.STATE_IDLE || player.playbackState == Player.STATE_ENDED) {
                         player.prepare()
@@ -1506,13 +1853,10 @@ class MusicPlaybackService : MediaSessionService() {
                         player.seekTo(1, targetSeekMs)
                     }
                 }
-                try {
-                    if (wakeLock?.isHeld == false) wakeLock?.acquire(6 * 60 * 60 * 1000L)
-                    if (wifiLock?.isHeld == false) wifiLock?.acquire()
-                    BackgroundGamingAudioKeeper.getInstance(this).startGamingKeepAlive()
-                } catch (_: Exception) {
-                }
+                ensureServiceLocksHeld()
             } else {
+                lastAutonomousFreeTickElapsedMs = 0L
+                releaseServiceLocksWhenPaused()
                 if (isDirectAudioMode) {
                     if (player.isPlaying || player.playWhenReady) {
                         player.pause()

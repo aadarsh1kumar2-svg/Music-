@@ -70,11 +70,15 @@ class AudioStreamExtractor {
             "com.google.android.youtube/1.9 (Linux; U; Android 14; en_US) gzip"
 
         private val urlUserAgentMap = ConcurrentHashMap<String, String>()
+        private val urlCookieMap = ConcurrentHashMap<String, String>()
         private val webViewCapturedStreams = ConcurrentHashMap<String, Pair<Long, ResolvedAudioStream>>()
         private const val WEBVIEW_STREAM_TTL_MS = 25 * 60 * 1000L
 
-        fun registerStreamUserAgent(streamUrl: String, userAgent: String) {
+        fun registerStreamUserAgent(streamUrl: String, userAgent: String, cookie: String = "") {
             urlUserAgentMap[streamUrl] = userAgent
+            if (cookie.isNotBlank()) {
+                urlCookieMap[streamUrl] = cookie
+            }
         }
 
         fun registerWebViewCapturedStream(
@@ -111,7 +115,7 @@ class AudioStreamExtractor {
                 userAgent = userAgent.ifBlank { EXOPLAYER_USER_AGENT },
                 cookie = cookie
             )
-            urlUserAgentMap[streamUrl] = resolved.userAgent
+            registerStreamUserAgent(streamUrl, resolved.userAgent, resolved.cookie)
             webViewCapturedStreams[cleanVid] = System.currentTimeMillis() to resolved
         }
 
@@ -136,6 +140,23 @@ class AudioStreamExtractor {
                 streamUrl.contains("c=ANDROID", ignoreCase = true) -> ANDROID_YT_USER_AGENT
                 else -> EXOPLAYER_USER_AGENT
             }
+        }
+
+        fun resolveHeadersForStreamUrl(streamUrl: String): Map<String, String> {
+            val ua = resolveUserAgentForStreamUrl(streamUrl)
+            val headers = mutableMapOf(
+                "User-Agent" to ua,
+                "Accept" to "*/*"
+            )
+            val cookie = urlCookieMap[streamUrl].orEmpty()
+            if (cookie.isNotBlank()) {
+                headers["Cookie"] = cookie
+            }
+            if (streamUrl.contains("googlevideo.com", ignoreCase = true) && ua.startsWith("Mozilla/", ignoreCase = true)) {
+                headers["Origin"] = "https://m.youtube.com"
+                headers["Referer"] = "https://m.youtube.com/"
+            }
+            return headers
         }
 
         private val PIPED_MIRRORS = listOf(
@@ -179,7 +200,49 @@ class AudioStreamExtractor {
         val cleanId = Song.extractYoutubeVideoId(rawVideoId)
         if (cleanId.isNotBlank()) {
             streamCache.remove(cleanId)
+            webViewCapturedStreams.remove(cleanId)
         }
+    }
+
+    fun getCachedExactYoutubeAudioForPlayback(rawVideoId: String): ResolvedAudioStream? {
+        val cleanId = Song.extractYoutubeVideoId(rawVideoId)
+        if (cleanId.length != 11) return null
+        getWebViewCapturedStream(cleanId)?.let { captured ->
+            registerStreamUserAgent(captured.streamUrl, captured.userAgent, captured.cookie)
+            return captured
+        }
+        val cached = streamCache[cleanId]
+        if (cached != null && (System.currentTimeMillis() - cached.first) < cacheTtlMs) {
+            registerStreamUserAgent(cached.second.streamUrl, cached.second.userAgent, cached.second.cookie)
+            return cached.second
+        }
+        return null
+    }
+
+    /**
+     * Resolves a direct audio stream STRICTLY for the exact requested YouTube `videoId` (never substituting
+     * another song or external search result), used by native ExoPlayer for unstoppable background &
+     * screen-off playback.
+     */
+    suspend fun extractExactYoutubeDirectAudioForPlayback(
+        rawVideoId: String,
+        forceFresh: Boolean = false
+    ): ResolvedAudioStream? = withContext(Dispatchers.IO) {
+        val cleanId = Song.extractYoutubeVideoId(rawVideoId)
+        if (cleanId.length != 11) return@withContext null
+
+        if (forceFresh) {
+            invalidateCachedStream(cleanId)
+        } else {
+            getCachedExactYoutubeAudioForPlayback(cleanId)?.let { return@withContext it }
+        }
+
+        val resolved = resolveForSingleVideoIdFast(cleanId)
+        if (resolved != null) {
+            streamCache[cleanId] = System.currentTimeMillis() to resolved
+            registerStreamUserAgent(resolved.streamUrl, resolved.userAgent, resolved.cookie)
+        }
+        resolved
     }
 
     suspend fun resolveAudioStreamUrl(rawVideoId: String): String? {

@@ -149,9 +149,15 @@ class FirebaseSongsService(private val context: Context) {
     private val installBaselineTimestampMs: Long =
         AdminNotificationHelper.getOrInitInstallBaselineMs(context)
 
+    sealed class CloudVipSyncResult {
+        data class Active(val state: UserSubscriptionState) : CloudVipSyncResult()
+        data object ExplicitlyDeactivated : CloudVipSyncResult()
+        data object AbsentOrUnchanged : CloudVipSyncResult()
+    }
+
     // User Identity & Admin User Panel Sync State
     var onUserDeletedByAdminCallback: (() -> Unit)? = null
-    var onAdminVipStateSyncedCallback: ((UserSubscriptionState?) -> Unit)? = null
+    var onAdminVipStateSyncedCallback: ((CloudVipSyncResult) -> Unit)? = null
     var onAdminFreeLimitSyncedCallback: ((Int?) -> Unit)? = null
     var onAdminTimeUsageResetCallback: (() -> Unit)? = null
     @Volatile
@@ -1538,8 +1544,10 @@ class FirebaseSongsService(private val context: Context) {
                 if (elapsedSinceWrite < 1_500L) {
                     // Still check if Admin granted or deactivated a VIP plan or custom free limit even within 1.5s
                     if (snapshot.exists() && snapshot.value != null) {
-                        val syncedVip = parseCloudSubscriptionFromSnapshot(snapshot)
-                        onAdminVipStateSyncedCallback?.invoke(syncedVip)
+                        val syncedVip = classifyCloudSubscriptionFromSnapshot(snapshot)
+                        if (syncedVip !is CloudVipSyncResult.AbsentOrUnchanged) {
+                            onAdminVipStateSyncedCallback?.invoke(syncedVip)
+                        }
                         val userFreeLimitSecs = parseUserSpecificFreeLimitFromSnapshot(snapshot)
                         if (userFreeLimitSecs != null) {
                             onAdminFreeLimitSyncedCallback?.invoke(userFreeLimitSecs)
@@ -1560,9 +1568,11 @@ class FirebaseSongsService(private val context: Context) {
                     return
                 }
 
-                // Check if Admin granted, modified, or deactivated VIP / Subscription or Free User Time Limit on this user node
-                val syncedVip = parseCloudSubscriptionFromSnapshot(snapshot)
-                onAdminVipStateSyncedCallback?.invoke(syncedVip)
+                // Check if Admin granted, modified, or explicitly deactivated VIP / Subscription or Free User Time Limit on this user node
+                val syncedVip = classifyCloudSubscriptionFromSnapshot(snapshot)
+                if (syncedVip !is CloudVipSyncResult.AbsentOrUnchanged) {
+                    onAdminVipStateSyncedCallback?.invoke(syncedVip)
+                }
                 val userFreeLimitSecs = parseUserSpecificFreeLimitFromSnapshot(snapshot)
                 if (userFreeLimitSecs != null) {
                     onAdminFreeLimitSyncedCallback?.invoke(userFreeLimitSecs)
@@ -1635,8 +1645,10 @@ class FirebaseSongsService(private val context: Context) {
                         }
                         return
                     }
-                    val syncedVip = parseCloudSubscriptionFromJson(obj)
-                    onAdminVipStateSyncedCallback?.invoke(syncedVip)
+                    val syncedVip = classifyCloudSubscriptionFromJson(obj)
+                    if (syncedVip !is CloudVipSyncResult.AbsentOrUnchanged) {
+                        onAdminVipStateSyncedCallback?.invoke(syncedVip)
+                    }
                     val userFreeLimitSecs = parseUserSpecificFreeLimitFromJson(obj)
                     if (userFreeLimitSecs != null) {
                         onAdminFreeLimitSyncedCallback?.invoke(userFreeLimitSecs)
@@ -2719,6 +2731,61 @@ class FirebaseSongsService(private val context: Context) {
                 else if (hasExplicitVipBoolean) SubscriptionPlanType.FOREVER
                 else SubscriptionPlanType.NONE
             }
+        }
+    }
+
+    private fun classifyCloudSubscriptionFromSnapshot(snapshot: DataSnapshot): CloudVipSyncResult {
+        return try {
+            val subSnap = snapshot.child("subscription")
+            val subStatus = subSnap.child("status").getValue(String::class.java)?.trim()?.lowercase().orEmpty()
+            val explicitDeactivated = subSnap.exists() && (
+                subStatus == "inactive" ||
+                    subStatus == "deactivated" ||
+                    subStatus == "cancelled" ||
+                    subStatus == "expired" ||
+                    subStatus == "none" ||
+                    subStatus == "off" ||
+                    subStatus == "false"
+                )
+            if (explicitDeactivated) {
+                return CloudVipSyncResult.ExplicitlyDeactivated
+            }
+            val parsed = parseCloudSubscriptionFromSnapshot(snapshot)
+            if (parsed != null && parsed.isActive()) {
+                CloudVipSyncResult.Active(parsed)
+            } else {
+                CloudVipSyncResult.AbsentOrUnchanged
+            }
+        } catch (_: Exception) {
+            CloudVipSyncResult.AbsentOrUnchanged
+        }
+    }
+
+    internal fun classifyCloudSubscriptionFromJson(obj: JSONObject?): CloudVipSyncResult {
+        if (obj == null) return CloudVipSyncResult.AbsentOrUnchanged
+        return try {
+            val subObj = obj.optJSONObject("subscription")
+            val subStatus = subObj?.optString("status", "")?.trim()?.lowercase().orEmpty()
+            val explicitDeactivated = subObj != null && (
+                subStatus == "inactive" ||
+                    subStatus == "deactivated" ||
+                    subStatus == "cancelled" ||
+                    subStatus == "expired" ||
+                    subStatus == "none" ||
+                    subStatus == "off" ||
+                    subStatus == "false"
+                )
+            if (explicitDeactivated) {
+                return CloudVipSyncResult.ExplicitlyDeactivated
+            }
+            val parsed = parseCloudSubscriptionFromJson(obj)
+            if (parsed != null && parsed.isActive()) {
+                CloudVipSyncResult.Active(parsed)
+            } else {
+                CloudVipSyncResult.AbsentOrUnchanged
+            }
+        } catch (_: Exception) {
+            CloudVipSyncResult.AbsentOrUnchanged
         }
     }
 
