@@ -620,7 +620,12 @@ class BackstageYouTubePlayerController(
             fallbackUrlReloadRunnable = null
             mainHandler.removeCallbacks(nativeHeartbeatRunnable)
 
-            // Synchronously silence any old video and immediately load watchUrl in 0ms (no callback wait!)
+            val curUrl = view.url.orEmpty()
+            val canTryInPlace = stallRecoveryAttemptsForToken == 0 &&
+                curUrl.contains("youtube.com", ignoreCase = true) &&
+                !curUrl.equals("about:blank", ignoreCase = true)
+
+            // Synchronously silence old video & switch in-place if #movie_player is ready (~300ms vs 5s page reload!)
             view.evaluateJavascript(
                 """
                 (function() {
@@ -646,6 +651,16 @@ class BackstageYouTubePlayerController(
                     window.__akLastReportedDur = 0;
                     window.__akLastReportedState = 3;
                     window.__akLastMetaKey = '';
+                    var mp = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
+                    if ($canTryInPlace && mp && typeof mp.loadVideoById === 'function') {
+                        try {
+                            mp.loadVideoById({ videoId: '$cleanId', startSeconds: $safeStartSec });
+                            window.__akLoadedInPlaceId = '$cleanId';
+                            if (typeof mp.playVideo === 'function') { mp.playVideo(); }
+                            if (typeof window.__akSyncMediaSession === 'function') { window.__akSyncMediaSession(); }
+                            return 'IN_PLACE';
+                        } catch (e) {}
+                    }
                     var vOld = document.querySelector('video');
                     if (vOld) {
                         try { vOld.pause(); } catch (e) {}
@@ -653,11 +668,28 @@ class BackstageYouTubePlayerController(
                     if (typeof window.__akSyncMediaSession === 'function') {
                         window.__akSyncMediaSession();
                     }
+                    return 'RELOAD_URL';
                 })();
-                """.trimIndent(),
-                null
-            )
-            view.loadUrl(watchUrl)
+                """.trimIndent()
+            ) { jsResult ->
+                if (currentLoadToken != token || currentLoadedVideoId != cleanId) return@evaluateJavascript
+                if (jsResult != null && jsResult.contains("IN_PLACE")) {
+                    val fallbackRunnable = Runnable {
+                        if (currentLoadToken == token &&
+                            currentLoadedVideoId == cleanId &&
+                            !isUserPaused &&
+                            !hasFiredEndedForCurrentTrack &&
+                            lastObservedProgressSeconds < 0.0
+                        ) {
+                            view.loadUrl(watchUrl)
+                        }
+                    }
+                    fallbackUrlReloadRunnable = fallbackRunnable
+                    mainHandler.postDelayed(fallbackRunnable, 1800L)
+                } else {
+                    view.loadUrl(watchUrl)
+                }
+            }
             mainHandler.postDelayed(nativeHeartbeatRunnable, 40L)
         }
     }
@@ -1026,159 +1058,45 @@ class BackstageYouTubePlayerController(
                     window._lact = Date.now();
                 } catch (e) {}
 
-                // Lock navigator.mediaSession so YouTube's base.js can NEVER overwrite our song metadata, banner, or action handlers!
+                // Silence WebView's built-in navigator.mediaSession so Chromium NEVER creates a second blurry
+                // lockscreen/notification media card or dismisses controls when a WebView video ends.
+                // MusicPlaybackService's native Media3 MediaSession owns 100% of system controls & crisp artwork.
                 try {
                     if (navigator.mediaSession && !navigator.mediaSession.__akLocked) {
                         var ms = navigator.mediaSession;
                         ms.__akLocked = true;
-                        var proto = Object.getPrototypeOf(ms);
-                        var origSetHandler = (proto && proto.setActionHandler)
-                            ? proto.setActionHandler.bind(ms)
-                            : (ms.setActionHandler ? ms.setActionHandler.bind(ms) : null);
-                        ms.__akOrigSetActionHandler = origSetHandler;
-                        if (origSetHandler) {
-                            ms.setActionHandler = function(action, handler) {
-                                if (handler && handler.__akOwned) {
-                                    return origSetHandler(action, handler);
-                                }
-                            };
-                        }
-                        var metaDesc = (proto ? Object.getOwnPropertyDescriptor(proto, 'metadata') : null)
-                            || Object.getOwnPropertyDescriptor(ms, 'metadata');
-                        if (metaDesc && metaDesc.set && metaDesc.get) {
-                            ms.__akOrigSetMetadata = metaDesc.set.bind(ms);
-                            ms.__akOrigGetMetadata = metaDesc.get.bind(ms);
+                        try { ms.metadata = null; } catch (e) {}
+                        try { ms.playbackState = 'none'; } catch (e) {}
+                        try {
+                            ms.setActionHandler = function() {};
+                        } catch (e) {}
+                        try {
+                            ms.setPositionState = function() {};
+                        } catch (e) {}
+                        try {
                             Object.defineProperty(ms, 'metadata', {
                                 configurable: true,
-                                get: function() {
-                                    return ms.__akOrigGetMetadata();
-                                },
-                                set: function(val) {
-                                    if (val && val.__akOwnedMeta) {
-                                        ms.__akOrigSetMetadata(val);
-                                    }
-                                }
+                                get: function() { return null; },
+                                set: function() {}
                             });
-                        }
+                        } catch (e) {}
+                        try {
+                            Object.defineProperty(ms, 'playbackState', {
+                                configurable: true,
+                                get: function() { return 'none'; },
+                                set: function() {}
+                            });
+                        } catch (e) {}
                     }
                 } catch (e) {}
 
                 window.__akSyncMediaSession = function(vOpt) {
                     try {
-                        if (!navigator.mediaSession) return;
-                        var ms = navigator.mediaSession;
-                        var title = window.__akSongTitle || 'AADIFY Music';
-                        var artist = window.__akSongArtist || 'AADIFY';
-                        var art = window.__akSongArtwork || '';
-                        var fallbackArt = window.__akSongFallbackArtwork || art;
-                        if (typeof MediaMetadata !== 'undefined') {
-                            var metaKey = title + '|' + artist + '|' + art + '|' + fallbackArt;
-                            var curMeta = ms.metadata;
-                            if (window.__akLastMetaKey !== metaKey || !curMeta || curMeta.title !== title || curMeta.artist !== artist) {
-                                window.__akLastMetaKey = metaKey;
-                                var artList = [];
-                                if (art) {
-                                    artList.push({ src: art, sizes: '512x512', type: 'image/jpeg' });
-                                    artList.push({ src: art, sizes: '256x256', type: 'image/jpeg' });
-                                }
-                                if (fallbackArt && fallbackArt !== art) {
-                                    artList.push({ src: fallbackArt, sizes: '480x360', type: 'image/jpeg' });
-                                }
-                                var newMeta = new MediaMetadata({
-                                    title: title,
-                                    artist: artist,
-                                    album: 'AADIFY Music',
-                                    artwork: artList
-                                });
-                                newMeta.__akOwnedMeta = true;
-                                if (ms.__akOrigSetMetadata) {
-                                    ms.__akOrigSetMetadata(newMeta);
-                                } else {
-                                    ms.metadata = newMeta;
-                                }
-                            }
-                        }
-                        ms.playbackState = (window.__akUserPaused || window.__akExternalPaused) ? 'paused' : 'playing';
-
-                        var setHandlerFn = ms.__akOrigSetActionHandler || (ms.setActionHandler ? ms.setActionHandler.bind(ms) : null);
-                        if (setHandlerFn && !window.__akActionsRegistered) {
-                            window.__akActionsRegistered = true;
-                            var playFn = function() {
-                                window.__akUserPaused = false;
-                                window.__akExternalPaused = false;
-                                if (window.AndroidBridge) window.AndroidBridge.onMediaAction('play');
-                                var mp = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
-                                if (mp && typeof mp.playVideo === 'function') {
-                                    try { mp.playVideo(); } catch (e) {}
-                                }
-                                var v = document.querySelector('video');
-                                if (v && v.paused) {
-                                    try { v.play(); } catch (e) {}
-                                }
-                            };
-                            playFn.__akOwned = true;
-
-                            var pauseFn = function() {
-                                window.__akUserPaused = true;
-                                if (window.AndroidBridge) window.AndroidBridge.onMediaAction('pause');
-                                var v = document.querySelector('video');
-                                if (v && !v.paused) {
-                                    try { v.pause(); } catch (e) {}
-                                }
-                            };
-                            pauseFn.__akOwned = true;
-
-                            var prevFn = function() {
-                                if (window.AndroidBridge) window.AndroidBridge.onMediaAction('prev');
-                            };
-                            prevFn.__akOwned = true;
-
-                            var nextFn = function() {
-                                if (window.AndroidBridge) window.AndroidBridge.onMediaAction('next');
-                            };
-                            nextFn.__akOwned = true;
-
-                            var seekToFn = function(details) {
-                                if (details && typeof details.seekTime === 'number' && isFinite(details.seekTime)) {
-                                    var v = document.querySelector('video');
-                                    if (v) {
-                                        try { v.currentTime = details.seekTime; } catch (e) {}
-                                    }
-                                    if (window.AndroidBridge && window.AndroidBridge.onMediaSeekTo) {
-                                        window.AndroidBridge.onMediaSeekTo(details.seekTime);
-                                    }
-                                }
-                            };
-                            seekToFn.__akOwned = true;
-
-                            setHandlerFn('play', playFn);
-                            setHandlerFn('pause', pauseFn);
-                            setHandlerFn('previoustrack', prevFn);
-                            setHandlerFn('nexttrack', nextFn);
-                            setHandlerFn('seekto', seekToFn);
-                        }
-
-                        var v = vOpt || document.querySelector('video');
-                        if (v && typeof ms.setPositionState === 'function') {
-                            var nowPosSync = Date.now();
-                            if (nowPosSync - (window.__akLastPosSyncMs || 0) >= 1000) {
-                                var domDur = (v.duration && isFinite(v.duration) && v.duration > 0) ? v.duration : (window.__akMaxDurationForTrack || 0);
-                                var curPos = (typeof v.currentTime === 'number' && isFinite(v.currentTime) && v.currentTime >= 0) ? v.currentTime : (window.__akLastGoodTime || 0);
-                                if (domDur > 0) {
-                                    window.__akLastPosSyncMs = nowPosSync;
-                                    var clampedPos = Math.min(Math.max(0, curPos), domDur);
-                                    var rate = (v.playbackRate && isFinite(v.playbackRate) && v.playbackRate > 0) ? v.playbackRate : (window.__akPlaybackRate || 1.0);
-                                    ms.setPositionState({
-                                        duration: domDur,
-                                        playbackRate: rate,
-                                        position: clampedPos
-                                    });
-                                }
-                            }
+                        if (navigator.mediaSession) {
+                            navigator.mediaSession.playbackState = 'none';
                         }
                     } catch (e) {}
                 };
-                window.__akSyncMediaSession();
 
                 // Disable YouTube's built-in Up Next / Auto-navigation so our app controls the queue
                 try {

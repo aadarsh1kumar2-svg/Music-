@@ -35,6 +35,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.ResolvingDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.ForwardingTimeline
@@ -71,7 +72,7 @@ class MusicPlaybackService : MediaSessionService() {
     )
 
     companion object {
-        private const val NOTIFICATION_CHANNEL_ID = "aadify_playback_channel_v2"
+        private const val NOTIFICATION_CHANNEL_ID = "aadify_playback_channel_v3"
         private const val NOTIFICATION_ID = 1001
         const val ACTION_NOTIFICATION_PREV = "com.example.services.ACTION_NOTIFICATION_PREV"
         const val ACTION_NOTIFICATION_PLAY_PAUSE = "com.example.services.ACTION_NOTIFICATION_PLAY_PAUSE"
@@ -91,6 +92,8 @@ class MusicPlaybackService : MediaSessionService() {
 
         @Volatile
         private var instance: MusicPlaybackService? = null
+
+        private val sessionIdCounter = java.util.concurrent.atomic.AtomicLong(0L)
 
         @Volatile
         private var isForegroundServiceStarted: Boolean = false
@@ -187,6 +190,26 @@ class MusicPlaybackService : MediaSessionService() {
 
         fun isDirectAudioModeActive(): Boolean = instance?.isDirectAudioMode == true
 
+        @androidx.annotation.VisibleForTesting
+        internal fun resetForTests() {
+            mainHandler.removeCallbacksAndMessages(null)
+            isKeepAliveScheduled = false
+            isPausedByExternalMedia = false
+            isForegroundServiceStarted = false
+            pendingSync = null
+            appliedMediaId = ""
+            queueSnapshot = emptyList()
+            onSkipNextCallback = null
+            onSkipPreviousCallback = null
+            onTogglePlayPauseCallback = null
+            onSeekToCallback = null
+            onExoPlayerTrackEndedCallback = null
+            onExoPlayerStreamErrorCallback = null
+            onKeepOnlineEngineAwakeCallback = null
+            onExternalMediaPauseCallback = null
+            onExternalMediaResumeCallback = null
+        }
+
         fun updateQueueStateSnapshot(
             queue: List<Song>,
             isRepeatOne: Boolean,
@@ -201,6 +224,86 @@ class MusicPlaybackService : MediaSessionService() {
             shuffleSnapshot = isShuffle
             freeDailyLimitSecondsSnapshot = freeDailyLimitSeconds.coerceAtLeast(60)
             activeUserNameSnapshot = userName
+        }
+
+        private fun getCachedArtworkBytesForSong(song: Song?): ByteArray? {
+            if (song == null) return null
+            val bannerUrl = song.highResBannerUrl
+            if (bannerUrl.isNotBlank()) {
+                artworkBytesCache.get(bannerUrl)?.let { return it }
+            }
+            val cleanVid = song.cleanVideoId
+            if (cleanVid.length == 11) {
+                artworkBytesCache.get("yt_$cleanVid")?.let { return it }
+                artworkBytesCache.get("https://img.youtube.com/vi/$cleanVid/hqdefault.jpg")?.let { return it }
+            }
+            return null
+        }
+
+        fun prefetchArtwork(song: Song) {
+            val bannerUrl = song.highResBannerUrl
+            val cleanVid = song.cleanVideoId
+            if (bannerUrl.isBlank() && cleanVid.isBlank()) return
+            if (getCachedArtworkBytesForSong(song) != null) return
+            ioScope.launch {
+                val maxResYt = if (cleanVid.length == 11) "https://img.youtube.com/vi/$cleanVid/maxresdefault.jpg" else ""
+                val sdResYt = if (cleanVid.length == 11) "https://img.youtube.com/vi/$cleanVid/sddefault.jpg" else ""
+                val hqYt = if (cleanVid.length == 11) "https://img.youtube.com/vi/$cleanVid/hqdefault.jpg" else ""
+                val bytes = (if (maxResYt.isNotBlank()) downloadCompressedArtworkBytes(maxResYt) else null)
+                    ?: (if (sdResYt.isNotBlank()) downloadCompressedArtworkBytes(sdResYt) else null)
+                    ?: (if (bannerUrl.startsWith("http", ignoreCase = true)) downloadCompressedArtworkBytes(bannerUrl) else null)
+                    ?: (if (hqYt.isNotBlank() && hqYt != bannerUrl) downloadCompressedArtworkBytes(hqYt) else null)
+                    ?: return@launch
+                if (bannerUrl.isNotBlank()) artworkBytesCache.put(bannerUrl, bytes)
+                if (cleanVid.length == 11) artworkBytesCache.put("yt_$cleanVid", bytes)
+                if (hqYt.isNotBlank()) artworkBytesCache.put(hqYt, bytes)
+            }
+        }
+
+        private fun downloadCompressedArtworkBytes(url: String): ByteArray? {
+            return try {
+                val req = Request.Builder()
+                    .url(url)
+                    .header("User-Agent", AudioStreamExtractor.EXOPLAYER_USER_AGENT)
+                    .get()
+                    .build()
+                artworkHttpClient.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) return null
+                    val rawBytes = resp.body?.bytes() ?: return null
+                    if (rawBytes.isEmpty()) return null
+                    val rawBmp = BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size) ?: return null
+                    // Ignore YouTube's tiny 120x90 placeholder thumbnail returned when maxres/sddefault does not exist
+                    if ((url.contains("maxresdefault.jpg") || url.contains("sddefault.jpg")) && rawBmp.width < 400) return null
+                    // Strip black top/bottom letterbox bars from 4:3 YouTube thumbnails (sddefault 640x480 / hqdefault 480x360)
+                    val cropped = when {
+                        url.contains("sddefault.jpg") && rawBmp.width == 640 && rawBmp.height == 480 ->
+                            Bitmap.createBitmap(rawBmp, 0, 60, 640, 360)
+                        url.contains("hqdefault.jpg") && rawBmp.width == 480 && rawBmp.height == 360 ->
+                            Bitmap.createBitmap(rawBmp, 60, 45, 360, 270)
+                        else -> rawBmp
+                    }
+                    // Center-crop to crisp 1:1 square >= 512px so Lock Screen & Quick Settings tiles never blur or stretch
+                    val side = minOf(cropped.width, cropped.height)
+                    val square = if (cropped.width != cropped.height && side > 0) {
+                        val xOff = (cropped.width - side) / 2
+                        val yOff = (cropped.height - side) / 2
+                        Bitmap.createBitmap(cropped, xOff, yOff, side, side)
+                    } else {
+                        cropped
+                    }
+                    val targetDim = 512
+                    val scaled = if (square.width != targetDim || square.height != targetDim) {
+                        Bitmap.createScaledBitmap(square, targetDim, targetDim, true)
+                    } else {
+                        square
+                    }
+                    val out = ByteArrayOutputStream()
+                    scaled.compress(Bitmap.CompressFormat.JPEG, 95, out)
+                    out.toByteArray()
+                }
+            } catch (_: Exception) {
+                null
+            }
         }
 
         /**
@@ -609,9 +712,20 @@ class MusicPlaybackService : MediaSessionService() {
         val dataSourceFactory = DefaultDataSource.Factory(this, resolvingHttpFactory)
         val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory)
 
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                15_000, // minBufferMs
+                50_000, // maxBufferMs
+                450,    // bufferForPlaybackMs: start song audio in <0.5s instead of 2.5s!
+                1_200   // bufferForPlaybackAfterRebufferMs
+            )
+            .setPrioritizeTimeOverSizeThresholds(true)
+            .build()
+
         // Pass handleAudioFocus = false on ExoPlayer so ExoPlayer never steals audio focus from BackstageAudioWebView!
         val exoPlayer = ExoPlayer.Builder(this)
             .setMediaSourceFactory(mediaSourceFactory)
+            .setLoadControl(loadControl)
             .setAudioAttributes(audioAttributes, false)
             .setHandleAudioBecomingNoisy(false)
             .setWakeMode(C.WAKE_MODE_NETWORK)
@@ -865,15 +979,22 @@ class MusicPlaybackService : MediaSessionService() {
             }
 
             override fun getPlayWhenReady(): Boolean {
-                if (!isDirectAudioMode && pendingSync != null) {
-                    return pendingSync?.isPlaying == true
+                if (pendingSync != null && !isPausedByExternalMedia) {
+                    if (!isDirectAudioMode || pendingSync?.isPlaying == true) {
+                        return pendingSync?.isPlaying == true
+                    }
                 }
                 return super.getPlayWhenReady()
             }
 
             override fun isPlaying(): Boolean {
-                if (!isDirectAudioMode && pendingSync != null) {
-                    return pendingSync?.isPlaying == true
+                if (pendingSync != null && !isPausedByExternalMedia) {
+                    if (!isDirectAudioMode) {
+                        return pendingSync?.isPlaying == true
+                    }
+                    if (pendingSync?.isPlaying == true && super.getPlaybackState() == Player.STATE_ENDED) {
+                        return true
+                    }
                 }
                 return super.isPlaying()
             }
@@ -882,7 +1003,13 @@ class MusicPlaybackService : MediaSessionService() {
                 if (!isDirectAudioMode && pendingSync != null) {
                     return Player.STATE_READY
                 }
-                return super.getPlaybackState()
+                val baseState = super.getPlaybackState()
+                if (isDirectAudioMode && pendingSync?.isPlaying == true &&
+                    (baseState == Player.STATE_ENDED || baseState == Player.STATE_IDLE)
+                ) {
+                    return Player.STATE_BUFFERING
+                }
+                return baseState
             }
 
             override fun play() {
@@ -986,6 +1113,7 @@ class MusicPlaybackService : MediaSessionService() {
         }
 
         mediaSession = MediaSession.Builder(this, forwardingPlayer)
+            .setId("aadify_session_${sessionIdCounter.incrementAndGet()}")
             .setSessionActivity(pendingIntent)
             .setCallback(callback)
             .build()
@@ -999,17 +1127,25 @@ class MusicPlaybackService : MediaSessionService() {
         super.onStartCommand(intent, flags, startId)
         ensureBackgroundNotificationWatcher(applicationContext, startServiceIfNeeded = false)
         val action = intent?.action
+        val activeSong = pendingSync?.song
+        val activePlaying = pendingSync?.isPlaying ?: false
+        val cachedBytes = getCachedArtworkBytesForSong(activeSong)
         when (action) {
             ACTION_WATCH_NOTIFICATIONS -> {
+                if (activeSong != null) {
+                    postOrUpdateForegroundMediaNotification(activeSong, activePlaying, cachedBytes)
+                }
                 return START_STICKY
             }
             ACTION_NOTIFICATION_PREV -> {
+                postOrUpdateForegroundMediaNotification(activeSong, activePlaying, cachedBytes)
                 dispatchSkipPrevious()
                 return START_STICKY
             }
             ACTION_NOTIFICATION_PLAY_PAUSE -> {
                 val nextPlay = !(pendingSync?.isPlaying ?: false)
                 if (nextPlay && onTogglePlayPauseCallback == null && !canFreeOrVipUserContinuePlayback()) {
+                    postOrUpdateForegroundMediaNotification(activeSong, activePlaying, cachedBytes)
                     return START_STICKY
                 }
                 isPausedByExternalMedia = false
@@ -1020,6 +1156,7 @@ class MusicPlaybackService : MediaSessionService() {
                 return START_STICKY
             }
             ACTION_NOTIFICATION_NEXT -> {
+                postOrUpdateForegroundMediaNotification(activeSong, activePlaying, cachedBytes)
                 dispatchSkipNext()
                 return START_STICKY
             }
@@ -1032,13 +1169,28 @@ class MusicPlaybackService : MediaSessionService() {
                 return START_STICKY
             }
         }
-        val activeSong = pendingSync?.song
         if (activeSong != null) {
-            val activePlaying = pendingSync?.isPlaying ?: true
-            val cachedBytes = activeSong.highResBannerUrl.takeIf { it.isNotBlank() }?.let { artworkBytesCache.get(it) }
-            postOrUpdateForegroundMediaNotification(activeSong, activePlaying, cachedBytes)
+            postOrUpdateForegroundMediaNotification(activeSong, pendingSync?.isPlaying ?: true, cachedBytes)
         }
         return START_STICKY
+    }
+
+    @OptIn(UnstableApi::class)
+    override fun onUpdateNotification(session: MediaSession, startInForegroundRequired: Boolean) {
+        val activeSong = pendingSync?.song ?: return
+        val isPlayingNow = pendingSync?.isPlaying == true
+        val cachedBytes = getCachedArtworkBytesForSong(activeSong)
+        postOrUpdateForegroundMediaNotification(activeSong, isPlayingNow, cachedBytes)
+    }
+
+    private fun buildServiceActionPendingIntent(requestCode: Int, action: String): PendingIntent {
+        val intent = Intent(this, MusicPlaybackService::class.java).setAction(action)
+        val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            PendingIntent.getForegroundService(this, requestCode, intent, flags)
+        } else {
+            PendingIntent.getService(this, requestCode, intent, flags)
+        }
     }
 
     @OptIn(UnstableApi::class)
@@ -1059,27 +1211,13 @@ class MusicPlaybackService : MediaSessionService() {
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
             )
 
-            val prevIntent = PendingIntent.getService(
-                this,
-                101,
-                Intent(this, MusicPlaybackService::class.java).setAction(ACTION_NOTIFICATION_PREV),
-                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-            )
-            val playPauseIntent = PendingIntent.getService(
-                this,
-                102,
-                Intent(this, MusicPlaybackService::class.java).setAction(ACTION_NOTIFICATION_PLAY_PAUSE),
-                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-            )
-            val nextIntent = PendingIntent.getService(
-                this,
-                103,
-                Intent(this, MusicPlaybackService::class.java).setAction(ACTION_NOTIFICATION_NEXT),
-                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-            )
+            val prevIntent = buildServiceActionPendingIntent(101, ACTION_NOTIFICATION_PREV)
+            val playPauseIntent = buildServiceActionPendingIntent(102, ACTION_NOTIFICATION_PLAY_PAUSE)
+            val nextIntent = buildServiceActionPendingIntent(103, ACTION_NOTIFICATION_NEXT)
+            val stopIntent = buildServiceActionPendingIntent(104, ACTION_NOTIFICATION_STOP)
 
             val artworkBitmap = try {
-                val bytes = artworkBytes ?: song?.highResBannerUrl?.takeIf { it.isNotBlank() }?.let { artworkBytesCache.get(it) }
+                val bytes = artworkBytes ?: getCachedArtworkBytesForSong(song)
                 if (bytes != null && bytes.isNotEmpty()) {
                     BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                 } else {
@@ -1101,8 +1239,9 @@ class MusicPlaybackService : MediaSessionService() {
                 .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
+                .setSilent(true)
                 .setShowWhen(false)
-                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .addAction(
                     NotificationCompat.Action(
                         android.R.drawable.ic_media_previous,
@@ -1122,6 +1261,13 @@ class MusicPlaybackService : MediaSessionService() {
                         android.R.drawable.ic_media_next,
                         "Next",
                         nextIntent
+                    )
+                )
+                .addAction(
+                    NotificationCompat.Action(
+                        android.R.drawable.ic_menu_close_clear_cancel,
+                        "Stop",
+                        stopIntent
                     )
                 )
 
@@ -1221,9 +1367,9 @@ class MusicPlaybackService : MediaSessionService() {
         isInternalSync = true
         try {
             player?.pause()
-            mediaSession?.let { session ->
-                onUpdateNotification(session, false)
-            }
+            val activeSong = pendingSync?.song
+            val cachedBytes = activeSong?.highResBannerUrl?.takeIf { it.isNotBlank() }?.let { artworkBytesCache.get(it) }
+            postOrUpdateForegroundMediaNotification(activeSong, false, cachedBytes)
         } catch (_: Exception) {
         } finally {
             isInternalSync = false
@@ -1313,10 +1459,12 @@ class MusicPlaybackService : MediaSessionService() {
                 val channel = NotificationChannel(
                     NOTIFICATION_CHANNEL_ID,
                     "AADIFY Music Playback",
-                    NotificationManager.IMPORTANCE_LOW
+                    NotificationManager.IMPORTANCE_DEFAULT
                 ).apply {
                     description = "Shows Quick Settings, Lock Screen, and Notification Bar playback controls"
                     lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                    setSound(null, null)
+                    enableVibration(false)
                     setShowBadge(false)
                 }
                 nm.createNotificationChannel(channel)
@@ -1366,8 +1514,7 @@ class MusicPlaybackService : MediaSessionService() {
             syncedOnlineDurationMs = durationMs
             val activeSong = pendingSync?.song
             if (activeSong != null) {
-                val bannerUrl = activeSong.highResBannerUrl
-                val cachedArt = if (bannerUrl.isNotBlank()) artworkBytesCache.get(bannerUrl) else null
+                val cachedArt = getCachedArtworkBytesForSong(activeSong)
                 currentActiveMetadata = buildMediaMetadataForSong(activeSong, cachedArt, durationMs)
             }
             shouldTriggerPositionDiscontinuity = true
@@ -1626,6 +1773,7 @@ class MusicPlaybackService : MediaSessionService() {
     }
 
     private fun playSongAutonomously(song: Song) {
+        prefetchArtwork(song)
         ioScope.launch {
             val localUri = song.resolvedLocalUri
             val streamUri = if (localUri.isNotBlank()) {
@@ -1647,6 +1795,20 @@ class MusicPlaybackService : MediaSessionService() {
                     playbackSpeed = pendingSync?.playbackSpeed ?: 1.0f,
                     startPositionMs = 0L
                 )
+            }
+            // Pre-cache the following track in queueSnapshot for 0ms gapless autonomous transition
+            val list = queueSnapshot
+            if (list.isNotEmpty()) {
+                val curIdx = list.indexOfFirst { it.id == song.id }
+                val nextIdx = if (curIdx in 0 until list.lastIndex) curIdx + 1 else 0
+                val followUp = list[nextIdx]
+                if (followUp.id != song.id) {
+                    prefetchArtwork(followUp)
+                    val nextVid = followUp.cleanVideoId
+                    if (nextVid.length == 11 && followUp.resolvedLocalUri.isBlank()) {
+                        autonomousAudioExtractor.extractExactYoutubeDirectAudioForPlayback(nextVid)
+                    }
+                }
             }
         }
     }
@@ -1676,7 +1838,7 @@ class MusicPlaybackService : MediaSessionService() {
             }
 
             val bannerUrl = song.highResBannerUrl
-            val cachedArt = if (bannerUrl.isNotBlank()) artworkBytesCache.get(bannerUrl) else null
+            val cachedArt = getCachedArtworkBytesForSong(song)
             val metadata = buildMediaMetadataForSong(song, cachedArt, syncedOnlineDurationMs)
             currentActiveMetadata = metadata
 
@@ -1719,16 +1881,10 @@ class MusicPlaybackService : MediaSessionService() {
                 }
                 releaseServiceLocksWhenPaused()
             }
-            mediaSession?.let { session ->
-                try {
-                    onUpdateNotification(session, req.isPlaying)
-                } catch (_: Exception) {
-                }
-            }
             postOrUpdateForegroundMediaNotification(song, req.isPlaying, cachedArt)
 
-            // If artwork bytes are not cached yet, download asynchronously and update MediaMetadata
-            // so the Quick Settings Media Tile and Lock Screen display the album cover crisp & fast!
+            // If artwork bytes are not cached yet, download immediately (0ms delay) and update MediaMetadata
+            // so the Quick Settings Media Tile and Lock Screen display crisp album art without blur!
             if (cachedArt == null && (bannerUrl.startsWith("http", ignoreCase = true) || song.cleanVideoId.isNotBlank())) {
                 fetchAndAttachArtworkAsync(song, bannerUrl, activeUri, silentUri)
             }
@@ -1745,18 +1901,33 @@ class MusicPlaybackService : MediaSessionService() {
         silentUri: String
     ) {
         ioScope.launch {
-            kotlinx.coroutines.delay(2500L)
             if (pendingSync?.song?.id != song.id) return@launch
-            val fallbackYtBanner = if (song.cleanVideoId.isNotBlank()) {
-                "https://img.youtube.com/vi/${song.cleanVideoId}/hqdefault.jpg"
+            val cleanVid = song.cleanVideoId
+            val maxResYtBanner = if (cleanVid.length == 11) {
+                "https://img.youtube.com/vi/$cleanVid/maxresdefault.jpg"
             } else {
                 ""
             }
-            val bytes = (if (bannerUrl.startsWith("http", ignoreCase = true)) downloadCompressedArtworkBytes(bannerUrl) else null)
+            val sdResYtBanner = if (cleanVid.length == 11) {
+                "https://img.youtube.com/vi/$cleanVid/sddefault.jpg"
+            } else {
+                ""
+            }
+            val fallbackYtBanner = if (cleanVid.length == 11) {
+                "https://img.youtube.com/vi/$cleanVid/hqdefault.jpg"
+            } else {
+                ""
+            }
+            val bytes = (if (maxResYtBanner.isNotBlank()) downloadCompressedArtworkBytes(maxResYtBanner) else null)
+                ?: (if (sdResYtBanner.isNotBlank()) downloadCompressedArtworkBytes(sdResYtBanner) else null)
+                ?: (if (bannerUrl.startsWith("http", ignoreCase = true)) downloadCompressedArtworkBytes(bannerUrl) else null)
                 ?: (if (fallbackYtBanner.isNotBlank() && fallbackYtBanner != bannerUrl) downloadCompressedArtworkBytes(fallbackYtBanner) else null)
                 ?: return@launch
             if (bannerUrl.isNotBlank()) {
                 artworkBytesCache.put(bannerUrl, bytes)
+            }
+            if (cleanVid.length == 11) {
+                artworkBytesCache.put("yt_$cleanVid", bytes)
             }
             if (fallbackYtBanner.isNotBlank()) {
                 artworkBytesCache.put(fallbackYtBanner, bytes)
@@ -1769,6 +1940,7 @@ class MusicPlaybackService : MediaSessionService() {
                 try {
                     val enrichedMetadata = buildMediaMetadataForSong(song, bytes, syncedOnlineDurationMs)
                     currentActiveMetadata = enrichedMetadata
+                    player.setPlaylistMetadata(enrichedMetadata)
                     val updatedPrev = MediaItem.Builder()
                         .setMediaId("${song.id}_prev")
                         .setUri(silentUri)
@@ -1780,53 +1952,16 @@ class MusicPlaybackService : MediaSessionService() {
                         .setMediaMetadata(enrichedMetadata)
                         .build()
                     if (player.mediaItemCount >= 3) {
-                        // Replace only items 0 and 2 (never item 1 while playing) so ExoPlayer never enters STATE_BUFFERING (...)!
                         player.replaceMediaItem(0, updatedPrev)
                         player.replaceMediaItem(2, updatedNext)
                     }
                     val playingNow = pendingSync?.isPlaying == true
-                    mediaSession?.let { session ->
-                        onUpdateNotification(session, playingNow)
-                    }
                     postOrUpdateForegroundMediaNotification(song, playingNow, bytes)
                 } catch (_: Exception) {
                 } finally {
                     isInternalSync = false
                 }
             }
-        }
-    }
-
-    private fun downloadCompressedArtworkBytes(url: String): ByteArray? {
-        return try {
-            val req = Request.Builder()
-                .url(url)
-                .header("User-Agent", AudioStreamExtractor.EXOPLAYER_USER_AGENT)
-                .get()
-                .build()
-            artworkHttpClient.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) return null
-                val rawBytes = resp.body?.bytes() ?: return null
-                if (rawBytes.isEmpty()) return null
-                val bmp = BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size) ?: return null
-                val maxDim = 512
-                val scaled = if (bmp.width > maxDim || bmp.height > maxDim) {
-                    val ratio = minOf(maxDim.toFloat() / bmp.width, maxDim.toFloat() / bmp.height)
-                    Bitmap.createScaledBitmap(
-                        bmp,
-                        (bmp.width * ratio).toInt().coerceAtLeast(1),
-                        (bmp.height * ratio).toInt().coerceAtLeast(1),
-                        true
-                    )
-                } else {
-                    bmp
-                }
-                val out = ByteArrayOutputStream()
-                scaled.compress(Bitmap.CompressFormat.JPEG, 86, out)
-                out.toByteArray()
-            }
-        } catch (_: Exception) {
-            null
         }
     }
 
@@ -1878,14 +2013,8 @@ class MusicPlaybackService : MediaSessionService() {
                 }
             }
             if (forceNotificationUpdate) {
-                mediaSession?.let { session ->
-                    try {
-                        onUpdateNotification(session, shouldPlay)
-                    } catch (_: Exception) {
-                    }
-                }
                 val activeSong = pendingSync?.song
-                val cachedBytes = activeSong?.highResBannerUrl?.takeIf { it.isNotBlank() }?.let { artworkBytesCache.get(it) }
+                val cachedBytes = getCachedArtworkBytesForSong(activeSong)
                 postOrUpdateForegroundMediaNotification(activeSong, shouldPlay, cachedBytes)
             }
         } catch (_: Exception) {

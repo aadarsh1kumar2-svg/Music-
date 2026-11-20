@@ -2454,19 +2454,76 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         if (!isSameActiveSong) {
             _durationMs.value = 0L
         }
-        _isBuffering.value = true
-        _isPlaying.value = true
         syncPlaybackSnapshotToService()
+        // Synchronously resolve any immediate direct audio source BEFORE calling syncNowPlaying
+        // so ExoPlayer never resets twice (silentWav -> directStream) on track transitions!
+        val fastDeviceUri = song.resolvedLocalUri.ifBlank {
+            _deviceLocalSongs.value.firstOrNull { it.id == song.id }?.resolvedLocalUri.orEmpty()
+        }
+        val fastDownloaded = if (fastDeviceUri.isBlank()) {
+            downloadedSongs.value.firstOrNull {
+                it.id == song.id ||
+                    (song.cleanVideoId.isNotBlank() && Song.extractYoutubeVideoId(it.videoId) == song.cleanVideoId) ||
+                    (song.cleanVideoId.isBlank() && it.title.equals(song.title, ignoreCase = true) && it.artist.equals(song.artist, ignoreCase = true))
+            }
+        } else null
+        val isPlayingFromDownloadedSection =
+            (_selectedTab.value == MainTab.LIBRARY && _librarySubScreen.value == LibrarySubScreen.DownloadedSongs)
+        val fastOfflineFileUri = if (fastDownloaded != null &&
+            (!_isInternetAvailable.value || isPlayingFromDownloadedSection || song.cleanVideoId.isBlank())
+        ) {
+            File(fastDownloaded.localFilePath).takeIf { it.exists() }?.let { Uri.fromFile(it).toString() }.orEmpty()
+        } else {
+            ""
+        }
+        val fastRawTarget = song.videoId.trim()
+        val fastIsDirectUrl = (fastRawTarget.startsWith("http://", ignoreCase = true) ||
+            fastRawTarget.startsWith("https://", ignoreCase = true)) &&
+            !fastRawTarget.contains("youtube.com", ignoreCase = true) &&
+            !fastRawTarget.contains("youtu.be", ignoreCase = true)
+        val fastCachedYtStream = if (fastDeviceUri.isBlank() && fastOfflineFileUri.isBlank() && !fastIsDirectUrl && song.cleanVideoId.length == 11) {
+            audioExtractor.getCachedExactYoutubeAudioForPlayback(song.cleanVideoId)?.streamUrl.orEmpty()
+        } else {
+            ""
+        }
+        val immediateDirectUri = fastDeviceUri
+            .ifBlank { fastOfflineFileUri }
+            .ifBlank { if (fastIsDirectUrl) fastRawTarget else "" }
+            .ifBlank { fastCachedYtStream }
 
-        // Immediately sync Foreground Service notification & WakeLock so there is zero gap between tracks
-        MusicPlaybackService.syncNowPlaying(
-            context = appContext,
-            song = song,
-            isPlaying = true,
-            directStreamUri = null,
-            playbackSpeed = _playbackSpeed.value,
-            startPositionMs = resolvedStartMs
-        )
+        if (immediateDirectUri.isNotBlank()) {
+            isUsingExoPlayerFallback = true
+            backstagePlayer.stopAndClear()
+            _activeStreamEngine.value = when {
+                fastDeviceUri.isNotBlank() -> "Device Local Audio"
+                fastOfflineFileUri.isNotBlank() -> "Offline Storage"
+                fastIsDirectUrl -> "ExoPlayer Direct Stream"
+                else -> "ExoPlayer Native Audio"
+            }
+            _isBuffering.value = false
+            _isPlaying.value = true
+            MusicPlaybackService.syncNowPlaying(
+                context = appContext,
+                song = song,
+                isPlaying = true,
+                directStreamUri = immediateDirectUri,
+                playbackSpeed = _playbackSpeed.value,
+                startPositionMs = resolvedStartMs
+            )
+        } else {
+            isUsingExoPlayerFallback = false
+            _isBuffering.value = true
+            _isPlaying.value = true
+            // Sync foreground notification & silent keep-alive ONLY when no direct stream is cached yet
+            MusicPlaybackService.syncNowPlaying(
+                context = appContext,
+                song = song,
+                isPlaying = true,
+                directStreamUri = null,
+                playbackSpeed = _playbackSpeed.value,
+                startPositionMs = resolvedStartMs
+            )
+        }
 
         persistPlaybackSelection(song, resolvedQueue, initialPositionMs = resolvedStartMs)
 
@@ -2491,29 +2548,14 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
         playbackJob?.cancel()
         playbackJob = viewModelScope.launch {
-            // 1. Check if song is a local device audio file from MediaStore (works 100% online AND offline!)
-            val deviceMatchUri = song.resolvedLocalUri.ifBlank {
-                _deviceLocalSongs.value.firstOrNull { it.id == song.id }?.resolvedLocalUri.orEmpty()
-            }
-            if (deviceMatchUri.isNotBlank()) {
-                isUsingExoPlayerFallback = true
-                backstagePlayer.stopAndClear()
-                _activeStreamEngine.value = "Device Local Audio"
-                startExoPlayerWithUri(song, deviceMatchUri, resolvedStartMs)
+            if (immediateDirectUri.isNotBlank()) {
+                // Direct playback already started at 0ms above! Immediately pre-fetch next tracks + artwork.
+                scheduleNextTracksPreFetch(song, resolvedQueue)
                 return@launch
             }
 
-            // 2. Check if song is downloaded locally for offline playback
-            // Match strictly by song.id or exact cleanVideoId (NEVER by title/artist alone so two songs with the same title never collide!)
-            val downloaded = downloadedSongs.value.firstOrNull {
-                it.id == song.id ||
-                    (song.cleanVideoId.isNotBlank() && Song.extractYoutubeVideoId(it.videoId) == song.cleanVideoId) ||
-                    (song.cleanVideoId.isBlank() && it.title.equals(song.title, ignoreCase = true) && it.artist.equals(song.artist, ignoreCase = true))
-            } ?: libraryDao.getDownloadedSong(song.id)
-
-            val isPlayingFromDownloadedSection =
-                (_selectedTab.value == MainTab.LIBRARY && _librarySubScreen.value == LibrarySubScreen.DownloadedSongs)
-
+            // 1. Check Room DAO downloaded fallback if not yet in memory StateFlow
+            val downloaded = libraryDao.getDownloadedSong(song.id)
             if (downloaded != null && (!_isInternetAvailable.value || isPlayingFromDownloadedSection || song.cleanVideoId.isBlank())) {
                 val localFile = File(downloaded.localFilePath)
                 if (localFile.exists()) {
@@ -2521,6 +2563,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     backstagePlayer.stopAndClear()
                     _activeStreamEngine.value = "Offline Storage"
                     startExoPlayerWithUri(song, Uri.fromFile(localFile).toString(), resolvedStartMs)
+                    scheduleNextTracksPreFetch(song, resolvedQueue)
                     return@launch
                 }
             }
@@ -2566,52 +2609,52 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             // 4. Primary Engine Strategy:
-            // - If rawTarget is a direct audio URL, play on Native ExoPlayer.
-            // - If exact YouTube videoId stream is ALREADY cached OR device is currently in background / screen-off,
-            //   resolve & play directly on Native ExoPlayer (100% immune to Doze & Chromium screen-off throttling!).
-            // - Otherwise start INSTANTLY on BackstageYouTubePlayerController, while pre-resolving exact stream in background!
-            val rawTarget = activeSongToPlay.videoId.trim()
-            val isDirectAudioUrl = (rawTarget.startsWith("http://", ignoreCase = true) ||
-                rawTarget.startsWith("https://", ignoreCase = true)) &&
-                !rawTarget.contains("youtube.com", ignoreCase = true) &&
-                !rawTarget.contains("youtu.be", ignoreCase = true)
-
-            if (isDirectAudioUrl) {
+            // - If in background / screen-off, try fast exact stream resolution (up to 2.2s) for native ExoPlayer.
+            // - Otherwise start INSTANTLY on BackstageYouTubePlayerController (with fast in-place player switch!)
+            //   while pre-resolving exact stream & predicted next songs in background!
+            val cachedDirectStream = audioExtractor.getCachedExactYoutubeAudioForPlayback(playableVideoId)
+                ?: if (isScreenOffOrBackground()) {
+                    kotlinx.coroutines.withTimeoutOrNull(2_200L) {
+                        audioExtractor.extractExactYoutubeDirectAudioForPlayback(playableVideoId)
+                    }
+                } else {
+                    null
+                }
+            if (cachedDirectStream != null) {
                 isUsingExoPlayerFallback = true
                 backstagePlayer.stopAndClear()
-                _activeStreamEngine.value = "ExoPlayer Direct Stream"
-                startExoPlayerWithUri(activeSongToPlay, rawTarget, resolvedStartMs)
+                _activeStreamEngine.value = "ExoPlayer Native Audio"
+                startExoPlayerWithUri(activeSongToPlay, cachedDirectStream.streamUrl, resolvedStartMs)
             } else {
-                val cachedDirectStream = audioExtractor.getCachedExactYoutubeAudioForPlayback(playableVideoId)
-                    ?: if (isScreenOffOrBackground()) {
-                        audioExtractor.extractExactYoutubeDirectAudioForPlayback(playableVideoId)
-                    } else {
-                        null
-                    }
-                if (cachedDirectStream != null) {
-                    isUsingExoPlayerFallback = true
-                    backstagePlayer.stopAndClear()
-                    _activeStreamEngine.value = "ExoPlayer Native Audio"
-                    startExoPlayerWithUri(activeSongToPlay, cachedDirectStream.streamUrl, resolvedStartMs)
-                } else {
-                    isUsingExoPlayerFallback = false
-                    _activeStreamEngine.value = "Backstage YouTube Engine"
-                    backstagePlayer.loadVideoById(
-                        rawVideoId = playableVideoId,
-                        startSeconds = resolvedStartMs / 1000.0,
-                        songTitle = activeSongToPlay.title,
-                        songArtist = activeSongToPlay.artist,
-                        artworkUrl = activeSongToPlay.highResBannerUrl
-                    )
-                }
+                isUsingExoPlayerFallback = false
+                _activeStreamEngine.value = "Backstage YouTube Engine"
+                backstagePlayer.loadVideoById(
+                    rawVideoId = playableVideoId,
+                    startSeconds = resolvedStartMs / 1000.0,
+                    songTitle = activeSongToPlay.title,
+                    songArtist = activeSongToPlay.artist,
+                    artworkUrl = activeSongToPlay.highResBannerUrl
+                )
             }
 
-            // 5. Deferred background cover hydration, exact stream caching for screen-off safety, & upcoming queue pre-fetching
-            val resolvedVidForAsync = playableVideoId
-            viewModelScope.launch(Dispatchers.IO) {
-                if (!isDirectAudioUrl && resolvedVidForAsync.length == 11) {
-                    // Pre-cache exact stream for current song silently so instant Screen-Off / Background promotion works at 0ms!
-                    val resolvedNow = audioExtractor.extractExactYoutubeDirectAudioForPlayback(resolvedVidForAsync)
+            // 5. Immediately pre-cache current stream (for instant Screen-Off) + exact predicted next songs + crisp artwork!
+            scheduleNextTracksPreFetch(activeSongToPlay, resolvedQueue, resolvedVidForImmediateCache = playableVideoId, originalSong = song)
+        }
+    }
+
+    private fun scheduleNextTracksPreFetch(
+        activeSongToPlay: Song,
+        resolvedQueue: List<Song>,
+        resolvedVidForImmediateCache: String = activeSongToPlay.cleanVideoId,
+        originalSong: Song = activeSongToPlay
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            MusicPlaybackService.prefetchArtwork(activeSongToPlay)
+
+            // Launch current-song stream caching in parallel (do NOT block next-song pre-fetching behind it!)
+            val currentCacheJob = launch {
+                if (resolvedVidForImmediateCache.length == 11 && activeSongToPlay.resolvedLocalUri.isBlank()) {
+                    val resolvedNow = audioExtractor.extractExactYoutubeDirectAudioForPlayback(resolvedVidForImmediateCache)
                     if (resolvedNow != null &&
                         isScreenOffOrBackground() &&
                         !isUsingExoPlayerFallback &&
@@ -2624,77 +2667,110 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
                 }
-                if (song.id.startsWith("spotify_") && song.cleanVideoId.isBlank()) {
-                    try {
-                        libraryDao.updateSpotifyPlaylistSongVideoId(
-                            songId = song.id,
-                            videoId = resolvedVidForAsync,
-                            bannerUrl = activeSongToPlay.bannerUrl
-                        )
-                    } catch (_: Exception) {
-                    }
-                }
-                delay(3500L)
-                while (_isBuffering.value) {
-                    delay(1000L)
-                }
-                if (song.id.startsWith("spotify_")) {
-                    val isPlaylistCoverUsed = spotifyPlaylists.value.any {
-                        it.coverUrl.isNotBlank() && it.coverUrl == song.bannerUrl &&
-                            allSpotifyPlaylistSongs.value.count { s -> s.spotifyPlaylistId == it.spotifyPlaylistId } > 1
-                    }
-                    val individualCover = if (song.bannerUrl.isBlank() || isPlaylistCoverUsed) {
-                        spotifyImportService.resolveIndividualTrackCoverUrl(
-                            spotifyTrackId = "",
-                            title = song.title,
-                            artist = song.artist
-                        ).ifBlank { "https://i.ytimg.com/vi/$resolvedVidForAsync/hqdefault.jpg" }
-                    } else {
-                        song.bannerUrl
-                    }
-                    try {
-                        libraryDao.updateSpotifyPlaylistSongVideoId(
-                            songId = song.id,
-                            videoId = resolvedVidForAsync,
-                            bannerUrl = individualCover
-                        )
-                    } catch (_: Exception) {
-                    }
-                    if (_currentSong.value?.id == song.id && individualCover.isNotBlank() && individualCover != _currentSong.value?.bannerUrl) {
-                        val updatedSong = activeSongToPlay.copy(videoId = resolvedVidForAsync, bannerUrl = individualCover)
-                        _currentSong.value = updatedSong
-                    }
-                }
+            }
 
-                // Pre-resolve videoIds AND exact direct audio streams for the next 3 tracks in the queue
-                // so track transitions with screen OFF or in background happen instantaneously on Native ExoPlayer!
-                val currentIdx = resolvedQueue.indexOfFirst { it.id == song.id }
-                if (currentIdx >= 0) {
-                    val upcoming = resolvedQueue.drop(currentIdx + 1).take(3)
-                    for (nextTrack in upcoming) {
-                        while (_isBuffering.value) {
-                            delay(1000L)
-                        }
-                        var nextVid = nextTrack.cleanVideoId
-                        if (nextVid.isBlank() && nextTrack.resolvedLocalUri.isBlank()) {
-                            nextVid = audioExtractor.findPlayableVideoIdForSong(nextTrack).orEmpty()
-                            if (nextVid.isNotBlank() && nextTrack.id.startsWith("spotify_")) {
-                                try {
-                                    libraryDao.updateSpotifyPlaylistSongVideoId(
-                                        songId = nextTrack.id,
-                                        videoId = nextVid,
-                                        bannerUrl = nextTrack.bannerUrl.ifBlank {
-                                            "https://i.ytimg.com/vi/$nextVid/hqdefault.jpg"
-                                        }
-                                    )
-                                } catch (_: Exception) {
-                                }
+            // Persist Spotify videoId immediately if newly resolved
+            if (originalSong.id.startsWith("spotify_") && originalSong.cleanVideoId.isBlank() && resolvedVidForImmediateCache.isNotBlank()) {
+                try {
+                    libraryDao.updateSpotifyPlaylistSongVideoId(
+                        songId = originalSong.id,
+                        videoId = resolvedVidForImmediateCache,
+                        bannerUrl = activeSongToPlay.bannerUrl
+                    )
+                } catch (_: Exception) {
+                }
+            }
+
+            if (_currentSong.value?.id != activeSongToPlay.id) return@launch
+
+            val predicted1 = computeNextAutoTrack(activeSongToPlay, resolvedQueue)
+            val predicted2 = computeNextAutoTrack(predicted1, resolvedQueue)
+            val currentIdx = resolvedQueue.indexOfFirst { it.id == activeSongToPlay.id }
+            val sequentialNext = if (currentIdx >= 0) resolvedQueue.drop(currentIdx + 1).take(3) else emptyList()
+            val prevTrack = if (currentIdx > 0) listOf(resolvedQueue[currentIdx - 1]) else emptyList()
+
+            val preFetchTargets = (listOf(predicted1, predicted2) + sequentialNext + prevTrack)
+                .distinctBy { it.id }
+                .filter { it.id != activeSongToPlay.id }
+
+            // Pre-fetch predicted next + previous artwork and direct streams immediately in parallel!
+            preFetchTargets.take(2).forEach { priorityTrack ->
+                MusicPlaybackService.prefetchArtwork(priorityTrack)
+                launch {
+                    if (_currentSong.value?.id != activeSongToPlay.id) return@launch
+                    var nextVid = priorityTrack.cleanVideoId
+                    if (nextVid.isBlank() && priorityTrack.resolvedLocalUri.isBlank()) {
+                        nextVid = audioExtractor.findPlayableVideoIdForSong(priorityTrack).orEmpty()
+                        if (nextVid.isNotBlank() && priorityTrack.id.startsWith("spotify_")) {
+                            try {
+                                libraryDao.updateSpotifyPlaylistSongVideoId(
+                                    songId = priorityTrack.id,
+                                    videoId = nextVid,
+                                    bannerUrl = priorityTrack.bannerUrl.ifBlank {
+                                        "https://i.ytimg.com/vi/$nextVid/hqdefault.jpg"
+                                    }
+                                )
+                            } catch (_: Exception) {
                             }
                         }
-                        if (nextVid.length == 11 && nextTrack.resolvedLocalUri.isBlank()) {
-                            audioExtractor.extractExactYoutubeDirectAudioForPlayback(nextVid)
+                    }
+                    if (nextVid.length == 11 && priorityTrack.resolvedLocalUri.isBlank()) {
+                        audioExtractor.extractExactYoutubeDirectAudioForPlayback(nextVid)
+                    }
+                }
+            }
+
+            for (nextTrack in preFetchTargets.drop(2)) {
+                if (_currentSong.value?.id != activeSongToPlay.id) break
+                MusicPlaybackService.prefetchArtwork(nextTrack)
+                var nextVid = nextTrack.cleanVideoId
+                if (nextVid.isBlank() && nextTrack.resolvedLocalUri.isBlank()) {
+                    nextVid = audioExtractor.findPlayableVideoIdForSong(nextTrack).orEmpty()
+                    if (nextVid.isNotBlank() && nextTrack.id.startsWith("spotify_")) {
+                        try {
+                            libraryDao.updateSpotifyPlaylistSongVideoId(
+                                songId = nextTrack.id,
+                                videoId = nextVid,
+                                bannerUrl = nextTrack.bannerUrl.ifBlank {
+                                    "https://i.ytimg.com/vi/$nextVid/hqdefault.jpg"
+                                }
+                            )
+                        } catch (_: Exception) {
                         }
                     }
+                }
+                if (nextVid.length == 11 && nextTrack.resolvedLocalUri.isBlank()) {
+                    audioExtractor.extractExactYoutubeDirectAudioForPlayback(nextVid)
+                }
+            }
+            currentCacheJob.join()
+
+            // Deferred Spotify individual artwork hydration (runs AFTER next-song pre-fetch is warm)
+            if (originalSong.id.startsWith("spotify_") && resolvedVidForImmediateCache.isNotBlank()) {
+                val isPlaylistCoverUsed = spotifyPlaylists.value.any {
+                    it.coverUrl.isNotBlank() && it.coverUrl == originalSong.bannerUrl &&
+                        allSpotifyPlaylistSongs.value.count { s -> s.spotifyPlaylistId == it.spotifyPlaylistId } > 1
+                }
+                val individualCover = if (originalSong.bannerUrl.isBlank() || isPlaylistCoverUsed) {
+                    spotifyImportService.resolveIndividualTrackCoverUrl(
+                        spotifyTrackId = "",
+                        title = originalSong.title,
+                        artist = originalSong.artist
+                    ).ifBlank { "https://i.ytimg.com/vi/$resolvedVidForImmediateCache/hqdefault.jpg" }
+                } else {
+                    originalSong.bannerUrl
+                }
+                try {
+                    libraryDao.updateSpotifyPlaylistSongVideoId(
+                        songId = originalSong.id,
+                        videoId = resolvedVidForImmediateCache,
+                        bannerUrl = individualCover
+                    )
+                } catch (_: Exception) {
+                }
+                if (_currentSong.value?.id == originalSong.id && individualCover.isNotBlank() && individualCover != _currentSong.value?.bannerUrl) {
+                    val updatedSong = activeSongToPlay.copy(videoId = resolvedVidForImmediateCache, bannerUrl = individualCover)
+                    _currentSong.value = updatedSong
                 }
             }
         }
@@ -2969,6 +3045,27 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         playSong(list[prevIndex], list, forceRestartFromBeginning = true)
     }
 
+    internal fun computeNextAutoTrack(current: Song, list: List<Song>): Song {
+        if (list.isEmpty()) return current
+        return when (_repeatMode.value) {
+            RepeatModeState.ONE -> current
+            RepeatModeState.ALL -> {
+                val idx = list.indexOfFirst { it.id == current.id }
+                val nextIndex = if (idx in 0 until list.lastIndex) idx + 1 else 0
+                list[nextIndex]
+            }
+            RepeatModeState.OFF -> {
+                if (isCustomPlaylistQueueActive) {
+                    val idx = list.indexOfFirst { it.id == current.id }
+                    val nextIndex = if (idx in 0 until list.lastIndex) idx + 1 else 0
+                    list[nextIndex]
+                } else {
+                    selectSmartNextSongByVibe(current, list)
+                }
+            }
+        }
+    }
+
     private fun handleTrackEnded() {
         val current = _currentSong.value ?: return
         val list = _queue.value.ifEmpty { allSongs.value }
@@ -2976,26 +3073,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             playSong(current, listOf(current))
             return
         }
-        when (_repeatMode.value) {
-            RepeatModeState.ONE -> {
-                playSong(current, list, forceRestartFromBeginning = true)
-            }
-            RepeatModeState.ALL -> {
-                val idx = list.indexOfFirst { it.id == current.id }
-                val nextIndex = if (idx in 0 until list.lastIndex) idx + 1 else 0
-                playSong(list[nextIndex], list, forceRestartFromBeginning = true)
-            }
-            RepeatModeState.OFF -> {
-                if (isCustomPlaylistQueueActive) {
-                    val idx = list.indexOfFirst { it.id == current.id }
-                    val nextIndex = if (idx in 0 until list.lastIndex) idx + 1 else 0
-                    playSong(list[nextIndex], list, forceRestartFromBeginning = true)
-                } else {
-                    val nextSong = selectSmartNextSongByVibe(current, list)
-                    playSong(nextSong, list, forceRestartFromBeginning = true)
-                }
-            }
-        }
+        val nextSong = computeNextAutoTrack(current, list)
+        playSong(nextSong, list, forceRestartFromBeginning = true)
     }
 
     fun cyclePlaybackSpeed() {

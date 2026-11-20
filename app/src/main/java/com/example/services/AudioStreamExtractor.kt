@@ -182,6 +182,14 @@ class AudioStreamExtractor {
         .followSslRedirects(true)
         .build()
 
+    private val probeHttpClient = OkHttpClient.Builder()
+        .connectTimeout(2500, TimeUnit.MILLISECONDS)
+        .readTimeout(2500, TimeUnit.MILLISECONDS)
+        .callTimeout(3000, TimeUnit.MILLISECONDS)
+        .followRedirects(true)
+        .followSslRedirects(true)
+        .build()
+
     private val downloadHttpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
@@ -193,6 +201,7 @@ class AudioStreamExtractor {
 
     // Cache resolved stream URLs for 20 minutes
     private val streamCache = ConcurrentHashMap<String, Pair<Long, ResolvedAudioStream>>()
+    private val inFlightExtractions = ConcurrentHashMap<String, CompletableDeferred<ResolvedAudioStream?>>()
     private val searchCache = ConcurrentHashMap<String, List<Song>>()
     private val cacheTtlMs = 20 * 60 * 1000L
 
@@ -235,14 +244,39 @@ class AudioStreamExtractor {
             invalidateCachedStream(cleanId)
         } else {
             getCachedExactYoutubeAudioForPlayback(cleanId)?.let { return@withContext it }
+            inFlightExtractions[cleanId]?.let { existingDeferred ->
+                return@withContext try {
+                    existingDeferred.await()
+                } catch (_: Exception) {
+                    null
+                }
+            }
         }
 
-        val resolved = resolveForSingleVideoIdFast(cleanId)
-        if (resolved != null) {
-            streamCache[cleanId] = System.currentTimeMillis() to resolved
-            registerStreamUserAgent(resolved.streamUrl, resolved.userAgent, resolved.cookie)
+        val deferred = CompletableDeferred<ResolvedAudioStream?>()
+        val prior = inFlightExtractions.putIfAbsent(cleanId, deferred)
+        if (prior != null) {
+            return@withContext try {
+                prior.await()
+            } catch (_: Exception) {
+                null
+            }
         }
-        resolved
+
+        try {
+            val resolved = resolveForSingleVideoIdFast(cleanId)
+            if (resolved != null) {
+                streamCache[cleanId] = System.currentTimeMillis() to resolved
+                registerStreamUserAgent(resolved.streamUrl, resolved.userAgent, resolved.cookie)
+            }
+            deferred.complete(resolved)
+            resolved
+        } catch (t: Throwable) {
+            deferred.complete(null)
+            null
+        } finally {
+            inFlightExtractions.remove(cleanId, deferred)
+        }
     }
 
     suspend fun resolveAudioStreamUrl(rawVideoId: String): String? {
@@ -1003,8 +1037,10 @@ class AudioStreamExtractor {
             if (!isGoogleVideo) {
                 reqBuilder.header("Range", "bytes=0-1023")
             }
-            httpClient.newCall(reqBuilder.get().build()).execute().use { resp ->
-                resp.code == 200 || resp.code == 206 || resp.code == 302
+            httpClient.newCall(reqBuilder.get().build()).let {
+                probeHttpClient.newCall(it.request()).execute().use { resp ->
+                    resp.code == 200 || resp.code == 206 || resp.code == 302
+                }
             }
         } catch (_: Exception) {
             false
