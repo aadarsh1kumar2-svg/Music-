@@ -41,6 +41,7 @@ import com.example.services.FamGatewayOrderSession
 import com.example.services.FamGatewayService
 import com.example.services.FirebaseSongsService
 import com.example.services.MusicPlaybackService
+import com.example.services.ResolvedAudioStream
 import com.example.services.SpotifyPlaylistImportService
 import com.example.utils.CountryOption
 import com.example.utils.SUPPORTED_COUNTRIES
@@ -108,6 +109,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         const val CRAZY_DEAL_WINDOW_MS = 3L * 24L * 60L * 60L * 1000L // 3 days (72 hours) for new users
         const val CURRENT_APP_UPDATE_SECRET_CODE = "6842"
         private const val CURRENT_SECRET_CODE_VERSION = 14
+        const val FREE_SONGS_PER_AD = 3
     }
 
     private val appContext = application.applicationContext
@@ -181,6 +183,21 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     fun setSettingsPrivacyOpen(open: Boolean) {
         _isSettingsPrivacyOpen.value = open
     }
+
+    // Free-User Video Ad State (triggers after every 3 songs; 100% disabled for VIP Premium users)
+    private val _isVideoAdPlaying = MutableStateFlow(false)
+    val isVideoAdPlaying: StateFlow<Boolean> = _isVideoAdPlaying.asStateFlow()
+
+    private val _promoAdStream = MutableStateFlow<ResolvedAudioStream?>(null)
+    val promoAdStream: StateFlow<ResolvedAudioStream?> = _promoAdStream.asStateFlow()
+
+    private var freeSongsPlayedSinceLastAd: Int = 0
+    private var lastCountedAdSongId: String? = null
+    private var pendingAdResumeSong: Song? = null
+    private var pendingAdResumeQueue: List<Song> = emptyList()
+    @Volatile
+    private var preloadedPromoAdStream: ResolvedAudioStream? = null
+    private var promoAdResolveJob: Job? = null
 
     @Volatile
     private var failedLoginAttempts: Int = 0
@@ -337,6 +354,52 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * Logs out the current local session so the user can sign in with a different/new account
+     * without deleting their existing cloud profile.
+     */
+    fun logoutUser() {
+        playbackJob?.cancel()
+        promoAdResolveJob?.cancel()
+        backstagePlayer.pauseVideo()
+        backstagePlayer.stopAndClear()
+        MusicPlaybackService.syncPlayState(false)
+        _isPlaying.value = false
+        _isBuffering.value = false
+        _currentSong.value = null
+        _currentPositionMs.value = 0L
+        _durationMs.value = 0L
+        isCurrentSongLoadedInEngine = false
+        _isFullScreenPlayerOpen.value = false
+        _isSettingsPrivacyOpen.value = false
+        _isDeveloperScreenOpen.value = false
+        _isEditNameDialogOpen.value = false
+        _isVideoAdPlaying.value = false
+        _promoAdStream.value = null
+        freeSongsPlayedSinceLastAd = 0
+        lastCountedAdSongId = null
+        pendingAdResumeSong = null
+        pendingAdResumeQueue = emptyList()
+        preloadedPromoAdStream = null
+        _authErrorMessage.value = null
+
+        prefs.edit()
+            .remove("user_name")
+            .remove("user_password")
+            .remove("cloud_user_id")
+            .remove("last_song_id")
+            .remove("last_position_ms")
+            .remove("last_queue_json")
+            .apply()
+        saveSubscriptionStateLocally(UserSubscriptionState())
+        _userName.value = ""
+        _userPassword.value = ""
+        viewModelScope.launch {
+            clearLocalLibraryDataForFreeUser()
+        }
+        emitSnackbar("Logged out. Please sign in or create an account.")
+    }
+
+    /**
      * Permanently deletes the current user's account and clears local credentials when requested by the user.
      */
     fun deleteCurrentUserAccount() {
@@ -350,6 +413,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             backstagePlayer.pauseVideo()
             MusicPlaybackService.syncPlayState(false)
             _isPlaying.value = false
+            _isVideoAdPlaying.value = false
+            _promoAdStream.value = null
+            freeSongsPlayedSinceLastAd = 0
+            lastCountedAdSongId = null
+            pendingAdResumeSong = null
+            pendingAdResumeQueue = emptyList()
             prefs.edit()
                 .remove("user_name")
                 .remove("user_password")
@@ -2380,7 +2449,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         song: Song,
         customQueue: List<Song>? = null,
         startPositionMs: Long = 0L,
-        forceRestartFromBeginning: Boolean = false
+        forceRestartFromBeginning: Boolean = false,
+        bypassAdGate: Boolean = false
     ) {
         // Block playback if Admin App Update or Maintenance Mode is active
         if (isMaintenanceModeActive.value || isAppUpdatePopupActive.value) {
@@ -2392,6 +2462,14 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         refreshDailyLimitBucketIfNeeded()
         if (!_subscriptionState.value.isActive() && _dailyListenedSeconds.value >= currentFreeDailyLimitSeconds()) {
             pausePlaybackForDailyLimit()
+            return
+        }
+
+        // Keep music paused while a Free-user promo video ad is playing
+        if (_isVideoAdPlaying.value && !bypassAdGate && !isVerifiedVipActive()) {
+            backstagePlayer.pauseVideo()
+            MusicPlaybackService.syncPlayState(false)
+            _isPlaying.value = false
             return
         }
 
@@ -2429,6 +2507,33 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         if (isSameActiveSong && engineReadyForSameSong && startPositionMs == 0L && !_isPlaying.value) {
             togglePlayPause()
             return
+        }
+
+        // Free User YouTube Video Ad Gate: trigger after every 3 songs; NEVER trigger for VIP Premium users!
+        if (!isSameActiveSong && !bypassAdGate) {
+            if (isVerifiedVipActive()) {
+                freeSongsPlayedSinceLastAd = 0
+                lastCountedAdSongId = null
+                _isVideoAdPlaying.value = false
+                pendingAdResumeSong = null
+                pendingAdResumeQueue = emptyList()
+            } else if (lastCountedAdSongId != null && freeSongsPlayedSinceLastAd >= FREE_SONGS_PER_AD) {
+                triggerPromoVideoAdBeforeSong(nextSong = song, nextQueue = resolvedQueue)
+                return
+            }
+        }
+
+        if (!isVerifiedVipActive() && (!isSameActiveSong || bypassAdGate)) {
+            if (lastCountedAdSongId != song.id || forceRestartFromBeginning || hasHandledEndForCurrentSong) {
+                freeSongsPlayedSinceLastAd += 1
+                lastCountedAdSongId = song.id
+                if (freeSongsPlayedSinceLastAd >= FREE_SONGS_PER_AD && preloadedPromoAdStream == null) {
+                    preloadPromoAdStreamAsync()
+                }
+            }
+        } else if (isVerifiedVipActive()) {
+            freeSongsPlayedSinceLastAd = 0
+            lastCountedAdSongId = null
         }
 
         val resolvedStartMs = when {
@@ -2789,10 +2894,76 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
+    private fun preloadPromoAdStreamAsync() {
+        if (isVerifiedVipActive() || promoAdResolveJob?.isActive == true) return
+        promoAdResolveJob = viewModelScope.launch {
+            val adVid = com.example.security.AadifySecurityVault.getPromoAdVideoId()
+            val resolved = audioExtractor.extractYoutubeVideoAdStream(adVid)
+            if (resolved != null) {
+                preloadedPromoAdStream = resolved
+            }
+        }
+    }
+
+    private fun triggerPromoVideoAdBeforeSong(nextSong: Song, nextQueue: List<Song>) {
+        playbackJob?.cancel()
+        backstagePlayer.pauseVideo()
+        MusicPlaybackService.syncPlayState(false)
+        _isPlaying.value = false
+        _isBuffering.value = false
+
+        pendingAdResumeSong = nextSong
+        pendingAdResumeQueue = nextQueue
+        freeSongsPlayedSinceLastAd = 0
+        lastCountedAdSongId = null
+        _promoAdStream.value = preloadedPromoAdStream
+        _isVideoAdPlaying.value = true
+
+        if (preloadedPromoAdStream == null) {
+            promoAdResolveJob?.cancel()
+            promoAdResolveJob = viewModelScope.launch {
+                val adVid = com.example.security.AadifySecurityVault.getPromoAdVideoId()
+                val resolved = audioExtractor.extractYoutubeVideoAdStream(adVid)
+                if (_isVideoAdPlaying.value && resolved != null) {
+                    preloadedPromoAdStream = resolved
+                    _promoAdStream.value = resolved
+                }
+            }
+        }
+    }
+
+    fun onVideoAdCompleted() {
+        if (!_isVideoAdPlaying.value && pendingAdResumeSong == null) return
+        _isVideoAdPlaying.value = false
+        _promoAdStream.value = null
+        preloadedPromoAdStream = null
+        val nextSong = pendingAdResumeSong
+        val nextQueue = pendingAdResumeQueue
+        pendingAdResumeSong = null
+        pendingAdResumeQueue = emptyList()
+        freeSongsPlayedSinceLastAd = 0
+        lastCountedAdSongId = null
+
+        if (nextSong != null && _userName.value.isNotBlank()) {
+            playSong(
+                song = nextSong,
+                customQueue = nextQueue,
+                forceRestartFromBeginning = true,
+                bypassAdGate = true
+            )
+        }
+    }
+
     fun togglePlayPause() {
         val activeSong = _currentSong.value ?: return
         if (isMaintenanceModeActive.value || isAppUpdatePopupActive.value) {
             stopPlaybackImmediatelyForAdminLock()
+            return
+        }
+        if (_isVideoAdPlaying.value && !isVerifiedVipActive()) {
+            backstagePlayer.pauseVideo()
+            MusicPlaybackService.syncPlayState(false)
+            _isPlaying.value = false
             return
         }
         refreshDailyLimitBucketIfNeeded()
@@ -3982,9 +4153,16 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             .apply()
         _subscriptionState.value = state
         _activeSubscriptionRemainingSeconds.value = state.remainingSeconds()
-        if (state.isActive() && checkAudioPermissionGranted()) {
-            loadDeviceLocalSongs()
-        } else if (!state.isActive()) {
+        if (state.isActive()) {
+            freeSongsPlayedSinceLastAd = 0
+            lastCountedAdSongId = null
+            _isVideoAdPlaying.value = false
+            pendingAdResumeSong = null
+            pendingAdResumeQueue = emptyList()
+            if (checkAudioPermissionGranted()) {
+                loadDeviceLocalSongs()
+            }
+        } else {
             _deviceLocalSongs.value = emptyList()
         }
     }

@@ -819,26 +819,6 @@ fun SubscriptionPlansDialog(
                                     ),
                                     maxLines = 1
                                 )
-                                Surface(
-                                    color = royalGold.copy(alpha = 0.16f),
-                                    shape = RoundedCornerShape(50),
-                                    modifier = Modifier.border(
-                                        width = 0.8.dp,
-                                        color = royalGold.copy(alpha = 0.7f),
-                                        shape = RoundedCornerShape(50)
-                                    )
-                                ) {
-                                    Text(
-                                        text = "by Aadarsh",
-                                        style = MaterialTheme.typography.labelSmall.copy(
-                                            color = Color(0xFFFFE57F),
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 9.5.sp
-                                        ),
-                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
-                                        maxLines = 1
-                                    )
-                                }
                             }
                             Spacer(modifier = Modifier.height(2.dp))
                             Text(

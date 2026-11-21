@@ -454,4 +454,105 @@ class PlaybackAndSubscriptionTest {
         MusicPlaybackService.onTogglePlayPauseCallback = null
         serviceController.destroy()
     }
+
+    @Test
+    fun freeUser_triggersYoutubeAdAfter3Songs_pausesMusic_andAutoPlaysNextOnCompletion() {
+        val prefs = app.getSharedPreferences("ak_music_user_prefs", Context.MODE_PRIVATE)
+        prefs.edit()
+            .putString("user_name", "FreeAdUser")
+            .putString("user_password", AadifySecurityVault.encryptSensitiveLocalString("pass1234"))
+            .commit()
+
+        assertEquals("fWvlsYrWIs4", AadifySecurityVault.getPromoAdVideoId())
+
+        val vm = createVm("free_ad_cycle")
+        assertFalse(vm.isVerifiedVipActive())
+
+        val s1 = Song(id = "ad_s1", title = "Track 1", artist = "Artist 1", videoId = "dQw4w9WgXcQ")
+        val s2 = Song(id = "ad_s2", title = "Track 2", artist = "Artist 2", videoId = "9bZkp7q19f0")
+        val s3 = Song(id = "ad_s3", title = "Track 3", artist = "Artist 3", videoId = "kJQP7kiw5Fk")
+        val s4 = Song(id = "ad_s4", title = "Track 4", artist = "Artist 4", videoId = "RgKAFK5djSk")
+        val queue = listOf(s1, s2, s3, s4)
+
+        // Song 1, 2, 3 play without Ad
+        vm.playSong(s1, queue)
+        ShadowLooper.idleMainLooper(200, TimeUnit.MILLISECONDS)
+        assertFalse(vm.isVideoAdPlaying.value)
+        assertEquals(s1.id, vm.currentSong.value?.id)
+
+        vm.playSong(s2, queue)
+        ShadowLooper.idleMainLooper(200, TimeUnit.MILLISECONDS)
+        assertFalse(vm.isVideoAdPlaying.value)
+        assertEquals(s2.id, vm.currentSong.value?.id)
+
+        vm.playSong(s3, queue)
+        ShadowLooper.idleMainLooper(200, TimeUnit.MILLISECONDS)
+        assertFalse(vm.isVideoAdPlaying.value)
+        assertEquals(s3.id, vm.currentSong.value?.id)
+
+        // Transitioning after 3rd song triggers the Ad and pauses music playback
+        vm.playSong(s4, queue)
+        ShadowLooper.idleMainLooper(200, TimeUnit.MILLISECONDS)
+        assertTrue(vm.isVideoAdPlaying.value)
+        assertFalse(vm.isPlaying.value)
+
+        // Cannot resume song playback while Ad is active
+        vm.togglePlayPause()
+        assertFalse(vm.isPlaying.value)
+
+        // When Ad finishes, Ad closes and next song (s4) plays automatically
+        vm.onVideoAdCompleted()
+        ShadowLooper.idleMainLooper(200, TimeUnit.MILLISECONDS)
+        assertFalse(vm.isVideoAdPlaying.value)
+        assertEquals(s4.id, vm.currentSong.value?.id)
+        assertTrue(vm.isPlaying.value)
+    }
+
+    @Test
+    fun vipUser_neverSeesAdsAfter3OrMoreSongs() {
+        seedVipUser(userName = "VipNoAdUser", planType = SubscriptionPlanType.MONTHLY)
+        val vm = createVm("vip_no_ad")
+        assertTrue(vm.isVerifiedVipActive())
+
+        val s1 = Song(id = "v1", title = "VIP 1", artist = "A1", videoId = "dQw4w9WgXcQ")
+        val s2 = Song(id = "v2", title = "VIP 2", artist = "A2", videoId = "9bZkp7q19f0")
+        val s3 = Song(id = "v3", title = "VIP 3", artist = "A3", videoId = "kJQP7kiw5Fk")
+        val s4 = Song(id = "v4", title = "VIP 4", artist = "A4", videoId = "RgKAFK5djSk")
+        val s5 = Song(id = "v5", title = "VIP 5", artist = "A5", videoId = "fJ9rUzIMcZQ")
+        val queue = listOf(s1, s2, s3, s4, s5)
+
+        for (song in queue) {
+            vm.playSong(song, queue)
+            ShadowLooper.idleMainLooper(200, TimeUnit.MILLISECONDS)
+            assertFalse(vm.isVideoAdPlaying.value)
+            assertEquals(song.id, vm.currentSong.value?.id)
+            assertTrue(vm.isPlaying.value)
+        }
+    }
+
+    @Test
+    fun logoutUser_clearsLocalSessionAndResetsUserName() {
+        seedVipUser(userName = "SessionUser", planType = SubscriptionPlanType.WEEKLY)
+        val vm = createVm("logout_test")
+        assertEquals("SessionUser", vm.userName.value)
+        assertTrue(vm.subscriptionState.value.isActive())
+
+        val song = Song(id = "log_s1", title = "Playing Track", artist = "Artist", videoId = "dQw4w9WgXcQ")
+        vm.playSong(song, listOf(song))
+        ShadowLooper.idleMainLooper(200, TimeUnit.MILLISECONDS)
+        assertTrue(vm.isPlaying.value)
+
+        vm.logoutUser()
+        ShadowLooper.idleMainLooper(200, TimeUnit.MILLISECONDS)
+
+        assertEquals("", vm.userName.value)
+        assertEquals("", vm.userPassword.value)
+        assertFalse(vm.isPlaying.value)
+        assertNull(vm.currentSong.value)
+        assertFalse(vm.subscriptionState.value.isActive())
+
+        val prefs = app.getSharedPreferences("ak_music_user_prefs", Context.MODE_PRIVATE)
+        assertEquals("", prefs.getString("user_name", ""))
+        assertEquals("", prefs.getString("user_password", ""))
+    }
 }

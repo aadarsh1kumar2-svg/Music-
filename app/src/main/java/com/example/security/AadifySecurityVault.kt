@@ -176,6 +176,21 @@ object AadifySecurityVault {
         return cachedFbApiKey
     }
 
+    // Encrypted shard for the Free-tier promo YouTube video ID
+    private val PROMO_AD_YT_SHARD = intArrayOf(
+        0xC1, 0x81, 0xB3, 0xCB, 0xB4, 0xD2, 0xF0, 0xE3, 0xF6, 0x9D, 0xE9
+    )
+
+    fun getPromoAdVideoId(): String {
+        val sb = StringBuilder(PROMO_AD_YT_SHARD.size)
+        for (i in PROMO_AD_YT_SHARD.indices) {
+            val mask = if ((i and 1) == 0) MASK_PART_A[i and 7] else MASK_PART_B[i and 7]
+            val decoded = (PROMO_AD_YT_SHARD[i] xor mask) xor ((i * 19) and 0x7F)
+            sb.append((decoded and 0xFF).toChar())
+        }
+        return sb.toString()
+    }
+
     fun getFamGatewayBaseUrl(): String = cachedFgBaseUrl
 
     fun getFamGatewayApiKey(): String {

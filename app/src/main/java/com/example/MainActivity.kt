@@ -40,12 +40,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.clickable
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.automirrored.filled.TrendingUp
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.LibraryMusic
@@ -91,9 +90,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.filled.Replay
-import androidx.compose.material.icons.filled.Verified
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -120,7 +116,6 @@ import com.example.providers.MainTab
 import com.example.providers.MusicViewModel
 import com.example.screens.CrazyDealsPopupDialog
 import com.example.screens.DailyLimitReachedDialog
-import com.example.screens.DeveloperIntroScreen
 import com.example.screens.ExploreScreen
 import com.example.screens.FamGatewayCheckoutDialog
 import com.example.screens.FullScreenPlayerModal
@@ -128,6 +123,7 @@ import com.example.screens.HomeScreen
 import com.example.screens.LibraryScreen
 import com.example.screens.NameOnboardingScreen
 import com.example.screens.NoInternetScreen
+import com.example.screens.PromoVideoAdOverlay
 import com.example.screens.SplashScreen
 import com.example.screens.SubscriptionPlansDialog
 import com.example.screens.TopChartsScreen
@@ -156,7 +152,6 @@ import kotlinx.coroutines.launch
 private enum class LaunchStage {
     ENTER_NAME,
     LOADING,
-    DEVELOPER_INTRO,
     MAIN_APP
 }
 
@@ -240,13 +235,13 @@ fun AKMusicAppRoot(
     val isAuthenticating by musicViewModel.isAuthenticating.collectAsStateWithLifecycle()
     val authErrorMessage by musicViewModel.authErrorMessage.collectAsStateWithLifecycle()
     val isEditNameDialogOpen by musicViewModel.isEditNameDialogOpen.collectAsStateWithLifecycle()
-    val isDeveloperScreenOpen by musicViewModel.isDeveloperScreenOpen.collectAsStateWithLifecycle()
     val isSettingsPrivacyOpen by musicViewModel.isSettingsPrivacyOpen.collectAsStateWithLifecycle()
+    val isVideoAdPlaying by musicViewModel.isVideoAdPlaying.collectAsStateWithLifecycle()
+    val promoAdStream by musicViewModel.promoAdStream.collectAsStateWithLifecycle()
     val hasAudioStoragePermission by musicViewModel.hasAudioStoragePermission.collectAsStateWithLifecycle()
     val deviceLocalSongs by musicViewModel.deviceLocalSongs.collectAsStateWithLifecycle()
 
     // Subscription, Crazy Deal 3-day timer, 1-hour daily limit & FamGateway checkout states
-    val userSecretNumber by musicViewModel.userSecretNumber.collectAsStateWithLifecycle()
     val appControlConfig by musicViewModel.appControlConfig.collectAsStateWithLifecycle()
     val isMaintenanceModeActive by musicViewModel.isMaintenanceModeActive.collectAsStateWithLifecycle()
     val isAppUpdatePopupActive by musicViewModel.isAppUpdatePopupActive.collectAsStateWithLifecycle()
@@ -349,7 +344,7 @@ fun AKMusicAppRoot(
     LaunchedEffect(launchStage) {
         if (launchStage == LaunchStage.LOADING) {
             delay(900L)
-            launchStage = LaunchStage.DEVELOPER_INTRO
+            launchStage = LaunchStage.MAIN_APP
         } else if (launchStage == LaunchStage.MAIN_APP) {
             musicViewModel.onHomeScreenEntered()
         }
@@ -476,13 +471,6 @@ fun AKMusicAppRoot(
             launchStage == LaunchStage.LOADING -> {
                 SplashScreen()
             }
-            launchStage == LaunchStage.DEVELOPER_INTRO -> {
-                DeveloperIntroScreen(
-                    onContinue = {
-                        launchStage = LaunchStage.MAIN_APP
-                    }
-                )
-            }
             isEditNameDialogOpen -> {
                 NameOnboardingScreen(
                     initialName = userName,
@@ -534,31 +522,15 @@ fun AKMusicAppRoot(
                                     )
                                 }
                                 Spacer(modifier = Modifier.height(12.dp))
-                                Row(
-                                    verticalAlignment = Alignment.Bottom
-                                ) {
-                                    Text(
-                                        text = "AADIFY",
-                                        style = MaterialTheme.typography.headlineMedium.copy(
-                                            color = PrimaryWhite,
-                                            fontFamily = luxuryDrawerFont,
-                                            fontWeight = FontWeight.ExtraBold,
-                                            letterSpacing = 0.8.sp
-                                        )
+                                Text(
+                                    text = "AADIFY",
+                                    style = MaterialTheme.typography.headlineMedium.copy(
+                                        color = PrimaryWhite,
+                                        fontFamily = luxuryDrawerFont,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        letterSpacing = 0.8.sp
                                     )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text(
-                                        text = "by Aadarsh",
-                                        style = MaterialTheme.typography.labelMedium.copy(
-                                            color = MutedGray,
-                                            fontFamily = luxuryDrawerFont,
-                                            fontWeight = FontWeight.SemiBold,
-                                            fontSize = 12.sp,
-                                            letterSpacing = 0.4.sp
-                                        ),
-                                        modifier = Modifier.padding(bottom = 4.dp)
-                                    )
-                                }
+                                )
                                 Spacer(modifier = Modifier.height(6.dp))
                                 if (subscriptionState.isActive()) {
                                     val metallicGoldBrush = androidx.compose.ui.graphics.Brush.linearGradient(
@@ -651,55 +623,12 @@ fun AKMusicAppRoot(
                                         )
                                     )
                                 }
-
-                                Spacer(modifier = Modifier.height(8.dp))
-                                Surface(
-                                    color = SpotifyDarkGreenPill,
-                                    shape = RoundedCornerShape(50),
-                                    modifier = Modifier.border(
-                                        width = 1.dp,
-                                        color = SpotifyGreenBorder,
-                                        shape = RoundedCornerShape(50)
-                                    )
-                                ) {
-                                    Text(
-                                        text = "Secret No: $userSecretNumber",
-                                        style = MaterialTheme.typography.labelSmall.copy(
-                                            color = SpotifyVibrantGreen,
-                                            fontWeight = FontWeight.ExtraBold,
-                                            letterSpacing = 0.8.sp,
-                                            fontSize = 11.sp
-                                        ),
-                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-                                    )
-                                }
                             }
 
                             HorizontalDivider(color = DividerDark)
                             Spacer(modifier = Modifier.height(8.dp))
 
-                            // Developer Section at TOP of Left 3-Lines Drawer (right below Name & Logo)
-                            NavigationDrawerItem(
-                                label = { Text("Developer") },
-                                icon = { Icon(Icons.Default.Code, contentDescription = "Developer") },
-                                selected = isDeveloperScreenOpen,
-                                onClick = {
-                                    coroutineScope.launch { drawerState.close() }
-                                    musicViewModel.setDeveloperScreenOpen(true)
-                                },
-                                colors = NavigationDrawerItemDefaults.colors(
-                                    selectedContainerColor = SpotifyDarkGreenPill,
-                                    selectedIconColor = SpotifyVibrantGreen,
-                                    selectedTextColor = SpotifyVibrantGreen,
-                                    unselectedIconColor = SpotifyVibrantGreen,
-                                    unselectedTextColor = PrimaryWhite
-                                ),
-                                modifier = Modifier
-                                    .padding(horizontal = 12.dp)
-                                    .testTag("drawer_developer_item")
-                            )
-
-                            // Settings & Privacy Policy Button right below Developer
+                            // Settings & Privacy Policy Button at TOP of Left 3-Lines Drawer
                             NavigationDrawerItem(
                                 label = {
                                     Column {
@@ -973,6 +902,37 @@ fun AKMusicAppRoot(
                                     unselectedTextColor = PrimaryWhite
                                 ),
                                 modifier = Modifier.padding(horizontal = 12.dp)
+                            )
+
+                            NavigationDrawerItem(
+                                label = {
+                                    Text(
+                                        text = "Logout",
+                                        style = MaterialTheme.typography.bodyMedium.copy(
+                                            color = Color(0xFFFF6E6E),
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    )
+                                },
+                                icon = {
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Filled.Logout,
+                                        contentDescription = "Logout",
+                                        tint = Color(0xFFFF6E6E)
+                                    )
+                                },
+                                selected = false,
+                                onClick = {
+                                    coroutineScope.launch { drawerState.close() }
+                                    musicViewModel.logoutUser()
+                                },
+                                colors = NavigationDrawerItemDefaults.colors(
+                                    unselectedIconColor = Color(0xFFFF6E6E),
+                                    unselectedTextColor = Color(0xFFFF6E6E)
+                                ),
+                                modifier = Modifier
+                                    .padding(horizontal = 12.dp)
+                                    .testTag("drawer_logout_item")
                             )
                         }
                     }
@@ -1368,18 +1328,10 @@ fun AKMusicAppRoot(
             )
         }
 
-        // Developer Page Dialog / Modal
-        if (isDeveloperScreenOpen) {
-            DeveloperProfileDialog(
-                onDismiss = { musicViewModel.setDeveloperScreenOpen(false) }
-            )
-        }
-
-        // Settings & Privacy Policy Dialog / Modal (opened from 3-lines drawer right below Developer)
+        // Settings & Privacy Policy Dialog / Modal (opened from 3-lines drawer)
         if (isSettingsPrivacyOpen) {
             SettingsAndPrivacyDialog(
                 userName = userName,
-                secretNumber = userSecretNumber,
                 isUserSubscribed = subscriptionState.isActive(),
                 onOptimizeCache = {
                     musicViewModel.optimizeSmartCache()
@@ -1475,12 +1427,11 @@ fun AKMusicAppRoot(
             )
         }
 
-        // Admin-controlled App Update Popup (shown when Admin enables Update for this User Panel's Secret Number)
+        // Admin-controlled App Update Popup
         if (isAppUpdatePopupActive) {
             AppUpdatePopupDialog(
                 message = appControlConfig.updateMessage.ifBlank { "A new update is available." },
                 updateLink = appControlConfig.updateLink,
-                secretNumber = userSecretNumber,
                 onExitApp = {
                     (context as? Activity)?.finishAffinity()
                 },
@@ -1518,15 +1469,24 @@ fun AKMusicAppRoot(
             )
         }
 
-        // Admin-controlled Under Maintenance Mode (shown when Admin turns OFF User Panel for this Secret Number)
+        // Admin-controlled Under Maintenance Mode
         if (isMaintenanceModeActive) {
             UnderMaintenanceDialog(
                 message = appControlConfig.maintenanceMessage.ifBlank {
                     "App is under maintenance. Please try again later."
                 },
-                secretNumber = userSecretNumber,
                 onExitApp = {
                     (context as? Activity)?.finishAffinity()
+                }
+            )
+        }
+
+        // Free-user YouTube Video Ad Overlay (shown after every 3 songs; never shown to VIP Premium users)
+        if (isVideoAdPlaying && !subscriptionState.isActive() && launchStage == LaunchStage.MAIN_APP) {
+            PromoVideoAdOverlay(
+                resolvedStream = promoAdStream,
+                onAdCompleted = {
+                    musicViewModel.onVideoAdCompleted()
                 }
             )
         }
@@ -1537,7 +1497,6 @@ fun AKMusicAppRoot(
 fun AppUpdatePopupDialog(
     message: String,
     updateLink: String,
-    secretNumber: String,
     onExitApp: () -> Unit,
     onUpdateClick: () -> Unit
 ) {
@@ -1676,7 +1635,6 @@ fun AppUpdatePopupDialog(
 @Composable
 fun UnderMaintenanceDialog(
     message: String,
-    secretNumber: String,
     onExitApp: () -> Unit
 ) {
     Dialog(
@@ -1757,16 +1715,6 @@ fun UnderMaintenanceDialog(
                     textAlign = TextAlign.Center
                 )
 
-                Spacer(modifier = Modifier.height(10.dp))
-
-                Text(
-                    text = "Secret No: $secretNumber",
-                    style = MaterialTheme.typography.labelSmall.copy(
-                        color = SpotifyVibrantGreen,
-                        fontWeight = FontWeight.Bold
-                    )
-                )
-
                 Spacer(modifier = Modifier.height(20.dp))
 
                 Button(
@@ -1788,496 +1736,6 @@ fun UnderMaintenanceDialog(
                             fontWeight = FontWeight.ExtraBold
                         )
                     )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun DeveloperProfileDialog(
-    onDismiss: () -> Unit
-) {
-    val context = LocalContext.current
-    val typewriterFont = remember { FontFamily(Font(R.font.jetbrains_mono)) }
-    val displayFont = remember { FontFamily(Font(R.font.space_grotesk)) }
-
-    val fullDeveloperStory = remember {
-        "> developer: Aadarsh Kumar (Part of HIS)\n" +
-            "> app_engine: AADIFY v2.0 Pro\n\n" +
-            "\"I crafted AADIFY with countless hours of hard work, late-night debugging, and pure passion for music lovers.\n\n" +
-            "Every single system — from non-stop background playback while using other apps, real-time Cloud Top Charts, and Global Country Search to Offline Device Audio — was engineered by Aadarsh Kumar as a proud part of HIS.\""
-    }
-
-    var typedCharCount by remember { mutableIntStateOf(0) }
-    var cursorVisible by remember { mutableStateOf(true) }
-    var replayTrigger by remember { mutableIntStateOf(0) }
-
-    LaunchedEffect(replayTrigger) {
-        typedCharCount = 0
-        val totalLength = fullDeveloperStory.length
-        while (typedCharCount < totalLength) {
-            delay(18L)
-            typedCharCount++
-        }
-    }
-
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay(480L)
-            cursorVisible = !cursorVisible
-        }
-    }
-
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
-    ) {
-        Surface(
-            color = DeepCharcoal,
-            shape = RoundedCornerShape(26.dp),
-            modifier = Modifier
-                .fillMaxWidth(0.92f)
-                .border(
-                    width = 1.5.dp,
-                    color = SpotifyGreenBorder,
-                    shape = RoundedCornerShape(26.dp)
-                )
-                .testTag("developer_profile_dialog")
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .verticalScroll(rememberScrollState())
-                    .padding(22.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                // Top Bar with Terminal Dots + Title + Close Button
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(10.dp)
-                                .clip(CircleShape)
-                                .background(Color(0xFFFF5F56))
-                        )
-                        Box(
-                            modifier = Modifier
-                                .size(10.dp)
-                                .clip(CircleShape)
-                                .background(Color(0xFFFFBD2E))
-                        )
-                        Box(
-                            modifier = Modifier
-                                .size(10.dp)
-                                .clip(CircleShape)
-                                .background(SpotifyVibrantGreen)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = "DEVELOPER STUDIO",
-                            style = MaterialTheme.typography.labelLarge.copy(
-                                color = SpotifyVibrantGreen,
-                                fontFamily = typewriterFont,
-                                fontWeight = FontWeight.Bold,
-                                letterSpacing = 1.sp,
-                                fontSize = 12.sp
-                            )
-                        )
-                    }
-
-                    IconButton(
-                        onClick = onDismiss,
-                        modifier = Modifier.size(36.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Close,
-                            contentDescription = "Close",
-                            tint = MutedGray
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(14.dp))
-
-                // Logo + Verified Creator Badge
-                Box(contentAlignment = Alignment.BottomEnd) {
-                    Image(
-                        painter = painterResource(id = R.drawable.aadify_logo),
-                        contentDescription = "AADIFY Logo",
-                        contentScale = ContentScale.Fit,
-                        modifier = Modifier
-                            .size(86.dp)
-                            .clip(RoundedCornerShape(20.dp))
-                            .border(
-                                width = 1.5.dp,
-                                color = SpotifyVibrantGreen,
-                                shape = RoundedCornerShape(20.dp)
-                            )
-                    )
-                    Surface(
-                        color = PureBlack,
-                        shape = CircleShape,
-                        modifier = Modifier.size(26.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Verified,
-                            contentDescription = "Verified Creator",
-                            tint = SpotifyVibrantGreen,
-                            modifier = Modifier
-                                .padding(2.dp)
-                                .fillMaxSize()
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                Surface(
-                    color = SpotifyDarkGreenPill,
-                    shape = RoundedCornerShape(50),
-                    modifier = Modifier.border(
-                        width = 1.dp,
-                        color = SpotifyGreenBorder,
-                        shape = RoundedCornerShape(50)
-                    )
-                ) {
-                    Text(
-                        text = "FOUNDER & LEAD ARCHITECT • PART OF HIS",
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            color = SpotifyVibrantGreen,
-                            fontFamily = typewriterFont,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 10.sp,
-                            letterSpacing = 0.8.sp
-                        ),
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp)
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                Text(
-                    text = "Aadarsh Kumar",
-                    style = MaterialTheme.typography.headlineMedium.copy(
-                        color = PrimaryWhite,
-                        fontFamily = displayFont,
-                        fontWeight = FontWeight.ExtraBold,
-                        fontSize = 26.sp
-                    ),
-                    textAlign = TextAlign.Center
-                )
-
-                Spacer(modifier = Modifier.height(6.dp))
-
-                Surface(
-                    color = Color(0xFF0A1D13),
-                    shape = RoundedCornerShape(50),
-                    modifier = Modifier.border(
-                        width = 0.8.dp,
-                        color = SpotifyVibrantGreen.copy(alpha = 0.65f),
-                        shape = RoundedCornerShape(50)
-                    )
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(7.dp)
-                                .clip(CircleShape)
-                                .background(SpotifyVibrantGreen)
-                        )
-                        Text(
-                            text = "SYSTEM OPTIMAL • 100K+ LOAD BALANCED",
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                color = SpotifyVibrantGreen,
-                                fontFamily = typewriterFont,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 9.5.sp,
-                                letterSpacing = 0.5.sp
-                            )
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(14.dp))
-
-                // Genius Engineering Telemetry Matrix
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Surface(
-                        color = SurfaceDarkCard,
-                        shape = RoundedCornerShape(14.dp),
-                        modifier = Modifier
-                            .weight(1f)
-                            .border(1.dp, DividerDark, RoundedCornerShape(14.dp))
-                    ) {
-                        Column(
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            Text(
-                                text = "SMART CACHE",
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    color = MutedGray,
-                                    fontFamily = typewriterFont,
-                                    fontSize = 9.sp,
-                                    fontWeight = FontWeight.Bold
-                                ),
-                                maxLines = 1
-                            )
-                            Spacer(modifier = Modifier.height(3.dp))
-                            Text(
-                                text = "L1+L2 15MB",
-                                style = MaterialTheme.typography.labelMedium.copy(
-                                    color = SpotifyVibrantGreen,
-                                    fontFamily = typewriterFont,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    fontSize = 11.5.sp
-                                ),
-                                maxLines = 1
-                            )
-                        }
-                    }
-                    Surface(
-                        color = SurfaceDarkCard,
-                        shape = RoundedCornerShape(14.dp),
-                        modifier = Modifier
-                            .weight(1f)
-                            .border(1.dp, DividerDark, RoundedCornerShape(14.dp))
-                    ) {
-                        Column(
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            Text(
-                                text = "FIREBASE SYNC",
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    color = MutedGray,
-                                    fontFamily = typewriterFont,
-                                    fontSize = 9.sp,
-                                    fontWeight = FontWeight.Bold
-                                ),
-                                maxLines = 1
-                            )
-                            Spacer(modifier = Modifier.height(3.dp))
-                            Text(
-                                text = "RTDB Pool 16x",
-                                style = MaterialTheme.typography.labelMedium.copy(
-                                    color = Color(0xFFFFD700),
-                                    fontFamily = typewriterFont,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    fontSize = 11.5.sp
-                                ),
-                                maxLines = 1
-                            )
-                        }
-                    }
-                    Surface(
-                        color = SurfaceDarkCard,
-                        shape = RoundedCornerShape(14.dp),
-                        modifier = Modifier
-                            .weight(1f)
-                            .border(1.dp, DividerDark, RoundedCornerShape(14.dp))
-                    ) {
-                        Column(
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            Text(
-                                text = "SECURITY",
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    color = MutedGray,
-                                    fontFamily = typewriterFont,
-                                    fontSize = 9.sp,
-                                    fontWeight = FontWeight.Bold
-                                ),
-                                maxLines = 1
-                            )
-                            Spacer(modifier = Modifier.height(3.dp))
-                            Text(
-                                text = "AES-256 Vault",
-                                style = MaterialTheme.typography.labelMedium.copy(
-                                    color = SpotifyVibrantGreen,
-                                    fontFamily = typewriterFont,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    fontSize = 11.5.sp
-                                ),
-                                maxLines = 1
-                            )
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                // Live Typewriter Story Terminal Box
-                Surface(
-                    color = PureBlack,
-                    shape = RoundedCornerShape(16.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .border(
-                            width = 1.dp,
-                            color = SpotifyGreenBorder.copy(alpha = 0.7f),
-                            shape = RoundedCornerShape(16.dp)
-                        )
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "root@aadify:~/about_aadarsh.sh",
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    color = SpotifyVibrantGreen,
-                                    fontFamily = typewriterFont,
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 11.sp
-                                )
-                            )
-                            IconButton(
-                                onClick = { replayTrigger++ },
-                                modifier = Modifier.size(28.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Replay,
-                                    contentDescription = "Replay Typing",
-                                    tint = SpotifyVibrantGreen,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            }
-                        }
-
-                        HorizontalDivider(
-                            color = DividerDark,
-                            modifier = Modifier.padding(vertical = 8.dp)
-                        )
-
-                        val visibleText = fullDeveloperStory.take(typedCharCount)
-                        val cursorChar = if (cursorVisible) " ▋" else "  "
-
-                        Text(
-                            text = visibleText + cursorChar,
-                            style = MaterialTheme.typography.bodyMedium.copy(
-                                color = PrimaryWhite,
-                                fontFamily = typewriterFont,
-                                fontSize = 12.5.sp,
-                                lineHeight = 19.5.sp
-                            ),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("developer_typewriter_text")
-                        )
-
-                        Spacer(modifier = Modifier.height(10.dp))
-                        HorizontalDivider(color = DividerDark.copy(alpha = 0.6f))
-                        Spacer(modifier = Modifier.height(8.dp))
-
-                        Text(
-                            text = "STACK: Compose M3 • Media3 ExoPlayer • Firebase RTDB • Room SQL • Anti-Tamper Vault",
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                color = MutedGray,
-                                fontFamily = typewriterFont,
-                                fontSize = 10.sp,
-                                lineHeight = 14.sp
-                            )
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(14.dp))
-
-                // Contact Card
-                Surface(
-                    color = SurfaceDarkCard,
-                    shape = RoundedCornerShape(16.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Text(
-                            text = "Contact to Developer",
-                            style = MaterialTheme.typography.titleMedium.copy(
-                                color = PrimaryWhite,
-                                fontFamily = displayFont,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 17.sp
-                            )
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "Telegram: @Devacoding1",
-                            style = MaterialTheme.typography.bodyMedium.copy(
-                                color = SpotifyVibrantGreen,
-                                fontFamily = typewriterFont,
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 13.5.sp
-                            )
-                        )
-                        Spacer(modifier = Modifier.height(14.dp))
-                        Button(
-                            onClick = {
-                                try {
-                                    val tgIntent = Intent(
-                                        Intent.ACTION_VIEW,
-                                        Uri.parse("https://t.me/Devacoding1")
-                                    ).apply {
-                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                    }
-                                    context.startActivity(tgIntent)
-                                } catch (_: Exception) {
-                                }
-                            },
-                            shape = RoundedCornerShape(12.dp),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = SpotifyVibrantGreen,
-                                contentColor = PureBlack
-                            ),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(48.dp)
-                                .testTag("developer_telegram_go_button")
-                        ) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.Send,
-                                contentDescription = null,
-                                modifier = Modifier.size(20.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "Go",
-                                style = MaterialTheme.typography.titleMedium.copy(
-                                    color = PureBlack,
-                                    fontFamily = displayFont,
-                                    fontWeight = FontWeight.ExtraBold,
-                                    fontSize = 17.sp
-                                )
-                            )
-                        }
-                    }
                 }
             }
         }
@@ -2496,7 +1954,6 @@ fun AppThemeSelectorDialog(
 @Composable
 fun SettingsAndPrivacyDialog(
     userName: String,
-    secretNumber: String,
     isUserSubscribed: Boolean,
     onOptimizeCache: () -> Unit,
     onDeleteAccount: () -> Unit,
@@ -2548,7 +2005,7 @@ fun SettingsAndPrivacyDialog(
                                 )
                             )
                             Text(
-                                text = "AADIFY Security Vault • Secret #$secretNumber",
+                                text = "Account & App Preferences",
                                 style = MaterialTheme.typography.labelSmall.copy(
                                     color = SpotifyVibrantGreen,
                                     fontWeight = FontWeight.SemiBold

@@ -648,6 +648,202 @@ class AudioStreamExtractor {
             }
         }
 
+    /**
+     * Resolves a direct progressive MP4 (muxed Video + Audio, e.g. itag 18 / 22) stream URL for
+     * in-app YouTube promo video playback inside ExoPlayer without YouTube iframe embed errors.
+     */
+    suspend fun extractYoutubeVideoAdStream(videoId: String): ResolvedAudioStream? =
+        withContext(Dispatchers.IO) {
+            val cleanId = Song.extractYoutubeVideoId(videoId)
+            if (cleanId.isBlank()) return@withContext null
+
+            val clients = listOf(
+                androidCreatorClientConfig,
+                iosClientConfig,
+                vrClientConfig,
+                tvEmbeddedClientConfig,
+                webEmbeddedClientConfig
+            )
+            for (client in clients) {
+                val resolved = extractProgressiveVideoFromSingleInnerTubeClient(cleanId, client)
+                if (resolved != null) return@withContext resolved
+            }
+            for (baseUrl in PIPED_MIRRORS) {
+                val resolved = fetchProgressiveVideoFromPipedMirror(baseUrl, cleanId)
+                if (resolved != null) return@withContext resolved
+            }
+            for (baseUrl in INVIDIOUS_MIRRORS) {
+                val resolved = fetchProgressiveVideoFromInvidiousMirror(baseUrl, cleanId)
+                if (resolved != null) return@withContext resolved
+            }
+            null
+        }
+
+    private fun extractProgressiveVideoFromSingleInnerTubeClient(
+        videoId: String,
+        client: InnerTubeClientConfig
+    ): ResolvedAudioStream? {
+        return try {
+            val contextClient = JSONObject().apply {
+                put("clientName", client.clientName)
+                put("clientVersion", client.clientVersion)
+                put("hl", "en")
+                put("gl", "IN")
+                put("osName", client.osName)
+                put("osVersion", client.osVersion)
+                if (client.androidSdkVersion != null) put("androidSdkVersion", client.androidSdkVersion)
+                if (client.deviceMake != null) put("deviceMake", client.deviceMake)
+                if (client.deviceModel != null) put("deviceModel", client.deviceModel)
+            }
+            val contextObj = JSONObject().apply {
+                put("client", contextClient)
+                if (!client.thirdPartyEmbedUrl.isNullOrBlank()) {
+                    put("thirdParty", JSONObject().put("embedUrl", client.thirdPartyEmbedUrl))
+                }
+            }
+            val payload = JSONObject().apply {
+                put("videoId", videoId)
+                if (!client.playerParams.isNullOrBlank()) put("params", client.playerParams)
+                put("contentCheckOk", true)
+                put("racyCheckOk", true)
+                put("context", contextObj)
+            }
+            val request = Request.Builder()
+                .url(client.endpoint)
+                .header("User-Agent", client.userAgent)
+                .header("Content-Type", "application/json")
+                .header("Accept", "*/*")
+                .header("X-YouTube-Client-Name", client.clientIdHeader)
+                .header("X-YouTube-Client-Version", client.clientVersion)
+                .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+                .build()
+
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return null
+                val body = response.body?.string() ?: return null
+                val streamingData = JSONObject(body).optJSONObject("streamingData") ?: return null
+                val formats = streamingData.optJSONArray("formats") ?: return null
+
+                var bestUrl: String? = null
+                var bestMime = "video/mp4"
+                var bestBitrate = 0
+                var bestScore = -1
+                for (i in 0 until formats.length()) {
+                    val item = formats.optJSONObject(i) ?: continue
+                    val url = item.optString("url", "")
+                    val mime = item.optString("mimeType", "")
+                    if (url.isBlank() || !mime.startsWith("video/mp4", ignoreCase = true)) continue
+                    val itag = item.optInt("itag", 0)
+                    val bitrate = item.optInt("bitrate", 0)
+                    val score = when (itag) {
+                        22 -> 300_000
+                        18 -> 250_000
+                        else -> 100_000
+                    } + (bitrate / 1000)
+                    if (score > bestScore) {
+                        bestScore = score
+                        bestBitrate = bitrate
+                        bestUrl = url
+                        bestMime = mime.substringBefore(";").trim()
+                    }
+                }
+                if (bestUrl != null && isStreamUrlReachable(bestUrl, client.userAgent)) {
+                    ResolvedAudioStream(
+                        streamUrl = bestUrl,
+                        mimeType = bestMime,
+                        bitrate = bestBitrate,
+                        sourceEngine = "InnerTubeVideo (${client.clientName})",
+                        userAgent = client.userAgent
+                    )
+                } else {
+                    null
+                }
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun fetchProgressiveVideoFromPipedMirror(baseUrl: String, videoId: String): ResolvedAudioStream? {
+        return try {
+            val request = Request.Builder()
+                .url("$baseUrl/streams/$videoId")
+                .header("User-Agent", EXOPLAYER_USER_AGENT)
+                .header("Accept", "application/json")
+                .get()
+                .build()
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return null
+                val body = response.body?.string() ?: return null
+                if (!body.trimStart().startsWith("{")) return null
+                val videoStreams = JSONObject(body).optJSONArray("videoStreams") ?: return null
+                var bestUrl: String? = null
+                var bestBitrate = 0
+                for (i in 0 until videoStreams.length()) {
+                    val s = videoStreams.optJSONObject(i) ?: continue
+                    val videoOnly = s.optBoolean("videoOnly", true)
+                    val url = s.optString("url", "")
+                    val mime = s.optString("mimeType", "")
+                    if (videoOnly || url.isBlank() || !mime.contains("mp4", ignoreCase = true)) continue
+                    val bitrate = s.optInt("bitrate", 0)
+                    if (bestUrl == null || bitrate > bestBitrate) {
+                        bestUrl = url
+                        bestBitrate = bitrate
+                    }
+                }
+                if (bestUrl != null && isStreamUrlReachable(bestUrl, EXOPLAYER_USER_AGENT)) {
+                    ResolvedAudioStream(
+                        streamUrl = bestUrl,
+                        mimeType = "video/mp4",
+                        bitrate = bestBitrate,
+                        sourceEngine = "PipedVideo ($baseUrl)",
+                        userAgent = EXOPLAYER_USER_AGENT
+                    )
+                } else null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun fetchProgressiveVideoFromInvidiousMirror(baseUrl: String, videoId: String): ResolvedAudioStream? {
+        return try {
+            val request = Request.Builder()
+                .url("$baseUrl/api/v1/videos/$videoId")
+                .header("User-Agent", EXOPLAYER_USER_AGENT)
+                .header("Accept", "application/json")
+                .get()
+                .build()
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return null
+                val body = response.body?.string() ?: return null
+                if (!body.trimStart().startsWith("{")) return null
+                val formatStreams = JSONObject(body).optJSONArray("formatStreams") ?: return null
+                var bestUrl: String? = null
+                for (i in 0 until formatStreams.length()) {
+                    val s = formatStreams.optJSONObject(i) ?: continue
+                    val url = s.optString("url", "")
+                    val type = s.optString("type", "")
+                    if (url.isNotBlank() && type.contains("video/mp4", ignoreCase = true)) {
+                        bestUrl = url
+                        if (s.optString("itag", "") == "22") break
+                    }
+                }
+                if (bestUrl != null && isStreamUrlReachable(bestUrl, EXOPLAYER_USER_AGENT)) {
+                    ResolvedAudioStream(
+                        streamUrl = bestUrl,
+                        mimeType = "video/mp4",
+                        bitrate = 500_000,
+                        sourceEngine = "InvidiousVideo ($baseUrl)",
+                        userAgent = EXOPLAYER_USER_AGENT
+                    )
+                } else null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     private val vrClientConfig = InnerTubeClientConfig(
         endpoint = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
         clientName = "ANDROID_VR",

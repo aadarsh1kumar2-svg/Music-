@@ -389,7 +389,7 @@ fun DeveloperIntroScreen(
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
                         Text(
-                            text = "This app is made by Aadarsh kumar a part of HIS",
+                            text = "Welcome to AADIFY Music",
                             style = MaterialTheme.typography.titleLarge.copy(
                                 color = PrimaryWhite,
                                 fontWeight = FontWeight.ExtraBold,
