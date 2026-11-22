@@ -138,3 +138,28 @@ data class AdminAppControlConfig(
     val updatedAt: Long = 0L
 )
 
+/**
+ * Live Admin-editable Ads configuration synced from `/adsSettings` in Firebase Realtime Database.
+ * Matches Admin_updated(3).html:
+ * - `enabled`: true = Free users hear audio-only ad after every 2 songs; false = NO ads even for Free users
+ * - `youtubeUrl`: YouTube link or 11-char video ID configured by Admin (if blank/invalid -> NO ads)
+ * - `label`: Optional sponsored ad label shown while ad audio plays
+ * - `updatedAt`: timestamp of last Admin update
+ */
+data class AdminAdsConfig(
+    val enabled: Boolean = false,
+    val youtubeUrl: String = "",
+    val label: String = "",
+    val updatedAt: Long = 0L
+) {
+    val cleanVideoId: String
+        get() = Song.extractYoutubeVideoId(youtubeUrl)
+
+    val isEffectivelyEnabled: Boolean
+        get() = enabled && cleanVideoId.length == 11
+
+    val displayTitle: String
+        get() = label.trim().ifBlank { "Sponsored Audio Ad" }
+}
+
+

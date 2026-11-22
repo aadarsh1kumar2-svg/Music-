@@ -49,6 +49,7 @@ import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.LibraryMusic
 import androidx.compose.material.icons.filled.LocalFireDepartment
+import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Person
@@ -116,6 +117,7 @@ import com.example.providers.MainTab
 import com.example.providers.MusicViewModel
 import com.example.screens.CrazyDealsPopupDialog
 import com.example.screens.DailyLimitReachedDialog
+import com.example.screens.DeveloperScreen
 import com.example.screens.ExploreScreen
 import com.example.screens.FamGatewayCheckoutDialog
 import com.example.screens.FullScreenPlayerModal
@@ -234,6 +236,7 @@ fun AKMusicAppRoot(
     val isAuthenticating by musicViewModel.isAuthenticating.collectAsStateWithLifecycle()
     val authErrorMessage by musicViewModel.authErrorMessage.collectAsStateWithLifecycle()
     val isEditNameDialogOpen by musicViewModel.isEditNameDialogOpen.collectAsStateWithLifecycle()
+    val isDeveloperScreenOpen by musicViewModel.isDeveloperScreenOpen.collectAsStateWithLifecycle()
     val isSettingsPrivacyOpen by musicViewModel.isSettingsPrivacyOpen.collectAsStateWithLifecycle()
     val isPromoAudioAdPlaying by musicViewModel.isPromoAudioAdPlaying.collectAsStateWithLifecycle()
     val hasAudioStoragePermission by musicViewModel.hasAudioStoragePermission.collectAsStateWithLifecycle()
@@ -266,9 +269,8 @@ fun AKMusicAppRoot(
     val exploreSongs by musicViewModel.exploreSongs.collectAsStateWithLifecycle()
     val chartSongs by musicViewModel.chartSongs.collectAsStateWithLifecycle()
     val topChartPlaylists by musicViewModel.topChartPlaylists.collectAsStateWithLifecycle()
-    val selectedTopChartPlaylistId by musicViewModel.selectedTopChartPlaylistId.collectAsStateWithLifecycle()
-    val openedTopChartPlaylist by musicViewModel.openedTopChartPlaylist.collectAsStateWithLifecycle()
-    val openedTopChartPlaylistSongs by musicViewModel.openedTopChartPlaylistSongs.collectAsStateWithLifecycle()
+    val expandedTopChartPlaylistId by musicViewModel.expandedTopChartPlaylistId.collectAsStateWithLifecycle()
+    val expandedTopChartPlaylistSongs by musicViewModel.expandedTopChartPlaylistSongs.collectAsStateWithLifecycle()
     val isLoadingTopChartPlaylist by musicViewModel.isLoadingTopChartPlaylist.collectAsStateWithLifecycle()
     val homeSearchQuery by musicViewModel.homeSearchQuery.collectAsStateWithLifecycle()
     val exploreSearchQuery by musicViewModel.exploreSearchQuery.collectAsStateWithLifecycle()
@@ -346,7 +348,7 @@ fun AKMusicAppRoot(
 
     LaunchedEffect(launchStage) {
         if (launchStage == LaunchStage.LOADING) {
-            delay(900L)
+            delay(450L)
             launchStage = LaunchStage.MAIN_APP
         } else if (launchStage == LaunchStage.MAIN_APP) {
             musicViewModel.onHomeScreenEntered()
@@ -363,7 +365,7 @@ fun AKMusicAppRoot(
         selectedTab != MainTab.HOME &&
         !isFullScreenPlayerOpen &&
         !isEditNameDialogOpen &&
-        !(selectedTab == MainTab.TOP_CHARTS && openedTopChartPlaylist != null)
+        !isDeveloperScreenOpen
     ) {
         BackHandler {
             musicViewModel.selectTab(MainTab.HOME)
@@ -408,29 +410,31 @@ fun AKMusicAppRoot(
             .fillMaxSize()
             .background(PureBlack)
     ) {
-        // Permanent Backstage YouTube Engine layer (never detached when opening/closing player modal!)
-        Box(
-            modifier = Modifier
-                .width(240.dp)
-                .height(240.dp)
-        ) {
-            AndroidView(
-                factory = { ctx ->
-                    FrameLayout(ctx).apply {
-                        layoutParams = ViewGroup.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.MATCH_PARENT
-                        )
-                        musicViewModel.attachBackstagePlayer(this)
-                    }
-                },
-                modifier = Modifier.fillMaxSize()
-            )
+        // Mount Backstage YouTube Engine layer ONLY after entering MAIN_APP so Splash & Login screens render at 60fps with zero Chromium freeze!
+        if (launchStage == LaunchStage.MAIN_APP) {
             Box(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .background(PureBlack)
-            )
+                    .width(240.dp)
+                    .height(240.dp)
+            ) {
+                AndroidView(
+                    factory = { ctx ->
+                        FrameLayout(ctx).apply {
+                            layoutParams = ViewGroup.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT
+                            )
+                            musicViewModel.attachBackstagePlayer(this)
+                        }
+                    },
+                    modifier = Modifier.fillMaxSize()
+                )
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(PureBlack)
+                )
+            }
         }
 
         when {
@@ -913,6 +917,32 @@ fun AKMusicAppRoot(
                             )
 
                             NavigationDrawerItem(
+                                label = { Text("Developer") },
+                                icon = {
+                                    Icon(
+                                        imageVector = Icons.Default.Code,
+                                        contentDescription = "Developer",
+                                        tint = SpotifyVibrantGreen
+                                    )
+                                },
+                                selected = isDeveloperScreenOpen,
+                                onClick = {
+                                    coroutineScope.launch { drawerState.close() }
+                                    musicViewModel.setDeveloperScreenOpen(true)
+                                },
+                                colors = NavigationDrawerItemDefaults.colors(
+                                    selectedContainerColor = SpotifyDarkGreenPill,
+                                    selectedIconColor = SpotifyVibrantGreen,
+                                    selectedTextColor = SpotifyVibrantGreen,
+                                    unselectedIconColor = SpotifyVibrantGreen,
+                                    unselectedTextColor = PrimaryWhite
+                                ),
+                                modifier = Modifier
+                                    .padding(horizontal = 12.dp)
+                                    .testTag("drawer_developer_item")
+                            )
+
+                            NavigationDrawerItem(
                                 label = {
                                     Text(
                                         text = "Logout",
@@ -1043,12 +1073,10 @@ fun AKMusicAppRoot(
                                             musicViewModel.refreshFirebaseCatalog()
                                         },
                                         playlists = topChartPlaylists,
-                                        selectedPlaylistId = selectedTopChartPlaylistId,
-                                        openedPlaylist = openedTopChartPlaylist,
-                                        openedPlaylistSongs = openedTopChartPlaylistSongs,
+                                        expandedPlaylistId = expandedTopChartPlaylistId,
+                                        expandedPlaylistSongs = expandedTopChartPlaylistSongs,
                                         isLoadingPlaylist = isLoadingTopChartPlaylist,
-                                        onPlaylistClick = { musicViewModel.onTopChartPlaylistClicked(it) },
-                                        onCloseOpenedPlaylist = { musicViewModel.closeOpenedTopChartPlaylist() }
+                                        onPlaylistClick = { musicViewModel.onTopChartPlaylistClicked(it) }
                                     )
                                 }
                                 MainTab.EXPLORE -> {
@@ -1444,11 +1472,19 @@ fun AKMusicAppRoot(
             )
         }
 
+        // Clean Developer Screen (creator info only, no internal tech stack or how-the-app-works details)
+        if (isDeveloperScreenOpen) {
+            DeveloperScreen(
+                onBack = { musicViewModel.setDeveloperScreenOpen(false) }
+            )
+        }
+
         // Admin-controlled App Update Popup
         if (isAppUpdatePopupActive) {
             AppUpdatePopupDialog(
                 message = appControlConfig.updateMessage.ifBlank { "A new update is available." },
                 updateLink = appControlConfig.updateLink,
+                showCloseAppButton = appControlConfig.closeAppButtonEnabled,
                 onExitApp = {
                     (context as? Activity)?.finishAffinity()
                 },
@@ -1504,6 +1540,7 @@ fun AKMusicAppRoot(
 fun AppUpdatePopupDialog(
     message: String,
     updateLink: String,
+    showCloseAppButton: Boolean = true,
     onExitApp: () -> Unit,
     onUpdateClick: () -> Unit
 ) {
@@ -1591,26 +1628,28 @@ fun AppUpdatePopupDialog(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Button(
-                        onClick = onExitApp,
-                        shape = RoundedCornerShape(14.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = SurfaceDarkCard,
-                            contentColor = PrimaryWhite
-                        ),
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(48.dp)
-                            .border(1.dp, DividerDark, RoundedCornerShape(14.dp))
-                            .testTag("app_update_exit_button")
-                    ) {
-                        Text(
-                            text = "Exit App",
-                            style = MaterialTheme.typography.titleSmall.copy(
-                                color = PrimaryWhite,
-                                fontWeight = FontWeight.Bold
+                    if (showCloseAppButton) {
+                        Button(
+                            onClick = onExitApp,
+                            shape = RoundedCornerShape(14.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = SurfaceDarkCard,
+                                contentColor = PrimaryWhite
+                            ),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .border(1.dp, DividerDark, RoundedCornerShape(14.dp))
+                                .testTag("app_update_exit_button")
+                        ) {
+                            Text(
+                                text = "Exit App",
+                                style = MaterialTheme.typography.titleSmall.copy(
+                                    color = PrimaryWhite,
+                                    fontWeight = FontWeight.Bold
+                                )
                             )
-                        )
+                        }
                     }
 
                     Button(

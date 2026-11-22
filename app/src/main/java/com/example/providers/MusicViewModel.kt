@@ -23,6 +23,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.room.Room
 import com.example.models.AKMusicDatabase
+import com.example.models.AdminAdsConfig
 import com.example.models.AdminAppControlConfig
 import com.example.models.AdminChartPlaylist
 import com.example.models.AdminSubscriptionConfig
@@ -645,6 +646,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     // Admin App Control State (/appControl: Secret Code, Under Maintenance Mode, App Update Popup)
     val appControlConfig: StateFlow<AdminAppControlConfig> = firebaseService.appControlConfig
+    val adsConfig: StateFlow<AdminAdsConfig> = firebaseService.adsConfig
+
+    fun setAdsConfigForTesting(config: AdminAdsConfig) {
+        firebaseService.updateAndPersistAdsConfig(config)
+    }
 
     private fun doesAdminSecretCodeMatchUser(adminSecretCode: String, mySecretNumber: String): Boolean {
         val target = adminSecretCode.trim()
@@ -1048,50 +1054,75 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     val isLoadingSongs: StateFlow<Boolean> = firebaseService.isLoading
     val firebaseError: StateFlow<String?> = firebaseService.connectionError
 
-    private val _selectedTopChartPlaylistId = MutableStateFlow<String?>(null)
-    val selectedTopChartPlaylistId: StateFlow<String?> = _selectedTopChartPlaylistId.asStateFlow()
+    private val _expandedTopChartPlaylistId = MutableStateFlow<String?>(null)
+    val expandedTopChartPlaylistId: StateFlow<String?> = _expandedTopChartPlaylistId.asStateFlow()
 
-    private val _openedTopChartPlaylist = MutableStateFlow<AdminChartPlaylist?>(null)
-    val openedTopChartPlaylist: StateFlow<AdminChartPlaylist?> = _openedTopChartPlaylist.asStateFlow()
-
-    private val _openedTopChartPlaylistSongs = MutableStateFlow<List<Song>>(emptyList())
-    val openedTopChartPlaylistSongs: StateFlow<List<Song>> = _openedTopChartPlaylistSongs.asStateFlow()
+    private val _expandedTopChartPlaylistSongs = MutableStateFlow<List<Song>>(emptyList())
+    val expandedTopChartPlaylistSongs: StateFlow<List<Song>> = _expandedTopChartPlaylistSongs.asStateFlow()
 
     private val _isLoadingTopChartPlaylist = MutableStateFlow(false)
     val isLoadingTopChartPlaylist: StateFlow<Boolean> = _isLoadingTopChartPlaylist.asStateFlow()
     private val topChartPlaylistTracksCache = java.util.concurrent.ConcurrentHashMap<String, List<Song>>()
+    private var topChartPlaylistLoadJob: Job? = null
 
-    fun onTopChartPlaylistClicked(playlist: AdminChartPlaylist) {
-        if (_selectedTopChartPlaylistId.value != playlist.id) {
-            // First tap: highlight & select playlist card; second tap opens its song list
-            _selectedTopChartPlaylistId.value = playlist.id
-            return
+    private fun loadCachedPlaylistTracksFromDisk(playlistId: String): List<Song> {
+        return try {
+            val raw = prefs.getString("cached_pl_tracks_$playlistId", null)
+            if (raw.isNullOrBlank() || !raw.startsWith("[")) return emptyList()
+            val arr = JSONArray(raw)
+            val list = ArrayList<Song>(arr.length())
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                list.add(Song.fromJsonObject(obj))
+            }
+            list
+        } catch (_: Exception) {
+            emptyList()
         }
-        _openedTopChartPlaylist.value = playlist
-        val cached = topChartPlaylistTracksCache[playlist.id] ?: playlist.songs
-        if (cached.isNotEmpty()) {
-            _openedTopChartPlaylistSongs.value = cached
+    }
+
+    private fun saveCachedPlaylistTracksToDisk(playlistId: String, tracks: List<Song>) {
+        try {
+            val arr = JSONArray()
+            tracks.take(100).forEach { arr.put(it.toJsonObject()) }
+            prefs.edit().putString("cached_pl_tracks_$playlistId", arr.toString()).apply()
+        } catch (_: Exception) {
+        }
+    }
+
+    /**
+     * Single-click (1-tap) inline expand/collapse for Top Charts playlists.
+     * Tapping once immediately reveals all songs underneath the playlist row; tapping again collapses it.
+     */
+    fun onTopChartPlaylistClicked(playlist: AdminChartPlaylist) {
+        if (_expandedTopChartPlaylistId.value == playlist.id) {
+            topChartPlaylistLoadJob?.cancel()
+            _expandedTopChartPlaylistId.value = null
+            _expandedTopChartPlaylistSongs.value = emptyList()
             _isLoadingTopChartPlaylist.value = false
             return
         }
-        _openedTopChartPlaylistSongs.value = emptyList()
+
+        topChartPlaylistLoadJob?.cancel()
+        _expandedTopChartPlaylistId.value = playlist.id
+
+        val cached = topChartPlaylistTracksCache[playlist.id]
+            ?: playlist.songs.takeIf { it.isNotEmpty() }
+            ?: loadCachedPlaylistTracksFromDisk(playlist.id).takeIf { it.isNotEmpty() }
+
+        if (cached != null && cached.isNotEmpty()) {
+            topChartPlaylistTracksCache[playlist.id] = cached
+            _expandedTopChartPlaylistSongs.value = cached
+            _isLoadingTopChartPlaylist.value = false
+            return
+        }
+
+        _expandedTopChartPlaylistSongs.value = emptyList()
         _isLoadingTopChartPlaylist.value = true
-        viewModelScope.launch {
+        topChartPlaylistLoadJob = viewModelScope.launch(Dispatchers.IO) {
             val loadedTracks: List<Song> = when {
                 Song.extractYoutubePlaylistId(playlist.playlistUrl) != null -> {
-                    val fetched = audioExtractor.fetchYoutubePlaylistDetails(playlist.playlistUrl)
-                    if (fetched != null) {
-                        if (_openedTopChartPlaylist.value?.id == playlist.id) {
-                            _openedTopChartPlaylist.value = playlist.copy(
-                                title = if (playlist.title.isBlank() || playlist.title == "Top Chart Playlist") fetched.title else playlist.title,
-                                coverUrl = playlist.coverUrl.ifBlank { fetched.coverUrl },
-                                songs = fetched.songs
-                            )
-                        }
-                        fetched.songs
-                    } else {
-                        emptyList()
-                    }
+                    audioExtractor.fetchYoutubePlaylistDetails(playlist.playlistUrl)?.songs.orEmpty()
                 }
                 Song.isSpotifyUrl(playlist.playlistUrl) -> {
                     val imported = spotifyImportService.importFromSpotifyUrl(playlist.playlistUrl).getOrNull()
@@ -1113,20 +1144,22 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             }
             if (loadedTracks.isNotEmpty()) {
                 topChartPlaylistTracksCache[playlist.id] = loadedTracks
+                saveCachedPlaylistTracksToDisk(playlist.id, loadedTracks)
             }
-            if (_openedTopChartPlaylist.value?.id == playlist.id) {
-                _openedTopChartPlaylistSongs.value = loadedTracks
-            }
-            _isLoadingTopChartPlaylist.value = false
-            if (loadedTracks.isEmpty()) {
-                emitSnackbar("Could not load tracks from this playlist right now.")
+            if (_expandedTopChartPlaylistId.value == playlist.id) {
+                _expandedTopChartPlaylistSongs.value = loadedTracks
+                _isLoadingTopChartPlaylist.value = false
+                if (loadedTracks.isEmpty()) {
+                    emitSnackbar("Could not load tracks from this playlist right now.")
+                }
             }
         }
     }
 
-    fun closeOpenedTopChartPlaylist() {
-        _openedTopChartPlaylist.value = null
-        _openedTopChartPlaylistSongs.value = emptyList()
+    fun closeExpandedTopChartPlaylist() {
+        topChartPlaylistLoadJob?.cancel()
+        _expandedTopChartPlaylistId.value = null
+        _expandedTopChartPlaylistSongs.value = emptyList()
         _isLoadingTopChartPlaylist.value = false
     }
 
@@ -1378,12 +1411,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
-        // Create hidden backstage WebView on main thread safely
-        try {
-            backstagePlayer.getOrCreateWebView()
-        } catch (t: Throwable) {
-            Log.w(TAG, "Backstage WebView init deferred/skipped safely", t)
-        }
+        // Keep startup instantaneous: do NOT block Main Thread initializing Chromium WebView or fetching Explore trends during cold launch!
         restorePersistedPlaybackState()
         registerScreenStateReceiver()
         startProgressPoller()
@@ -1392,8 +1420,41 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         if (checkAudioPermissionGranted()) {
             loadDeviceLocalSongs()
         }
-        fetchCountryTrendingSongs(_selectedCountry.value)
         setupCloudUserSyncAndAdminControl()
+
+        // If Admin disables Ads in /adsSettings while an audio ad is playing, immediately resume the user's song!
+        viewModelScope.launch {
+            firebaseService.adsConfig.collect { cfg ->
+                if (!cfg.isEffectivelyEnabled) {
+                    freeSongsPlayedSinceLastAd = 0
+                    lastCountedAdSongId = null
+                    if (_isPromoAudioAdPlaying.value) {
+                        onPromoAudioAdCompleted()
+                    }
+                }
+            }
+        }
+
+        // Lazily pre-warm direct ExoPlayer audio streams for the top 3 catalog songs so tapping them plays in 0ms!
+        viewModelScope.launch(Dispatchers.IO) {
+            var warmedIds = emptySet<String>()
+            firebaseService.songs.collect { catalog ->
+                if (catalog.isEmpty()) return@collect
+                val topTargets = catalog.take(3).filter { it.cleanVideoId.length == 11 && it.cleanVideoId !in warmedIds }
+                if (topTargets.isEmpty()) return@collect
+                delay(1600L)
+                for (t in topTargets) {
+                    if (_isBuffering.value) delay(1200L)
+                    warmedIds = warmedIds + t.cleanVideoId
+                    if (audioExtractor.getCachedExactYoutubeAudioForPlayback(t.cleanVideoId) == null) {
+                        try {
+                            audioExtractor.extractExactYoutubeDirectAudioForPlayback(t.cleanVideoId)
+                        } catch (_: Exception) {
+                        }
+                    }
+                }
+            }
+        }
     }
 
     private fun registerScreenStateReceiver() {
@@ -2344,13 +2405,21 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                         backstagePlayer.keepAwake()
                     }
                 }
-                delay(250L)
+                val pollDelayMs = when {
+                    isUsingExoPlayerFallback && isCurrentSongLoadedInEngine && (_isPlaying.value || _isBuffering.value) -> 400L
+                    !isUsingExoPlayerFallback && isCurrentSongLoadedInEngine && _isPlaying.value -> 500L
+                    else -> 1200L
+                }
+                delay(pollDelayMs)
             }
         }
     }
 
     fun selectTab(tab: MainTab) {
         _selectedTab.value = tab
+        if (tab == MainTab.EXPLORE && _countryTrendingSongs.value.isEmpty()) {
+            fetchCountryTrendingSongs(_selectedCountry.value)
+        }
         if (tab != MainTab.LIBRARY) {
             _librarySubScreen.value = LibrarySubScreen.Root
         }
@@ -2578,9 +2647,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                         _librarySubScreen.value is LibrarySubScreen.Favorites ||
                         _librarySubScreen.value is LibrarySubScreen.MyMusic ||
                         _librarySubScreen.value is LibrarySubScreen.DownloadedSongs
-                    )) || (_selectedTab.value == MainTab.TOP_CHARTS && _openedTopChartPlaylist.value != null)
+                    )) || (_selectedTab.value == MainTab.TOP_CHARTS && _expandedTopChartPlaylistId.value != null)
                 val isSameCustomQueue = isCustomPlaylistQueueActive && customQueue == _queue.value
-                isCustomPlaylistQueueActive = isFromCollectionScreen || isSameCustomQueue || song.id.startsWith("spotify_") || song.id.startsWith("ytpl_")
+                isCustomPlaylistQueueActive = isFromCollectionScreen || isSameCustomQueue || song.id.startsWith("spotify_") || song.id.startsWith("ytpl_") || song.id.startsWith("sppl_")
             } else {
                 isCustomPlaylistQueueActive = false
             }
@@ -2597,9 +2666,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
-        // Free User Audio-Only Ad Gate: after every 2 songs, push the Ad song through the music engine!
+        // Free User Audio-Only Ad Gate:
+        // Strictly obeys Admin `/adsSettings` (`enabled == true` AND valid YouTube link).
+        // If Admin disabled ads or left link blank, NO ads ever play even for Free users!
+        val currentAdsConfig = firebaseService.adsConfig.value
         if (!isSameActiveSong && !bypassAdGate && !isPromoAdTrack) {
-            if (isVerifiedVipActive()) {
+            if (isVerifiedVipActive() || !currentAdsConfig.isEffectivelyEnabled) {
                 freeSongsPlayedSinceLastAd = 0
                 lastCountedAdSongId = null
                 _isPromoAudioAdPlaying.value = false
@@ -2612,7 +2684,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         if (!isPromoAdTrack) {
-            if (!isVerifiedVipActive() && (!isSameActiveSong || bypassAdGate)) {
+            if (!isVerifiedVipActive() && currentAdsConfig.isEffectivelyEnabled && (!isSameActiveSong || bypassAdGate)) {
                 if (lastCountedAdSongId != song.id || forceRestartFromBeginning || hasHandledEndForCurrentSong) {
                     freeSongsPlayedSinceLastAd += 1
                     lastCountedAdSongId = song.id
@@ -2620,7 +2692,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                         preloadPromoAudioAdStreamAsync()
                     }
                 }
-            } else if (isVerifiedVipActive()) {
+            } else if (isVerifiedVipActive() || !currentAdsConfig.isEffectivelyEnabled) {
                 freeSongsPlayedSinceLastAd = 0
                 lastCountedAdSongId = null
             }
@@ -2802,13 +2874,20 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 val historySavedMatch = sessionHistoryEntities.value.firstOrNull {
                     it.videoId.isNotBlank() && it.id == song.id
                 }
-                playableVideoId = catalogMatch?.cleanVideoId
+                val cachedSpotifyVid = if (song.spotifyUrl.isNotBlank()) {
+                    prefs.getString("sp_vid_map_${song.spotifyUrl.hashCode()}", "")?.trim().orEmpty()
+                } else ""
+                playableVideoId = cachedSpotifyVid.takeIf { it.length == 11 }
+                    ?: catalogMatch?.cleanVideoId
                     ?: Song.extractYoutubeVideoId(spotifySavedMatch?.videoId.orEmpty()).takeIf { it.isNotBlank() }
                     ?: Song.extractYoutubeVideoId(playlistSavedMatch?.videoId.orEmpty()).takeIf { it.isNotBlank() }
                     ?: Song.extractYoutubeVideoId(historySavedMatch?.videoId.orEmpty()).takeIf { it.isNotBlank() }
                     ?: audioExtractor.findPlayableVideoIdForSong(searchTargetSong).orEmpty()
 
                 if (playableVideoId.isNotBlank()) {
+                    if (song.spotifyUrl.isNotBlank() && playableVideoId.length == 11) {
+                        prefs.edit().putString("sp_vid_map_${song.spotifyUrl.hashCode()}", playableVideoId).apply()
+                    }
                     val fastFallbackBanner = searchTargetSong.bannerUrl.ifBlank {
                         "https://i.ytimg.com/vi/$playableVideoId/hqdefault.jpg"
                     }
@@ -2825,17 +2904,15 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 return@launch
             }
 
-            // 4. Primary Engine Strategy:
-            // - If in background / screen-off, try fast exact stream resolution (up to 2.2s) for native ExoPlayer.
-            // - Otherwise start INSTANTLY on BackstageYouTubePlayerController (with fast in-place player switch!)
-            //   while pre-resolving exact stream & predicted next songs in background!
+            // 4. Ultra-Fast Playback Engine Strategy:
+            // - Check instant memory cache first (0ms).
+            // - Otherwise race native Innertube direct audio stream extraction (up to 950ms foreground / 2200ms background)
+            //   so songs start cleanly on native ExoPlayer with exact duration & instant switching!
+            // - If Innertube takes longer, immediately fall back to BackstageYouTubePlayerController (fast in-place switch).
+            val fastTimeoutMs = if (isScreenOffOrBackground()) 2_200L else 950L
             val cachedDirectStream = audioExtractor.getCachedExactYoutubeAudioForPlayback(playableVideoId)
-                ?: if (isScreenOffOrBackground()) {
-                    kotlinx.coroutines.withTimeoutOrNull(2_200L) {
-                        audioExtractor.extractExactYoutubeDirectAudioForPlayback(playableVideoId)
-                    }
-                } else {
-                    null
+                ?: kotlinx.coroutines.withTimeoutOrNull(fastTimeoutMs) {
+                    audioExtractor.extractExactYoutubeDirectAudioForPlayback(playableVideoId)
                 }
             if (cachedDirectStream != null) {
                 isUsingExoPlayerFallback = true
@@ -2854,7 +2931,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
 
-            // 5. Immediately pre-cache current stream (for instant Screen-Off) + exact predicted next songs + crisp artwork!
+            // 5. Immediately pre-cache current stream + exact predicted next songs + crisp artwork!
             if (!isPromoAdTrack) {
                 scheduleNextTracksPreFetch(activeSongToPlay, resolvedQueue, resolvedVidForImmediateCache = playableVideoId, originalSong = song)
             }
@@ -3009,8 +3086,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun preloadPromoAudioAdStreamAsync() {
-        if (isVerifiedVipActive() || promoAdResolveJob?.isActive == true) return
-        val adVid = com.example.security.AadifySecurityVault.getPromoAdVideoId()
+        val adsCfg = firebaseService.adsConfig.value
+        if (isVerifiedVipActive() || !adsCfg.isEffectivelyEnabled || promoAdResolveJob?.isActive == true) return
+        val adVid = adsCfg.cleanVideoId
         if (audioExtractor.getCachedExactYoutubeAudioForPlayback(adVid) != null) return
         promoAdResolveJob = viewModelScope.launch(Dispatchers.IO) {
             audioExtractor.extractExactYoutubeDirectAudioForPlayback(adVid)
@@ -3018,16 +3096,29 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun triggerPromoAudioAdBeforeSong(nextSong: Song, nextQueue: List<Song>) {
+        val adsCfg = firebaseService.adsConfig.value
+        if (!adsCfg.isEffectivelyEnabled) {
+            // Admin disabled ads or left link empty -> play the user's song immediately!
+            freeSongsPlayedSinceLastAd = 0
+            lastCountedAdSongId = null
+            playSong(
+                song = nextSong,
+                customQueue = nextQueue,
+                forceRestartFromBeginning = true,
+                bypassAdGate = true
+            )
+            return
+        }
         pendingAdResumeSong = nextSong
         pendingAdResumeQueue = nextQueue
         freeSongsPlayedSinceLastAd = 0
         lastCountedAdSongId = null
         _isPromoAudioAdPlaying.value = true
 
-        val adVid = com.example.security.AadifySecurityVault.getPromoAdVideoId()
+        val adVid = adsCfg.cleanVideoId
         val adSong = Song(
             id = PROMO_AUDIO_AD_SONG_ID,
-            title = "Sponsored Audio Ad",
+            title = adsCfg.displayTitle,
             artist = "AADIFY",
             videoId = adVid,
             bannerUrl = "https://img.youtube.com/vi/$adVid/hqdefault.jpg",
@@ -3954,6 +4045,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             firebaseService.fetchSongsViaRest(silent = false)
             firebaseService.fetchTopChartPlaylistsViaRest()
+            firebaseService.fetchAdsConfigViaRest()
+            firebaseService.fetchAppControlViaRest()
             emitSnackbar("Library updated ✨")
         }
     }

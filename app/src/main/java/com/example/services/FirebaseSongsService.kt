@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Base64
 import android.util.Log
 import com.example.BuildConfig
+import com.example.models.AdminAdsConfig
 import com.example.models.AdminAppControlConfig
 import com.example.models.AdminChartPlaylist
 import com.example.models.AdminSubscriptionConfig
@@ -151,6 +152,15 @@ class FirebaseSongsService(private val context: Context) {
     private val _appControlConfig = MutableStateFlow(loadCachedAppControlConfig())
     val appControlConfig: StateFlow<AdminAppControlConfig> = _appControlConfig.asStateFlow()
 
+    // Admin-configured Ads Manager (/adsSettings: enabled, youtubeUrl, label, updatedAt)
+    private val _adsConfig = MutableStateFlow(loadCachedAdsConfig())
+    val adsConfig: StateFlow<AdminAdsConfig> = _adsConfig.asStateFlow()
+
+    @Volatile
+    private var hasReceivedLiveRtdbSongs: Boolean = false
+    @Volatile
+    private var songsParseJob: kotlinx.coroutines.Job? = null
+
     private var firebaseDatabase: FirebaseDatabase? = null
     private var songsRef: DatabaseReference? = null
     private var subscriptionConfigRef: DatabaseReference? = null
@@ -191,9 +201,11 @@ class FirebaseSongsService(private val context: Context) {
     private var currentWatchedUserName: String = ""
 
     init {
-        loadSavedRankHistory()
-        loadSavedYtArtistCache()
-        loadCachedSongsCatalog()
+        scope.launch(Dispatchers.Default) {
+            loadSavedRankHistory()
+            loadSavedYtArtistCache()
+            loadCachedSongsCatalog()
+        }
         initializeCloudAndListen()
     }
 
@@ -440,15 +452,22 @@ class FirebaseSongsService(private val context: Context) {
 
             val listener = object : ValueEventListener {
                 override fun onDataChange(snapshot: DataSnapshot) {
-                    val rawList = parseSnapshot(snapshot)
-                    val finalSongs = resolveSmartSwapsAndSort(rawList)
-                    _songs.value = finalSongs
-                    enrichGenericArtistsAsync(finalSongs)
-                    enrichSpotifyCatalogSongsAsync(finalSongs)
-                    val embeddedPlaylists = parsePlaylistsFromSongsSnapshot(snapshot)
-                    updatePlaylistSource("songs_node", embeddedPlaylists)
-                    _isLoading.value = false
-                    _connectionError.value = null
+                    hasReceivedLiveRtdbSongs = true
+                    songsParseJob?.cancel()
+                    songsParseJob = scope.launch(Dispatchers.Default) {
+                        val rawList = parseSnapshot(snapshot)
+                        val finalSongs = resolveSmartSwapsAndSort(rawList)
+                        val embeddedPlaylists = parsePlaylistsFromSongsSnapshot(snapshot)
+                        _songs.value = finalSongs
+                        updatePlaylistSource("songs_node", embeddedPlaylists)
+                        _isLoading.value = false
+                        _connectionError.value = null
+                        if (finalSongs.isNotEmpty()) {
+                            delay(2500L)
+                            enrichGenericArtistsAsync(finalSongs)
+                            enrichSpotifyCatalogSongsAsync(finalSongs)
+                        }
+                    }
                 }
 
                 override fun onCancelled(error: DatabaseError) {
@@ -459,26 +478,25 @@ class FirebaseSongsService(private val context: Context) {
             valueListener = listener
             songsRef?.addValueEventListener(listener)
 
-            // Listen to Admin-uploaded Top Charts Playlists nodes
-            val playlistNodes = listOf("topChartPlaylists", "topChartsPlaylists", "chartPlaylists", "playlists", "adminPlaylists")
-            for (nodeName in playlistNodes) {
-                val pRef = database.getReference(nodeName)
-                pRef.keepSynced(true)
-                pRef.addValueEventListener(object : ValueEventListener {
-                    override fun onDataChange(snapshot: DataSnapshot) {
+            // Listen to optional legacy /topChartPlaylists node only (Admin_updated_3 stores playlists inside /songs)
+            database.getReference("topChartPlaylists").addValueEventListener(object : ValueEventListener {
+                override fun onDataChange(snapshot: DataSnapshot) {
+                    scope.launch(Dispatchers.Default) {
                         val parsed = parsePlaylistsFromSnapshot(snapshot)
-                        updatePlaylistSource("rtdb_$nodeName", parsed)
+                        updatePlaylistSource("rtdb_topChartPlaylists", parsed)
                     }
+                }
 
-                    override fun onCancelled(error: DatabaseError) {}
-                })
-            }
+                override fun onCancelled(error: DatabaseError) {}
+            })
 
             val subConfigListener = object : ValueEventListener {
                 override fun onDataChange(snapshot: DataSnapshot) {
                     if (snapshot.exists()) {
-                        parseSubscriptionConfigSnapshot(snapshot)?.let { parsed ->
-                            updateAndPersistSubscriptionConfig(parsed)
+                        scope.launch(Dispatchers.Default) {
+                            parseSubscriptionConfigSnapshot(snapshot)?.let { parsed ->
+                                updateAndPersistSubscriptionConfig(parsed)
+                            }
                         }
                     }
                 }
@@ -486,7 +504,6 @@ class FirebaseSongsService(private val context: Context) {
                 override fun onCancelled(error: DatabaseError) {}
             }
             subscriptionConfigRef = database.getReference("subscriptionPlans").also {
-                it.keepSynced(true)
                 it.addValueEventListener(subConfigListener)
             }
 
@@ -514,15 +531,16 @@ class FirebaseSongsService(private val context: Context) {
                 override fun onCancelled(error: DatabaseError) {}
             }
             database.getReference("freeUserTimeLimitMinutes").also {
-                it.keepSynced(true)
                 it.addValueEventListener(freeTimeLimitMinutesListener)
             }
 
             val bannersListener = object : ValueEventListener {
                 override fun onDataChange(snapshot: DataSnapshot) {
                     if (snapshot.exists()) {
-                        parsePremiumBannersSnapshot(snapshot)?.let { updated ->
-                            updateAndPersistSubscriptionConfig(updated)
+                        scope.launch(Dispatchers.Default) {
+                            parsePremiumBannersSnapshot(snapshot)?.let { updated ->
+                                updateAndPersistSubscriptionConfig(updated)
+                            }
                         }
                     }
                 }
@@ -530,67 +548,88 @@ class FirebaseSongsService(private val context: Context) {
                 override fun onCancelled(error: DatabaseError) {}
             }
             database.getReference("premiumBanners").also {
-                it.keepSynced(true)
                 it.addValueEventListener(bannersListener)
             }
 
             // Admin App Settings (/appControl): Secret Code, Maintenance Mode, and App Update Popup
             val appControlListener = object : ValueEventListener {
                 override fun onDataChange(snapshot: DataSnapshot) {
-                    if (snapshot.exists()) {
-                        parseAppControlSnapshot(snapshot)?.let { updated ->
-                            updateAndPersistAppControlConfig(updated)
+                    scope.launch(Dispatchers.Default) {
+                        if (snapshot.exists()) {
+                            parseAppControlSnapshot(snapshot)?.let { updated ->
+                                updateAndPersistAppControlConfig(updated)
+                            }
+                        } else {
+                            updateAndPersistAppControlConfig(AdminAppControlConfig())
                         }
-                    } else {
-                        updateAndPersistAppControlConfig(AdminAppControlConfig())
                     }
                 }
 
                 override fun onCancelled(error: DatabaseError) {}
             }
             database.getReference("appControl").also {
-                it.keepSynced(true)
                 it.addValueEventListener(appControlListener)
+            }
+
+            // Admin Ads Manager (/adsSettings): enabled, youtubeUrl, label, updatedAt
+            val adsSettingsListener = object : ValueEventListener {
+                override fun onDataChange(snapshot: DataSnapshot) {
+                    scope.launch(Dispatchers.Default) {
+                        if (snapshot.exists()) {
+                            parseAdsConfigSnapshot(snapshot)?.let { updated ->
+                                updateAndPersistAdsConfig(updated)
+                            }
+                        } else {
+                            updateAndPersistAdsConfig(AdminAdsConfig())
+                        }
+                    }
+                }
+
+                override fun onCancelled(error: DatabaseError) {}
+            }
+            database.getReference("adsSettings").also {
+                it.addValueEventListener(adsSettingsListener)
             }
 
             val notifListener = object : ValueEventListener {
                 override fun onDataChange(snapshot: DataSnapshot) {
-                    handleNotificationSnapshot(snapshot)
+                    scope.launch(Dispatchers.IO) {
+                        handleNotificationSnapshot(snapshot)
+                    }
                 }
 
                 override fun onCancelled(error: DatabaseError) {}
             }
             notificationsRef = database.getReference("notifications").also {
-                it.addValueEventListener(notifListener)
+                it.limitToLast(10).addValueEventListener(notifListener)
             }
-            messagesRef = database.getReference("messages").also {
-                it.addValueEventListener(notifListener)
-            }
-            database.getReference("notification").addValueEventListener(notifListener)
-            database.getReference("broadcast").addValueEventListener(notifListener)
         } catch (e: Exception) {
             Log.e(TAG, "Cloud init exception, using direct sync", e)
         }
 
+        // Lightweight initial fallback sync ONLY if WebSocket listener hasn't delivered quickly;
+        // NO aggressive 60s full-database REST polling so Firebase RTDB bandwidth stays tiny!
         scope.launch {
-            fetchSongsViaRest()
-            fetchTopChartPlaylistsViaRest()
-            fetchSubscriptionConfigViaRest(seedIfMissing = true)
+            delay(1800L)
+            if (!hasReceivedLiveRtdbSongs && _songs.value.isEmpty()) {
+                fetchSongsViaRest()
+            }
+            fetchAdsConfigViaRest()
             fetchAppControlViaRest()
-            fetchNotificationsViaRest()
+            if (!_isSubscriptionConfigLoaded.value) {
+                fetchSubscriptionConfigViaRest(seedIfMissing = false)
+            }
             while (true) {
-                // Smart Load-Balanced Sync: WebSocket ValueEventListeners handle real-time pushes;
-                // fallback REST reconciliation only runs once every 60s to keep Firebase bandwidth low for 100k+ users.
-                delay(60_000L)
+                delay(300_000L) // Low-bandwidth 5-min heartbeat only (realtime listeners push all changes instantly)
                 try {
                     firebaseDatabase?.goOnline()
                 } catch (_: Exception) {
                 }
-                fetchSongsViaRest(silent = true)
-                fetchTopChartPlaylistsViaRest()
-                fetchSubscriptionConfigViaRest(seedIfMissing = false)
-                fetchAppControlViaRest()
-                fetchNotificationsViaRest()
+                if (!hasReceivedLiveRtdbSongs) {
+                    fetchSongsViaRest(silent = true)
+                    fetchAdsConfigViaRest()
+                    fetchAppControlViaRest()
+                }
                 checkCurrentUserStatusInCloud()
             }
         }
@@ -744,15 +783,8 @@ class FirebaseSongsService(private val context: Context) {
 
         saveRankHistory()
 
-        // Step 4: Patch swapped ranks back to Firebase Realtime Database so Admin Panel & all users see the swap!
-        if (firebaseRankUpdatesToPatch.isNotEmpty()) {
-            scope.launch {
-                for ((fbKey, swappedRank) in firebaseRankUpdatesToPatch) {
-                    patchSongRankInFirebase(fbKey, swappedRank)
-                }
-            }
-        }
-
+        // NOTE: Do NOT write swapped ranks back to Firebase from User Panel clients — Admin Panel owns
+        // `/songs/<id>/rank`, and client write-backs caused recursive RTDB update loops and high bandwidth!
         return finalSongs
     }
 
@@ -824,6 +856,7 @@ class FirebaseSongsService(private val context: Context) {
                 ?: ""
             val rawArtist = child.child("artist").getValue(String::class.java)
                 ?: child.child("subtitle").getValue(String::class.java)
+                ?: child.child("uploadedBy").getValue(String::class.java)
                 ?: ""
 
             val urlFieldCandidates = listOf(
@@ -833,6 +866,7 @@ class FirebaseSongsService(private val context: Context) {
                 child.child("spotify_link").getValue(String::class.java),
                 child.child("spotifyTrackUrl").getValue(String::class.java),
                 child.child("spotify").getValue(String::class.java),
+                child.child("sourceUrl").getValue(String::class.java),
                 child.child("url").getValue(String::class.java),
                 child.child("link").getValue(String::class.java),
                 child.child("songUrl").getValue(String::class.java),
@@ -851,6 +885,7 @@ class FirebaseSongsService(private val context: Context) {
                 child.child("ytUrl").getValue(String::class.java),
                 child.child("ytLink").getValue(String::class.java),
                 child.child("ytId").getValue(String::class.java),
+                child.child("sourceUrl").getValue(String::class.java),
                 child.child("url").getValue(String::class.java),
                 child.child("link").getValue(String::class.java),
                 child.child("songUrl").getValue(String::class.java)
@@ -1050,18 +1085,20 @@ class FirebaseSongsService(private val context: Context) {
     private fun parseJsonObject(fallbackKey: String, obj: JSONObject, snapshotOrder: Int): RawAdminSong? {
         val id = obj.optString("id").ifBlank { fallbackKey }
         val title = obj.optString("title").ifBlank { obj.optString("name") }
-        val rawArtist = obj.optString("artist").ifBlank { obj.optString("subtitle", "") }
+        val rawArtist = obj.optString("artist")
+            .ifBlank { obj.optString("subtitle") }
+            .ifBlank { obj.optString("uploadedBy", "") }
 
         val spotifyUrl = listOf(
             "spotifyUrl", "spotifyLink", "spotify_url", "spotify_link",
-            "spotifyTrackUrl", "spotify", "url", "link", "songUrl", "videoId"
+            "spotifyTrackUrl", "spotify", "sourceUrl", "url", "link", "songUrl", "videoId"
         ).mapNotNull { key -> obj.optString(key, "").trim().takeIf { Song.isSpotifyUrl(it) } }
             .firstOrNull().orEmpty()
 
         val videoId = listOf(
             "videoId", "youtubeId", "youtubeUrl", "youtubeLink",
             "youtube_url", "youtube_link", "ytUrl", "ytLink", "ytId",
-            "url", "link", "songUrl"
+            "sourceUrl", "url", "link", "songUrl"
         ).mapNotNull { key ->
             val raw = obj.optString(key, "").trim()
             if (raw.isBlank() || Song.isSpotifyUrl(raw)) null else Song.extractYoutubeVideoId(raw).takeIf { it.isNotBlank() }
@@ -1144,15 +1181,17 @@ class FirebaseSongsService(private val context: Context) {
     }
 
     private fun isSnapshotPlaylistEntry(child: DataSnapshot): Boolean {
-        val type = child.child("type").getValue(String::class.java)
+        val contentType = child.child("contentType").getValue(String::class.java)
+            ?: child.child("type").getValue(String::class.java)
             ?: child.child("itemType").getValue(String::class.java)
             ?: ""
-        if (type.equals("playlist", ignoreCase = true)) return true
+        if (contentType.equals("playlist", ignoreCase = true)) return true
         if (parseBooleanField(child.child("isPlaylist").value)) return true
         val explicitPlUrl = listOf("playlistUrl", "youtubePlaylistUrl", "ytPlaylistUrl", "spotifyPlaylistUrl")
             .any { !child.child(it).getValue(String::class.java).isNullOrBlank() }
         if (explicitPlUrl) return true
-        val url = child.child("url").getValue(String::class.java)
+        val url = child.child("sourceUrl").getValue(String::class.java)
+            ?: child.child("url").getValue(String::class.java)
             ?: child.child("link").getValue(String::class.java)
             ?: ""
         val hasSingleYt = !child.child("videoId").getValue(String::class.java).isNullOrBlank() ||
@@ -1170,8 +1209,10 @@ class FirebaseSongsService(private val context: Context) {
     }
 
     private fun isJsonObjectPlaylistEntry(obj: JSONObject): Boolean {
-        val type = obj.optString("type", obj.optString("itemType", ""))
-        if (type.equals("playlist", ignoreCase = true)) return true
+        val contentType = obj.optString("contentType")
+            .ifBlank { obj.optString("type") }
+            .ifBlank { obj.optString("itemType") }
+        if (contentType.equals("playlist", ignoreCase = true)) return true
         if (parseBooleanField(obj.opt("isPlaylist"))) return true
         if (obj.optString("playlistUrl").isNotBlank() ||
             obj.optString("youtubePlaylistUrl").isNotBlank() ||
@@ -1180,7 +1221,9 @@ class FirebaseSongsService(private val context: Context) {
         ) {
             return true
         }
-        val url = obj.optString("url", obj.optString("link", ""))
+        val url = obj.optString("sourceUrl")
+            .ifBlank { obj.optString("url") }
+            .ifBlank { obj.optString("link") }
         val hasSingleYt = obj.optString("videoId").isNotBlank() || obj.optString("youtubeId").isNotBlank()
         if (!hasSingleYt && url.isNotBlank()) {
             if (url.contains("youtube.com/playlist", ignoreCase = true) ||
@@ -1204,10 +1247,12 @@ class FirebaseSongsService(private val context: Context) {
                     .thenByDescending { it.timestamp }
             )
         _topChartPlaylists.value = merged
-        enrichTopChartPlaylistsAsync(merged)
+        // NOTE: Do NOT auto-scrape all playlists on startup — tracks load on-demand with caching on first click!
     }
 
     private fun enrichTopChartPlaylistsAsync(playlists: List<AdminChartPlaylist>) {
+        // Intentionally disabled during startup to keep launch instant and bandwidth minimal.
+        if (playlists.isEmpty()) return
         val needMeta = playlists.filter { pl ->
             pl.playlistUrl.isNotBlank() &&
                 (pl.coverUrl.isBlank() || pl.title == "Top Chart Playlist" || pl.songs.isEmpty()) &&
@@ -1299,11 +1344,13 @@ class FirebaseSongsService(private val context: Context) {
                 ?: child.child("image").getValue(String::class.java)
                 ?: child.child("cover").getValue(String::class.java)
                 ?: ""
-            val playlistUrl = listOf("playlistUrl", "youtubePlaylistUrl", "ytPlaylistUrl", "spotifyPlaylistUrl", "url", "link")
+            val playlistUrl = listOf("playlistUrl", "youtubePlaylistUrl", "ytPlaylistUrl", "spotifyPlaylistUrl", "sourceUrl", "url", "link")
                 .mapNotNull { child.child(it).getValue(String::class.java)?.trim()?.takeIf { s -> s.isNotEmpty() } }
                 .firstOrNull().orEmpty()
             val description = child.child("description").getValue(String::class.java)
                 ?: child.child("subtitle").getValue(String::class.java)
+                ?: child.child("artist").getValue(String::class.java)
+                ?: child.child("uploadedBy").getValue(String::class.java)
                 ?: ""
             var rank = Int.MAX_VALUE
             for (fieldName in RANK_FIELD_NAMES) {
@@ -1316,6 +1363,7 @@ class FirebaseSongsService(private val context: Context) {
             val timestamp = (child.child("timestamp").value as? Number)?.toLong()
                 ?: (child.child("createdAt").value as? Number)?.toLong()
                 ?: 0L
+            val itemCount = (child.child("itemCount").value as? Number)?.toInt() ?: 0
 
             val embeddedSongs = mutableListOf<Song>()
             val songsChild = child.child("songs").takeIf { it.exists() }
@@ -1333,9 +1381,12 @@ class FirebaseSongsService(private val context: Context) {
 
             if (rawTitle.isBlank() && playlistUrl.isBlank() && embeddedSongs.isEmpty()) return null
 
+            val explicitPlatform = (child.child("platform").getValue(String::class.java)
+                ?: child.child("sourceType").getValue(String::class.java)
+                ?: "").trim().lowercase(Locale.US)
             val sourceType = when {
-                Song.extractYoutubePlaylistId(playlistUrl) != null -> "youtube"
-                Song.isSpotifyUrl(playlistUrl) -> "spotify"
+                explicitPlatform == "spotify" || Song.isSpotifyUrl(playlistUrl) -> "spotify"
+                explicitPlatform == "youtube" || Song.extractYoutubePlaylistId(playlistUrl) != null -> "youtube"
                 else -> "custom"
             }
 
@@ -1348,6 +1399,7 @@ class FirebaseSongsService(private val context: Context) {
                 description = description,
                 rank = rank,
                 timestamp = timestamp,
+                itemCount = maxOf(itemCount, embeddedSongs.size),
                 songs = embeddedSongs
             )
         } catch (_: Exception) {
@@ -1355,7 +1407,7 @@ class FirebaseSongsService(private val context: Context) {
         }
     }
 
-    private fun parsePlaylistsFromSongsJson(jsonStr: String): List<AdminChartPlaylist> {
+    fun parsePlaylistsFromSongsJson(jsonStr: String): List<AdminChartPlaylist> {
         val list = mutableListOf<AdminChartPlaylist>()
         try {
             if (jsonStr.startsWith("{")) {
@@ -1418,10 +1470,13 @@ class FirebaseSongsService(private val context: Context) {
             .ifBlank { obj.optString("thumbnail") }
             .ifBlank { obj.optString("image") }
             .ifBlank { obj.optString("cover") }
-        val playlistUrl = listOf("playlistUrl", "youtubePlaylistUrl", "ytPlaylistUrl", "spotifyPlaylistUrl", "url", "link")
+        val playlistUrl = listOf("playlistUrl", "youtubePlaylistUrl", "ytPlaylistUrl", "spotifyPlaylistUrl", "sourceUrl", "url", "link")
             .mapNotNull { obj.optString(it, "").trim().takeIf { s -> s.isNotEmpty() } }
             .firstOrNull().orEmpty()
-        val description = obj.optString("description").ifBlank { obj.optString("subtitle") }
+        val description = obj.optString("description")
+            .ifBlank { obj.optString("subtitle") }
+            .ifBlank { obj.optString("artist") }
+            .ifBlank { obj.optString("uploadedBy") }
         var rank = Int.MAX_VALUE
         for (fieldName in RANK_FIELD_NAMES) {
             if (obj.has(fieldName)) {
@@ -1433,6 +1488,7 @@ class FirebaseSongsService(private val context: Context) {
             }
         }
         val timestamp = obj.optLong("timestamp", obj.optLong("createdAt", 0L))
+        val itemCount = obj.optInt("itemCount", 0)
 
         val embeddedSongs = mutableListOf<Song>()
         val tracksArr = obj.optJSONArray("songs") ?: obj.optJSONArray("tracks") ?: obj.optJSONArray("items")
@@ -1461,9 +1517,10 @@ class FirebaseSongsService(private val context: Context) {
 
         if (title.isBlank() && playlistUrl.isBlank() && embeddedSongs.isEmpty()) return null
 
+        val explicitPlatform = obj.optString("platform", obj.optString("sourceType", "")).trim().lowercase(Locale.US)
         val sourceType = when {
-            Song.extractYoutubePlaylistId(playlistUrl) != null -> "youtube"
-            Song.isSpotifyUrl(playlistUrl) -> "spotify"
+            explicitPlatform == "spotify" || Song.isSpotifyUrl(playlistUrl) -> "spotify"
+            explicitPlatform == "youtube" || Song.extractYoutubePlaylistId(playlistUrl) != null -> "youtube"
             else -> "custom"
         }
 
@@ -1476,36 +1533,34 @@ class FirebaseSongsService(private val context: Context) {
             description = description,
             rank = rank,
             timestamp = timestamp,
+            itemCount = maxOf(itemCount, embeddedSongs.size),
             songs = embeddedSongs
         )
     }
 
     suspend fun fetchTopChartPlaylistsViaRest() = withContext(Dispatchers.IO) {
-        val nodes = listOf("topChartPlaylists", "topChartsPlaylists", "chartPlaylists", "playlists", "adminPlaylists")
-        for (nodeName in nodes) {
-            try {
-                val request = Request.Builder()
-                    .url("$DATABASE_URL/$nodeName.json")
-                    .get()
-                    .build()
-                httpClient.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) return@use
-                    val bodyStr = response.body?.string()?.trim().orEmpty()
-                    if (bodyStr.isEmpty() || bodyStr == "null") {
-                        updatePlaylistSource("rtdb_$nodeName", emptyList())
-                        return@use
-                    }
-                    val parsed = parseTopChartPlaylistsJson(bodyStr)
-                    updatePlaylistSource("rtdb_$nodeName", parsed)
-                    if (nodeName == "topChartPlaylists" && parsed.isNotEmpty()) {
-                        try {
-                            configCachePrefs.edit().putString("cached_top_chart_playlists_json", bodyStr).apply()
-                        } catch (_: Exception) {
-                        }
+        try {
+            val request = Request.Builder()
+                .url("$DATABASE_URL/topChartPlaylists.json")
+                .get()
+                .build()
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return@use
+                val bodyStr = response.body?.string()?.trim().orEmpty()
+                if (bodyStr.isEmpty() || bodyStr == "null") {
+                    updatePlaylistSource("rtdb_topChartPlaylists", emptyList())
+                    return@use
+                }
+                val parsed = parseTopChartPlaylistsJson(bodyStr)
+                updatePlaylistSource("rtdb_topChartPlaylists", parsed)
+                if (parsed.isNotEmpty()) {
+                    try {
+                        configCachePrefs.edit().putString("cached_top_chart_playlists_json", bodyStr).apply()
+                    } catch (_: Exception) {
                     }
                 }
-            } catch (_: Exception) {
             }
+        } catch (_: Exception) {
         }
     }
 
@@ -2860,6 +2915,116 @@ class FirebaseSongsService(private val context: Context) {
                             )
                         )
                     }
+                }
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    // =========================================================================
+    // ADMIN ADS MANAGER (/adsSettings: enabled, youtubeUrl, label, updatedAt)
+    // =========================================================================
+
+    private fun loadCachedAdsConfig(): AdminAdsConfig {
+        val def = AdminAdsConfig()
+        if (!configCachePrefs.getBoolean("has_cached_ads_config", false)) return def
+        return try {
+            AdminAdsConfig(
+                enabled = configCachePrefs.getBoolean("ads_cfg_enabled", false),
+                youtubeUrl = configCachePrefs.getString("ads_cfg_youtube_url", "") ?: "",
+                label = configCachePrefs.getString("ads_cfg_label", "") ?: "",
+                updatedAt = configCachePrefs.getLong("ads_cfg_updated_at", 0L)
+            )
+        } catch (_: Exception) {
+            def
+        }
+    }
+
+    fun updateAndPersistAdsConfig(newConfig: AdminAdsConfig) {
+        _adsConfig.value = newConfig
+        try {
+            configCachePrefs.edit()
+                .putBoolean("has_cached_ads_config", true)
+                .putBoolean("ads_cfg_enabled", newConfig.enabled)
+                .putString("ads_cfg_youtube_url", newConfig.youtubeUrl)
+                .putString("ads_cfg_label", newConfig.label)
+                .putLong("ads_cfg_updated_at", newConfig.updatedAt)
+                .apply()
+            // Mirror into shared user prefs so MusicPlaybackService autonomous background playback also respects Admin's Ads toggle & link
+            context.applicationContext.getSharedPreferences("ak_music_user_prefs", Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean("ads_enabled", newConfig.enabled)
+                .putString("ads_youtube_url", newConfig.youtubeUrl)
+                .putString("ads_video_id", newConfig.cleanVideoId)
+                .putString("ads_label", newConfig.displayTitle)
+                .apply()
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun parseAdsConfigSnapshot(snapshot: DataSnapshot): AdminAdsConfig? {
+        return try {
+            val enabled = snapshot.child("enabled").value?.let { parseBooleanField(it) } ?: false
+            val youtubeUrl = (snapshot.child("youtubeUrl").getValue(String::class.java)
+                ?: snapshot.child("url").getValue(String::class.java)
+                ?: snapshot.child("link").getValue(String::class.java)
+                ?: snapshot.child("videoId").getValue(String::class.java)
+                ?: "").trim()
+            val label = (snapshot.child("label").getValue(String::class.java)
+                ?: snapshot.child("title").getValue(String::class.java)
+                ?: "").trim()
+            val updatedAt = (snapshot.child("updatedAt").value as? Number)?.toLong() ?: 0L
+            AdminAdsConfig(
+                enabled = enabled,
+                youtubeUrl = youtubeUrl,
+                label = label,
+                updatedAt = updatedAt
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "Error parsing adsSettings snapshot", e)
+            null
+        }
+    }
+
+    fun parseAdsConfigJson(jsonStr: String): AdminAdsConfig {
+        val trimmed = jsonStr.trim()
+        if (trimmed.isEmpty() || trimmed == "null" || !trimmed.startsWith("{")) {
+            return AdminAdsConfig()
+        }
+        return try {
+            val obj = JSONObject(trimmed)
+            val enabled = if (obj.has("enabled")) parseBooleanField(obj.opt("enabled")) else false
+            val youtubeUrl = obj.optString("youtubeUrl")
+                .ifBlank { obj.optString("url") }
+                .ifBlank { obj.optString("link") }
+                .ifBlank { obj.optString("videoId") }
+                .trim()
+            val label = obj.optString("label")
+                .ifBlank { obj.optString("title") }
+                .trim()
+            val updatedAt = obj.optLong("updatedAt", 0L)
+            AdminAdsConfig(
+                enabled = enabled,
+                youtubeUrl = youtubeUrl,
+                label = label,
+                updatedAt = updatedAt
+            )
+        } catch (_: Exception) {
+            AdminAdsConfig()
+        }
+    }
+
+    suspend fun fetchAdsConfigViaRest() = withContext(Dispatchers.IO) {
+        try {
+            val req = Request.Builder()
+                .url("$DATABASE_URL/adsSettings.json")
+                .get()
+                .build()
+            httpClient.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    val body = resp.body?.string()?.trim().orEmpty()
+                    val parsed = parseAdsConfigJson(body)
+                    updateAndPersistAdsConfig(parsed)
                 }
             }
         } catch (_: Exception) {

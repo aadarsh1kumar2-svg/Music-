@@ -343,77 +343,8 @@ class MusicPlaybackService : MediaSessionService() {
                     getOrCreateSilentWavUri(appCtx)
                 } catch (_: Exception) {
                 }
-                val installBaselineMs = AdminNotificationHelper.getOrInitInstallBaselineMs(appCtx)
-                val endpoints = listOf("notifications", "messages", "notification", "broadcast")
-                while (true) {
-                    kotlinx.coroutines.delay(15_000L)
-                    for (node in endpoints) {
-                        try {
-                            val nodeName = "rtdb_$node"
-                            val isFirstSeed = !AdminNotificationHelper.isNodeBaselineSeeded(appCtx, nodeName)
-                            val req = Request.Builder()
-                                .url("${FirebaseSongsService.DATABASE_URL}/$node.json")
-                                .get()
-                                .build()
-                            artworkHttpClient.newCall(req).execute().use { resp ->
-                                if (!resp.isSuccessful) return@use
-                                val bodyStr = resp.body?.string()?.trim().orEmpty()
-                                if (bodyStr.isEmpty() || bodyStr == "null" || !bodyStr.startsWith("{")) {
-                                    if (isFirstSeed) {
-                                        AdminNotificationHelper.markNodeBaselineSeeded(appCtx, nodeName)
-                                    }
-                                    return@use
-                                }
-                                val root = org.json.JSONObject(bodyStr)
-                                val keys = root.keys()
-                                while (keys.hasNext()) {
-                                    val k = keys.next()
-                                    val obj = root.optJSONObject(k) ?: continue
-                                    val title = obj.optString("title").ifBlank {
-                                        obj.optString("heading").ifBlank {
-                                            obj.optString("subject").ifBlank { obj.optString("name") }
-                                        }
-                                    }
-                                    val body = obj.optString("body").ifBlank {
-                                        obj.optString("message").ifBlank {
-                                            obj.optString("paragraph").ifBlank {
-                                                obj.optString("text").ifBlank {
-                                                    obj.optString("description").ifBlank { obj.optString("content") }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    if (title.isBlank() && body.isBlank()) continue
-                                    val imageUrl = AdminNotificationHelper.extractImageUrlFromJson(obj)
-                                    val rawTs = obj.optLong("timestamp", obj.optLong("createdAt", obj.optLong("time", 0L)))
-                                    val ts = if (rawTs in 1_000_000_000L..9_999_999_999L) rawTs * 1000L else rawTs
-                                    val uniqueKey = "rtdb_${k}_${ts}_${title}"
-                                    val isOld = if (ts > 0L) ts < (installBaselineMs - 15_000L) else isFirstSeed
-                                    if (isOld) {
-                                        AdminNotificationHelper.markNotificationSilentlySeen(
-                                            context = appCtx,
-                                            uniqueKey = uniqueKey,
-                                            title = title.ifBlank { "AADIFY" },
-                                            body = body
-                                        )
-                                    } else {
-                                        AdminNotificationHelper.showAdminNotificationBlocking(
-                                            context = appCtx,
-                                            uniqueKey = uniqueKey,
-                                            title = title.ifBlank { "AADIFY" },
-                                            body = body,
-                                            imageUrl = imageUrl
-                                        )
-                                    }
-                                }
-                                if (isFirstSeed) {
-                                    AdminNotificationHelper.markNodeBaselineSeeded(appCtx, nodeName)
-                                }
-                            }
-                        } catch (_: Exception) {
-                        }
-                    }
-                }
+                // Notifications are delivered in real time via FCM (AADIFYMessagingService) + RTDB limitToLast(10) listener.
+                // Removed the aggressive 15-second 4-endpoint REST polling loop to prevent RTDB bandwidth spikes!
             }
         }
 
@@ -808,13 +739,13 @@ class MusicPlaybackService : MediaSessionService() {
             }
         })
 
-        // Wrap ExoPlayer in a ForwardingPlayer that ALWAYS enables Next, Previous, Play/Pause, and Stop
-        // in the Android System Quick Settings Media Tile, Notification Bar, and Lock Screen controls!
+        // Wrap ExoPlayer in a ForwardingPlayer that exposes clean, evenly spaced
+        // Previous / Play-Pause / Next controls in Quick Settings Media Tile, Notification Bar & Lock Screen!
         val forwardingPlayer = object : ForwardingPlayer(exoPlayer) {
             private fun buildAllCommands(base: Player.Commands): Player.Commands {
                 return base.buildUpon()
+                    .remove(Player.COMMAND_STOP)
                     .add(Player.COMMAND_PLAY_PAUSE)
-                    .add(Player.COMMAND_STOP)
                     .add(Player.COMMAND_SEEK_TO_NEXT)
                     .add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
                     .add(Player.COMMAND_SEEK_TO_PREVIOUS)
@@ -832,13 +763,13 @@ class MusicPlaybackService : MediaSessionService() {
 
             override fun isCommandAvailable(command: Int): Boolean {
                 return when (command) {
+                    Player.COMMAND_STOP -> false
                     Player.COMMAND_SEEK_TO_NEXT,
                     Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM,
                     Player.COMMAND_SEEK_TO_PREVIOUS,
                     Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM,
                     Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM,
                     Player.COMMAND_PLAY_PAUSE,
-                    Player.COMMAND_STOP,
                     Player.COMMAND_GET_CURRENT_MEDIA_ITEM,
                     Player.COMMAND_GET_TIMELINE,
                     Player.COMMAND_GET_METADATA -> true
@@ -861,8 +792,8 @@ class MusicPlaybackService : MediaSessionService() {
 
             override fun getCurrentTimeline(): Timeline {
                 val baseTimeline = super.getCurrentTimeline()
-                if (!isDirectAudioMode && syncedOnlineDurationMs > 0L && !baseTimeline.isEmpty) {
-                    val onlineDurUs = syncedOnlineDurationMs * 1000L
+                if (!isDirectAudioMode && !baseTimeline.isEmpty) {
+                    val onlineDurUs = if (syncedOnlineDurationMs > 0L) syncedOnlineDurationMs * 1000L else C.TIME_UNSET
                     return object : ForwardingTimeline(baseTimeline) {
                         override fun getWindow(
                             windowIndex: Int,
@@ -872,7 +803,7 @@ class MusicPlaybackService : MediaSessionService() {
                             super.getWindow(windowIndex, window, defaultPositionProjectionUs)
                             if (windowIndex == 1) {
                                 window.durationUs = onlineDurUs
-                                window.isSeekable = true
+                                window.isSeekable = syncedOnlineDurationMs > 0L
                                 window.isDynamic = false
                             }
                             return window
@@ -895,29 +826,37 @@ class MusicPlaybackService : MediaSessionService() {
             }
 
             override fun getDuration(): Long {
-                if (!isDirectAudioMode && syncedOnlineDurationMs > 0L) {
-                    return syncedOnlineDurationMs
+                if (!isDirectAudioMode) {
+                    return if (syncedOnlineDurationMs > 0L) syncedOnlineDurationMs else C.TIME_UNSET
                 }
                 return super.getDuration()
             }
 
             override fun getContentDuration(): Long {
-                if (!isDirectAudioMode && syncedOnlineDurationMs > 0L) {
-                    return syncedOnlineDurationMs
+                if (!isDirectAudioMode) {
+                    return if (syncedOnlineDurationMs > 0L) syncedOnlineDurationMs else C.TIME_UNSET
                 }
                 return super.getContentDuration()
             }
 
             override fun getCurrentPosition(): Long {
-                if (!isDirectAudioMode && syncedOnlineDurationMs > 0L) {
-                    return syncedOnlinePositionMs.coerceIn(0L, syncedOnlineDurationMs)
+                if (!isDirectAudioMode) {
+                    return if (syncedOnlineDurationMs > 0L) {
+                        syncedOnlinePositionMs.coerceIn(0L, syncedOnlineDurationMs)
+                    } else {
+                        syncedOnlinePositionMs.coerceAtLeast(0L)
+                    }
                 }
                 return super.getCurrentPosition()
             }
 
             override fun getContentPosition(): Long {
-                if (!isDirectAudioMode && syncedOnlineDurationMs > 0L) {
-                    return syncedOnlinePositionMs.coerceIn(0L, syncedOnlineDurationMs)
+                if (!isDirectAudioMode) {
+                    return if (syncedOnlineDurationMs > 0L) {
+                        syncedOnlinePositionMs.coerceIn(0L, syncedOnlineDurationMs)
+                    } else {
+                        syncedOnlinePositionMs.coerceAtLeast(0L)
+                    }
                 }
                 return super.getContentPosition()
             }
@@ -1099,8 +1038,8 @@ class MusicPlaybackService : MediaSessionService() {
                 controller: MediaSession.ControllerInfo
             ): MediaSession.ConnectionResult {
                 val playerCommands = MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS.buildUpon()
+                    .remove(Player.COMMAND_STOP)
                     .add(Player.COMMAND_PLAY_PAUSE)
-                    .add(Player.COMMAND_STOP)
                     .add(Player.COMMAND_SEEK_TO_NEXT)
                     .add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
                     .add(Player.COMMAND_SEEK_TO_PREVIOUS)
@@ -1230,7 +1169,6 @@ class MusicPlaybackService : MediaSessionService() {
             val prevIntent = buildServiceActionPendingIntent(101, ACTION_NOTIFICATION_PREV)
             val playPauseIntent = buildServiceActionPendingIntent(102, ACTION_NOTIFICATION_PLAY_PAUSE)
             val nextIntent = buildServiceActionPendingIntent(103, ACTION_NOTIFICATION_NEXT)
-            val stopIntent = buildServiceActionPendingIntent(104, ACTION_NOTIFICATION_STOP)
 
             val artworkBitmap = try {
                 val bytes = artworkBytes ?: getCachedArtworkBytesForSong(song)
@@ -1245,6 +1183,7 @@ class MusicPlaybackService : MediaSessionService() {
                 null
             }
 
+            // Strictly 3 clean, evenly balanced transport buttons: Previous, Play/Pause, Next (no stray Stop 'X' button)
             val builder = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_aadify_notification)
                 .setContentTitle(song?.title?.ifBlank { "AADIFY" } ?: "AADIFY")
@@ -1277,13 +1216,6 @@ class MusicPlaybackService : MediaSessionService() {
                         android.R.drawable.ic_media_next,
                         "Next",
                         nextIntent
-                    )
-                )
-                .addAction(
-                    NotificationCompat.Action(
-                        android.R.drawable.ic_menu_close_clear_cancel,
-                        "Stop",
-                        stopIntent
                     )
                 )
 
@@ -1810,21 +1742,28 @@ class MusicPlaybackService : MediaSessionService() {
 
     private fun playSongAutonomously(song: Song, bypassAdGate: Boolean = false) {
         if (!bypassAdGate && song.id != PROMO_AUDIO_AD_ID && !isPersistedVipActiveNow()) {
-            autonomousFreeSongsSinceAd += 1
-            if (autonomousFreeSongsSinceAd >= com.example.providers.MusicViewModel.FREE_SONGS_PER_AD) {
+            val prefs = applicationContext.getSharedPreferences("ak_music_user_prefs", Context.MODE_PRIVATE)
+            val adsEnabled = prefs.getBoolean("ads_enabled", false)
+            val adVid = prefs.getString("ads_video_id", "")?.trim().orEmpty()
+            val adLabel = prefs.getString("ads_label", "")?.trim().orEmpty().ifBlank { "Sponsored Audio Ad" }
+            if (adsEnabled && adVid.length == 11) {
+                autonomousFreeSongsSinceAd += 1
+                if (autonomousFreeSongsSinceAd >= com.example.providers.MusicViewModel.FREE_SONGS_PER_AD) {
+                    autonomousFreeSongsSinceAd = 0
+                    autonomousPendingNextSong = song
+                    val adSong = Song(
+                        id = PROMO_AUDIO_AD_ID,
+                        title = adLabel,
+                        artist = "AADIFY",
+                        videoId = adVid,
+                        bannerUrl = "https://img.youtube.com/vi/$adVid/hqdefault.jpg",
+                        allowDownload = false
+                    )
+                    playSongAutonomously(adSong, bypassAdGate = true)
+                    return
+                }
+            } else {
                 autonomousFreeSongsSinceAd = 0
-                autonomousPendingNextSong = song
-                val adVid = com.example.security.AadifySecurityVault.getPromoAdVideoId()
-                val adSong = Song(
-                    id = PROMO_AUDIO_AD_ID,
-                    title = "Sponsored Audio Ad",
-                    artist = "AADIFY",
-                    videoId = adVid,
-                    bannerUrl = "https://img.youtube.com/vi/$adVid/hqdefault.jpg",
-                    allowDownload = false
-                )
-                playSongAutonomously(adSong, bypassAdGate = true)
-                return
             }
         }
         prefetchArtwork(song)

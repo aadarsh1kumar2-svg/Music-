@@ -7,6 +7,7 @@ import android.content.Intent
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelStore
 import androidx.test.core.app.ApplicationProvider
+import com.example.models.AdminAdsConfig
 import com.example.models.AdminChartPlaylist
 import com.example.models.Song
 import com.example.models.SubscriptionPlanType
@@ -333,11 +334,10 @@ class PlaybackAndSubscriptionTest {
 
         var notif = shadowNm.getNotification(1001)
         assertNotNull(notif)
-        assertEquals(4, notif.actions.size)
+        assertEquals(3, notif.actions.size)
         assertEquals("Previous", notif.actions[0].title.toString())
         assertEquals("Pause", notif.actions[1].title.toString())
         assertEquals("Next", notif.actions[2].title.toString())
-        assertEquals("Stop", notif.actions[3].title.toString())
 
         // Simulate Media3 calling onUpdateNotification(session, false) during track transition / pause
         val mediaSessionField = MusicPlaybackService::class.java.getDeclaredField("mediaSession")
@@ -457,6 +457,42 @@ class PlaybackAndSubscriptionTest {
     }
 
     @Test
+    fun freeUser_noAdsWhenAdminAdsDisabledOrBlankLink() {
+        val prefs = app.getSharedPreferences("ak_music_user_prefs", Context.MODE_PRIVATE)
+        prefs.edit()
+            .putString("user_name", "FreeNoAdUser")
+            .putString("user_password", AadifySecurityVault.encryptSensitiveLocalString("pass1234"))
+            .commit()
+
+        val vm = createVm("free_no_ad_when_off")
+        assertFalse(vm.isVerifiedVipActive())
+
+        val s1 = Song(id = "na_s1", title = "Track 1", artist = "Artist 1", videoId = "dQw4w9WgXcQ")
+        val s2 = Song(id = "na_s2", title = "Track 2", artist = "Artist 2", videoId = "9bZkp7q19f0")
+        val s3 = Song(id = "na_s3", title = "Track 3", artist = "Artist 3", videoId = "kJQP7kiw5Fk")
+        val s4 = Song(id = "na_s4", title = "Track 4", artist = "Artist 4", videoId = "RgKAFK5djSk")
+        val queue = listOf(s1, s2, s3, s4)
+
+        // 1) Ads disabled by Admin -> ZERO ads even after 3+ songs
+        vm.setAdsConfigForTesting(AdminAdsConfig(enabled = false, youtubeUrl = "https://youtu.be/fWvlsYrWIs4", label = "Paused Ad"))
+        for (song in queue) {
+            vm.playSong(song, queue)
+            ShadowLooper.idleMainLooper(200, TimeUnit.MILLISECONDS)
+            assertFalse(vm.isPromoAudioAdPlaying.value)
+            assertEquals(song.id, vm.currentSong.value?.id)
+        }
+
+        // 2) Ads toggled ON but Admin left YouTube link empty -> ZERO ads
+        vm.setAdsConfigForTesting(AdminAdsConfig(enabled = true, youtubeUrl = "", label = "Empty Link"))
+        for (song in queue) {
+            vm.playSong(song, queue)
+            ShadowLooper.idleMainLooper(200, TimeUnit.MILLISECONDS)
+            assertFalse(vm.isPromoAudioAdPlaying.value)
+            assertEquals(song.id, vm.currentSong.value?.id)
+        }
+    }
+
+    @Test
     fun freeUser_triggersAudioOnlyAdAfter2Songs_andAutoPlaysNextOnAdEnd() {
         val prefs = app.getSharedPreferences("ak_music_user_prefs", Context.MODE_PRIVATE)
         prefs.edit()
@@ -464,11 +500,17 @@ class PlaybackAndSubscriptionTest {
             .putString("user_password", AadifySecurityVault.encryptSensitiveLocalString("pass1234"))
             .commit()
 
-        assertEquals("fWvlsYrWIs4", AadifySecurityVault.getPromoAdVideoId())
         assertEquals(2, MusicViewModel.FREE_SONGS_PER_AD)
 
         val vm = createVm("free_ad_cycle")
         assertFalse(vm.isVerifiedVipActive())
+        vm.setAdsConfigForTesting(
+            AdminAdsConfig(
+                enabled = true,
+                youtubeUrl = "https://youtu.be/fWvlsYrWIs4",
+                label = "Admin Promo Audio"
+            )
+        )
 
         val s1 = Song(id = "ad_s1", title = "Track 1", artist = "Artist 1", videoId = "dQw4w9WgXcQ")
         val s2 = Song(id = "ad_s2", title = "Track 2", artist = "Artist 2", videoId = "9bZkp7q19f0")
@@ -488,12 +530,13 @@ class PlaybackAndSubscriptionTest {
         assertFalse(vm.isPromoAudioAdPlaying.value)
         assertEquals(s2.id, vm.currentSong.value?.id)
 
-        // Clicking Song 3 after 2 songs pushes the Audio-Only Ad through the music player
+        // Clicking Song 3 after 2 songs pushes the Admin Audio-Only Ad through the music player
         vm.playSong(s3, queue)
         ShadowLooper.idleMainLooper(200, TimeUnit.MILLISECONDS)
         assertTrue(vm.isPromoAudioAdPlaying.value)
         assertEquals(MusicViewModel.PROMO_AUDIO_AD_SONG_ID, vm.currentSong.value?.id)
         assertEquals("fWvlsYrWIs4", vm.currentSong.value?.cleanVideoId)
+        assertEquals("Admin Promo Audio", vm.currentSong.value?.title)
         assertTrue(vm.isPlaying.value)
 
         // Skip next is blocked while Audio Ad is active
@@ -526,6 +569,13 @@ class PlaybackAndSubscriptionTest {
         seedVipUser(userName = "VipNoAdUser", planType = SubscriptionPlanType.MONTHLY)
         val vm = createVm("vip_no_ad")
         assertTrue(vm.isVerifiedVipActive())
+        vm.setAdsConfigForTesting(
+            AdminAdsConfig(
+                enabled = true,
+                youtubeUrl = "https://youtu.be/fWvlsYrWIs4",
+                label = "Admin Promo Audio"
+            )
+        )
 
         val s1 = Song(id = "v1", title = "VIP 1", artist = "A1", videoId = "dQw4w9WgXcQ")
         val s2 = Song(id = "v2", title = "VIP 2", artist = "A2", videoId = "9bZkp7q19f0")
@@ -544,22 +594,42 @@ class PlaybackAndSubscriptionTest {
     }
 
     @Test
-    fun adminCatalog_parsesSpotifySongsAndTopChartPlaylists_andOpensPlaylistOnSecondClick() {
+    fun adminCatalog_parsesAdminV3SchemaAndAdsSettings_andExpandsPlaylistOnSingleClick() {
         val firebaseService = FirebaseSongsService(app)
         val songsJson = """
             {
               "sp1": {
                 "title": "Blinding Lights",
                 "artist": "The Weeknd",
-                "spotifyLink": "https://open.spotify.com/track/0VjIjW4GlUZAMYd2vXMi3b",
+                "contentType": "single",
+                "platform": "spotify",
+                "sourceUrl": "https://open.spotify.com/track/0VjIjW4GlUZAMYd2vXMi3b",
                 "rank": 1
               },
               "yt1": {
                 "title": "Kesariya",
                 "artist": "Arijit Singh",
+                "contentType": "single",
+                "platform": "youtube",
                 "videoId": "https://youtu.be/BddP6PYo2gs",
                 "spotifyUrl": "https://open.spotify.com/track/6VBhH7CyP56BXjp8VsDFPZ",
                 "rank": 2
+              },
+              "pl_top_1": {
+                "title": "Bollywood Top Hits",
+                "contentType": "playlist",
+                "platform": "youtube",
+                "sourceUrl": "https://www.youtube.com/playlist?list=PLFgquLnL59alCl_2TQvOiD5Vgm1hCaGSI",
+                "itemCount": 1,
+                "rank": 3,
+                "songs": [
+                  {
+                    "id": "p_s1",
+                    "title": "Playlist Song 1",
+                    "artist": "Singer 1",
+                    "videoId": "dQw4w9WgXcQ"
+                  }
+                ]
               }
             }
         """.trimIndent()
@@ -575,42 +645,46 @@ class PlaybackAndSubscriptionTest {
         assertEquals("BddP6PYo2gs", ytSpSong.cleanVideoId)
         assertTrue(ytSpSong.isSpotifyTrack)
 
-        val playlistsJson = """
-            {
-              "pl_top_1": {
-                "title": "Bollywood Top Hits",
-                "playlistUrl": "https://www.youtube.com/playlist?list=PLFgquLnL59alCl_2TQvOiD5Vgm1hCaGSI",
-                "rank": 1,
-                "songs": [
-                  {
-                    "id": "p_s1",
-                    "title": "Playlist Song 1",
-                    "artist": "Singer 1",
-                    "videoId": "dQw4w9WgXcQ"
-                  }
-                ]
-              }
-            }
-        """.trimIndent()
-        val parsedPlaylists = firebaseService.parseTopChartPlaylistsJson(playlistsJson)
+        val parsedPlaylists = firebaseService.parsePlaylistsFromSongsJson(songsJson)
         assertEquals(1, parsedPlaylists.size)
         val pl: AdminChartPlaylist = parsedPlaylists.first()
         assertEquals("Bollywood Top Hits", pl.title)
         assertEquals("youtube", pl.sourceType)
+        assertEquals(1, pl.itemCount)
         assertEquals(1, pl.songs.size)
 
-        // Verify 2-tap open behavior in MusicViewModel
+        // Verify /adsSettings JSON parsing (ON with valid YouTube link vs OFF)
+        val adsOn = firebaseService.parseAdsConfigJson(
+            """{"enabled": true, "youtubeUrl": "https://www.youtube.com/watch?v=fWvlsYrWIs4", "label": "Festive Promo", "updatedAt": 1732200000}"""
+        )
+        assertTrue(adsOn.isEffectivelyEnabled)
+        assertEquals("fWvlsYrWIs4", adsOn.cleanVideoId)
+        assertEquals("Festive Promo", adsOn.displayTitle)
+
+        val adsOff = firebaseService.parseAdsConfigJson(
+            """{"enabled": false, "youtubeUrl": "https://youtu.be/fWvlsYrWIs4", "label": "Off Ad"}"""
+        )
+        assertFalse(adsOff.isEffectivelyEnabled)
+
+        val adsBlank = firebaseService.parseAdsConfigJson(
+            """{"enabled": true, "youtubeUrl": "", "label": "No Link"}"""
+        )
+        assertFalse(adsBlank.isEffectivelyEnabled)
+
+        // Verify 1-tap inline expand & collapse behavior in MusicViewModel
         val vm = createVm("top_chart_pl_tap")
-        vm.onTopChartPlaylistClicked(pl)
-        assertEquals(pl.id, vm.selectedTopChartPlaylistId.value)
-        assertNull(vm.openedTopChartPlaylist.value)
+        assertNull(vm.expandedTopChartPlaylistId.value)
 
         vm.onTopChartPlaylistClicked(pl)
-        assertEquals(pl.id, vm.openedTopChartPlaylist.value?.id)
-        assertEquals(1, vm.openedTopChartPlaylistSongs.value.size)
+        ShadowLooper.idleMainLooper(200, TimeUnit.MILLISECONDS)
+        assertEquals(pl.id, vm.expandedTopChartPlaylistId.value)
+        assertEquals(1, vm.expandedTopChartPlaylistSongs.value.size)
 
-        vm.closeOpenedTopChartPlaylist()
-        assertNull(vm.openedTopChartPlaylist.value)
+        // Tapping the same expanded playlist again collapses it
+        vm.onTopChartPlaylistClicked(pl)
+        ShadowLooper.idleMainLooper(100, TimeUnit.MILLISECONDS)
+        assertNull(vm.expandedTopChartPlaylistId.value)
+        assertTrue(vm.expandedTopChartPlaylistSongs.value.isEmpty())
     }
 
     @Test

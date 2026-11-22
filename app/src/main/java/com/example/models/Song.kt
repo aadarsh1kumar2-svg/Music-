@@ -153,6 +153,7 @@ data class AdminChartPlaylist(
     val description: String = "",
     val rank: Int = Int.MAX_VALUE,
     val timestamp: Long = 0L,
+    val itemCount: Int = 0,
     val songs: List<Song> = emptyList()
 ) {
     val resolvedCoverUrl: String
@@ -160,3 +161,4 @@ data class AdminChartPlaylist(
             songs.firstOrNull { it.highResBannerUrl.isNotBlank() }?.highResBannerUrl.orEmpty()
         }
 }
+
