@@ -131,6 +131,14 @@ class MusicPlaybackService : MediaSessionService() {
         @Volatile
         private var activeUserNameSnapshot: String = ""
 
+        @Volatile
+        private var autonomousFreeSongsSinceAd: Int = 0
+
+        @Volatile
+        private var autonomousPendingNextSong: Song? = null
+
+        private const val PROMO_AUDIO_AD_ID = com.example.providers.MusicViewModel.PROMO_AUDIO_AD_SONG_ID
+
         private val autonomousAudioExtractor by lazy { AudioStreamExtractor() }
 
         @Volatile
@@ -199,6 +207,8 @@ class MusicPlaybackService : MediaSessionService() {
             pendingSync = null
             appliedMediaId = ""
             queueSnapshot = emptyList()
+            autonomousFreeSongsSinceAd = 0
+            autonomousPendingNextSong = null
             onSkipNextCallback = null
             onSkipPreviousCallback = null
             onTogglePlayPauseCallback = null
@@ -950,6 +960,9 @@ class MusicPlaybackService : MediaSessionService() {
             }
 
             override fun seekTo(positionMs: Long) {
+                if (!isInternalSync && pendingSync?.song?.id == PROMO_AUDIO_AD_ID && !isPersistedVipActiveNow()) {
+                    return
+                }
                 if (!isInternalSync && !isDirectAudioMode) {
                     val clamped = positionMs.coerceAtLeast(0L)
                     syncedOnlinePositionMs = clamped
@@ -961,6 +974,9 @@ class MusicPlaybackService : MediaSessionService() {
 
             override fun seekTo(mediaItemIndex: Int, positionMs: Long) {
                 if (!isInternalSync) {
+                    if (pendingSync?.song?.id == PROMO_AUDIO_AD_ID && !isPersistedVipActiveNow()) {
+                        return
+                    }
                     if (mediaItemIndex > 1) {
                         dispatchSkipNext()
                         return
@@ -1590,6 +1606,9 @@ class MusicPlaybackService : MediaSessionService() {
     }
 
     private fun dispatchSkipNext() {
+        if (pendingSync?.song?.id == PROMO_AUDIO_AD_ID && !isPersistedVipActiveNow()) {
+            return
+        }
         val cb = onSkipNextCallback
         if (cb != null) {
             cb.invoke()
@@ -1599,6 +1618,9 @@ class MusicPlaybackService : MediaSessionService() {
     }
 
     private fun dispatchSkipPrevious() {
+        if (pendingSync?.song?.id == PROMO_AUDIO_AD_ID && !isPersistedVipActiveNow()) {
+            return
+        }
         val cb = onSkipPreviousCallback
         if (cb != null) {
             cb.invoke()
@@ -1715,6 +1737,20 @@ class MusicPlaybackService : MediaSessionService() {
             applyPlayStateInternal(shouldPlay = false, forceNotificationUpdate = true)
             return
         }
+        if (current.id == PROMO_AUDIO_AD_ID) {
+            autonomousFreeSongsSinceAd = 0
+            val pendingNext = autonomousPendingNextSong
+            autonomousPendingNextSong = null
+            if (pendingNext != null) {
+                playSongAutonomously(pendingNext, bypassAdGate = true)
+                return
+            }
+            val fallback = queueSnapshot.firstOrNull()
+            if (fallback != null) {
+                playSongAutonomously(fallback, bypassAdGate = true)
+            }
+            return
+        }
         val list = queueSnapshot
         if (repeatOneSnapshot || list.isEmpty()) {
             playSongAutonomously(current)
@@ -1772,7 +1808,25 @@ class MusicPlaybackService : MediaSessionService() {
         }
     }
 
-    private fun playSongAutonomously(song: Song) {
+    private fun playSongAutonomously(song: Song, bypassAdGate: Boolean = false) {
+        if (!bypassAdGate && song.id != PROMO_AUDIO_AD_ID && !isPersistedVipActiveNow()) {
+            autonomousFreeSongsSinceAd += 1
+            if (autonomousFreeSongsSinceAd >= com.example.providers.MusicViewModel.FREE_SONGS_PER_AD) {
+                autonomousFreeSongsSinceAd = 0
+                autonomousPendingNextSong = song
+                val adVid = com.example.security.AadifySecurityVault.getPromoAdVideoId()
+                val adSong = Song(
+                    id = PROMO_AUDIO_AD_ID,
+                    title = "Sponsored Audio Ad",
+                    artist = "AADIFY",
+                    videoId = adVid,
+                    bannerUrl = "https://img.youtube.com/vi/$adVid/hqdefault.jpg",
+                    allowDownload = false
+                )
+                playSongAutonomously(adSong, bypassAdGate = true)
+                return
+            }
+        }
         prefetchArtwork(song)
         ioScope.launch {
             val localUri = song.resolvedLocalUri

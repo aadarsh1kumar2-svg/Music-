@@ -5,6 +5,7 @@ import android.util.Base64
 import android.util.Log
 import com.example.BuildConfig
 import com.example.models.AdminAppControlConfig
+import com.example.models.AdminChartPlaylist
 import com.example.models.AdminSubscriptionConfig
 import com.example.models.Song
 import com.example.models.SubscriptionPlanType
@@ -118,10 +119,20 @@ class FirebaseSongsService(private val context: Context) {
     private val previousResolvedRanks = ConcurrentHashMap<String, Int>()
     private val ytArtistCache = ConcurrentHashMap<String, String>()
     private val ytArtistAttempted = ConcurrentHashMap<String, Long>()
+    private val spotifyMetaCache = ConcurrentHashMap<String, Triple<String, String, String>>() // spotifyUrl -> (title, artist, cover)
+    private val spotifyMetaAttempted = ConcurrentHashMap<String, Long>()
+    private val playlistMetaAttempted = ConcurrentHashMap<String, Long>()
+    private val playlistSourcesMap = ConcurrentHashMap<String, List<AdminChartPlaylist>>()
+    private val spotifyImportHelper by lazy { SpotifyPlaylistImportService() }
+    private val playlistExtractorHelper by lazy { AudioStreamExtractor() }
 
     // Strictly Admin-uploaded songs ONLY (no extra default songs mixed into Admin catalog / Top Charts!)
     private val _songs = MutableStateFlow<List<Song>>(emptyList())
     val songs: StateFlow<List<Song>> = _songs.asStateFlow()
+
+    // Admin-uploaded Playlists for Top Charts (supports YouTube playlist links, Spotify playlists & custom track lists)
+    private val _topChartPlaylists = MutableStateFlow<List<AdminChartPlaylist>>(emptyList())
+    val topChartPlaylists: StateFlow<List<AdminChartPlaylist>> = _topChartPlaylists.asStateFlow()
 
     private val _isLoading = MutableStateFlow(true)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
@@ -282,7 +293,7 @@ class FirebaseSongsService(private val context: Context) {
                 } catch (_: Exception) {
                 }
             }
-            if (updatedAny) {
+                if (updatedAny) {
                 persistYtArtistCache()
                 val patched = _songs.value.map { s ->
                     val vid = s.cleanVideoId
@@ -298,6 +309,50 @@ class FirebaseSongsService(private val context: Context) {
         }
     }
 
+    private fun enrichSpotifyCatalogSongsAsync(songsList: List<Song>) {
+        val candidates = songsList.filter { s ->
+            s.spotifyUrl.isNotBlank() &&
+                (s.bannerUrl.isBlank() || s.title == "Untitled Track" || isGenericArtistLabel(s.artist)) &&
+                !spotifyMetaCache.containsKey(s.spotifyUrl) &&
+                (System.currentTimeMillis() - (spotifyMetaAttempted[s.spotifyUrl] ?: 0L)) > 300_000L
+        }
+        if (candidates.isEmpty()) return
+        scope.launch {
+            var changed = false
+            for (song in candidates.take(20)) {
+                val url = song.spotifyUrl
+                spotifyMetaAttempted[url] = System.currentTimeMillis()
+                try {
+                    val res = spotifyImportHelper.importFromSpotifyUrl(url).getOrNull() ?: continue
+                    val track = res.tracks.firstOrNull() ?: continue
+                    val resolvedTitle = track.title.ifBlank { res.title }.trim()
+                    val resolvedArtist = track.artist.trim()
+                    val resolvedCover = track.coverUrl.ifBlank { res.coverUrl }.trim()
+                    if (resolvedTitle.isNotBlank() || resolvedCover.isNotBlank()) {
+                        spotifyMetaCache[url] = Triple(resolvedTitle, resolvedArtist, resolvedCover)
+                        changed = true
+                    }
+                } catch (_: Exception) {
+                }
+            }
+            if (changed) {
+                _songs.value = _songs.value.map { s ->
+                    val cached = if (s.spotifyUrl.isNotBlank()) spotifyMetaCache[s.spotifyUrl] else null
+                    if (cached != null) {
+                        val (t, a, c) = cached
+                        s.copy(
+                            title = if (s.title.isBlank() || s.title == "Untitled Track") t.ifBlank { s.title } else s.title,
+                            artist = if (isGenericArtistLabel(s.artist) && a.isNotBlank()) a else s.artist,
+                            bannerUrl = s.bannerUrl.ifBlank { c }
+                        )
+                    } else {
+                        s
+                    }
+                }
+            }
+        }
+    }
+
     private fun loadCachedSongsCatalog() {
         try {
             val cachedJson = configCachePrefs.getString("cached_songs_catalog_json", null)
@@ -306,6 +361,17 @@ class FirebaseSongsService(private val context: Context) {
                 if (parsed.isNotEmpty()) {
                     _songs.value = parsed
                     _isLoading.value = false
+                }
+                val embeddedPlaylists = parsePlaylistsFromSongsJson(cachedJson)
+                if (embeddedPlaylists.isNotEmpty()) {
+                    updatePlaylistSource("songs_node", embeddedPlaylists)
+                }
+            }
+            val cachedPlaylistsJson = configCachePrefs.getString("cached_top_chart_playlists_json", null)
+            if (!cachedPlaylistsJson.isNullOrBlank() && cachedPlaylistsJson != "null") {
+                val parsedPl = parseTopChartPlaylistsJson(cachedPlaylistsJson)
+                if (parsedPl.isNotEmpty()) {
+                    updatePlaylistSource("rest_cached", parsedPl)
                 }
             }
         } catch (_: Exception) {
@@ -378,6 +444,9 @@ class FirebaseSongsService(private val context: Context) {
                     val finalSongs = resolveSmartSwapsAndSort(rawList)
                     _songs.value = finalSongs
                     enrichGenericArtistsAsync(finalSongs)
+                    enrichSpotifyCatalogSongsAsync(finalSongs)
+                    val embeddedPlaylists = parsePlaylistsFromSongsSnapshot(snapshot)
+                    updatePlaylistSource("songs_node", embeddedPlaylists)
                     _isLoading.value = false
                     _connectionError.value = null
                 }
@@ -389,6 +458,21 @@ class FirebaseSongsService(private val context: Context) {
             }
             valueListener = listener
             songsRef?.addValueEventListener(listener)
+
+            // Listen to Admin-uploaded Top Charts Playlists nodes
+            val playlistNodes = listOf("topChartPlaylists", "topChartsPlaylists", "chartPlaylists", "playlists", "adminPlaylists")
+            for (nodeName in playlistNodes) {
+                val pRef = database.getReference(nodeName)
+                pRef.keepSynced(true)
+                pRef.addValueEventListener(object : ValueEventListener {
+                    override fun onDataChange(snapshot: DataSnapshot) {
+                        val parsed = parsePlaylistsFromSnapshot(snapshot)
+                        updatePlaylistSource("rtdb_$nodeName", parsed)
+                    }
+
+                    override fun onCancelled(error: DatabaseError) {}
+                })
+            }
 
             val subConfigListener = object : ValueEventListener {
                 override fun onDataChange(snapshot: DataSnapshot) {
@@ -490,6 +574,7 @@ class FirebaseSongsService(private val context: Context) {
 
         scope.launch {
             fetchSongsViaRest()
+            fetchTopChartPlaylistsViaRest()
             fetchSubscriptionConfigViaRest(seedIfMissing = true)
             fetchAppControlViaRest()
             fetchNotificationsViaRest()
@@ -502,6 +587,7 @@ class FirebaseSongsService(private val context: Context) {
                 } catch (_: Exception) {
                 }
                 fetchSongsViaRest(silent = true)
+                fetchTopChartPlaylistsViaRest()
                 fetchSubscriptionConfigViaRest(seedIfMissing = false)
                 fetchAppControlViaRest()
                 fetchNotificationsViaRest()
@@ -696,8 +782,9 @@ class FirebaseSongsService(private val context: Context) {
 
         var idx = 0
         for (child in snapshot.children) {
+            if (isSnapshotPlaylistEntry(child)) continue
             val parsed = parseChildSnapshot(child, idx)
-            if (parsed != null && (parsed.song.videoId.isNotBlank() || parsed.song.title.isNotBlank())) {
+            if (parsed != null && (parsed.song.videoId.isNotBlank() || parsed.song.spotifyUrl.isNotBlank() || parsed.song.title.isNotBlank())) {
                 result.add(parsed)
                 idx++
             }
@@ -738,16 +825,56 @@ class FirebaseSongsService(private val context: Context) {
             val rawArtist = child.child("artist").getValue(String::class.java)
                 ?: child.child("subtitle").getValue(String::class.java)
                 ?: ""
-            val rawVideoId = child.child("videoId").getValue(String::class.java)
-                ?: child.child("youtubeId").getValue(String::class.java)
-                ?: child.child("url").getValue(String::class.java)
-                ?: ""
-            val extractedVideoId = Song.extractYoutubeVideoId(rawVideoId)
-            val artist = resolveArtistWithCache(rawArtist, extractedVideoId)
-            val bannerUrl = child.child("bannerUrl").getValue(String::class.java)
+
+            val urlFieldCandidates = listOf(
+                child.child("spotifyUrl").getValue(String::class.java),
+                child.child("spotifyLink").getValue(String::class.java),
+                child.child("spotify_url").getValue(String::class.java),
+                child.child("spotify_link").getValue(String::class.java),
+                child.child("spotifyTrackUrl").getValue(String::class.java),
+                child.child("spotify").getValue(String::class.java),
+                child.child("url").getValue(String::class.java),
+                child.child("link").getValue(String::class.java),
+                child.child("songUrl").getValue(String::class.java),
+                child.child("videoId").getValue(String::class.java)
+            ).mapNotNull { it?.trim()?.takeIf { s -> s.isNotEmpty() } }
+
+            val extractedSpotifyUrl = urlFieldCandidates.firstOrNull { Song.isSpotifyUrl(it) }.orEmpty()
+
+            val ytFieldCandidates = listOf(
+                child.child("videoId").getValue(String::class.java),
+                child.child("youtubeId").getValue(String::class.java),
+                child.child("youtubeUrl").getValue(String::class.java),
+                child.child("youtubeLink").getValue(String::class.java),
+                child.child("youtube_url").getValue(String::class.java),
+                child.child("youtube_link").getValue(String::class.java),
+                child.child("ytUrl").getValue(String::class.java),
+                child.child("ytLink").getValue(String::class.java),
+                child.child("ytId").getValue(String::class.java),
+                child.child("url").getValue(String::class.java),
+                child.child("link").getValue(String::class.java),
+                child.child("songUrl").getValue(String::class.java)
+            ).mapNotNull { it?.trim()?.takeIf { s -> s.isNotEmpty() && !Song.isSpotifyUrl(s) } }
+
+            val extractedVideoId = ytFieldCandidates
+                .map { Song.extractYoutubeVideoId(it) }
+                .firstOrNull { it.isNotBlank() }
+                .orEmpty()
+
+            val cachedSpotifyMeta = if (extractedSpotifyUrl.isNotBlank()) spotifyMetaCache[extractedSpotifyUrl] else null
+            val resolvedTitle = title.ifBlank { cachedSpotifyMeta?.first.orEmpty() }.ifBlank { "Untitled Track" }
+            val effectiveRawArtist = if (isGenericArtistLabel(rawArtist) && !cachedSpotifyMeta?.second.isNullOrBlank()) {
+                cachedSpotifyMeta!!.second
+            } else {
+                rawArtist
+            }
+            val artist = resolveArtistWithCache(effectiveRawArtist, extractedVideoId)
+            val rawBannerUrl = child.child("bannerUrl").getValue(String::class.java)
                 ?: child.child("thumbnail").getValue(String::class.java)
                 ?: child.child("image").getValue(String::class.java)
+                ?: child.child("coverUrl").getValue(String::class.java)
                 ?: ""
+            val bannerUrl = rawBannerUrl.ifBlank { cachedSpotifyMeta?.third.orEmpty() }
 
             var explicitRank = Int.MAX_VALUE
             for (fieldName in RANK_FIELD_NAMES) {
@@ -801,14 +928,15 @@ class FirebaseSongsService(private val context: Context) {
 
             val song = Song(
                 id = id,
-                title = title,
+                title = resolvedTitle,
                 artist = artist,
                 videoId = extractedVideoId,
                 bannerUrl = bannerUrl,
                 rank = explicitRank,
                 isTopChart = isTopChart,
                 timestamp = timestamp,
-                allowDownload = allowDownload
+                allowDownload = allowDownload,
+                spotifyUrl = extractedSpotifyUrl
             )
 
             RawAdminSong(
@@ -860,6 +988,9 @@ class FirebaseSongsService(private val context: Context) {
                 val sorted = resolveSmartSwapsAndSort(rawList)
                 _songs.value = sorted
                 enrichGenericArtistsAsync(sorted)
+                enrichSpotifyCatalogSongsAsync(sorted)
+                val embeddedPlaylists = parsePlaylistsFromSongsJson(bodyStr)
+                updatePlaylistSource("songs_node", embeddedPlaylists)
                 lastSongsRestFetchMs = System.currentTimeMillis()
                 try {
                     configCachePrefs.edit().putString("cached_songs_catalog_json", bodyStr).apply()
@@ -891,6 +1022,7 @@ class FirebaseSongsService(private val context: Context) {
                 while (keys.hasNext()) {
                     val key = keys.next()
                     val obj = root.optJSONObject(key) ?: continue
+                    if (isJsonObjectPlaylistEntry(obj)) continue
                     val parsed = parseJsonObject(key, obj, idx)
                     if (parsed != null) {
                         result.add(parsed)
@@ -901,6 +1033,7 @@ class FirebaseSongsService(private val context: Context) {
                 val arr = JSONArray(jsonStr)
                 for (i in 0 until arr.length()) {
                     val obj = arr.optJSONObject(i) ?: continue
+                    if (isJsonObjectPlaylistEntry(obj)) continue
                     val parsed = parseJsonObject(i.toString(), obj, idx)
                     if (parsed != null) {
                         result.add(parsed)
@@ -918,14 +1051,36 @@ class FirebaseSongsService(private val context: Context) {
         val id = obj.optString("id").ifBlank { fallbackKey }
         val title = obj.optString("title").ifBlank { obj.optString("name") }
         val rawArtist = obj.optString("artist").ifBlank { obj.optString("subtitle", "") }
-        val rawVideoId = obj.optString("videoId").ifBlank {
-            obj.optString("youtubeId").ifBlank { obj.optString("url") }
+
+        val spotifyUrl = listOf(
+            "spotifyUrl", "spotifyLink", "spotify_url", "spotify_link",
+            "spotifyTrackUrl", "spotify", "url", "link", "songUrl", "videoId"
+        ).mapNotNull { key -> obj.optString(key, "").trim().takeIf { Song.isSpotifyUrl(it) } }
+            .firstOrNull().orEmpty()
+
+        val videoId = listOf(
+            "videoId", "youtubeId", "youtubeUrl", "youtubeLink",
+            "youtube_url", "youtube_link", "ytUrl", "ytLink", "ytId",
+            "url", "link", "songUrl"
+        ).mapNotNull { key ->
+            val raw = obj.optString(key, "").trim()
+            if (raw.isBlank() || Song.isSpotifyUrl(raw)) null else Song.extractYoutubeVideoId(raw).takeIf { it.isNotBlank() }
+        }.firstOrNull().orEmpty()
+
+        val cachedSpotifyMeta = if (spotifyUrl.isNotBlank()) spotifyMetaCache[spotifyUrl] else null
+        val resolvedTitle = title.ifBlank { cachedSpotifyMeta?.first.orEmpty() }
+        val effectiveRawArtist = if (isGenericArtistLabel(rawArtist) && !cachedSpotifyMeta?.second.isNullOrBlank()) {
+            cachedSpotifyMeta!!.second
+        } else {
+            rawArtist
         }
-        val videoId = Song.extractYoutubeVideoId(rawVideoId)
-        val artist = resolveArtistWithCache(rawArtist, videoId)
-        val bannerUrl = obj.optString("bannerUrl").ifBlank {
-            obj.optString("thumbnail").ifBlank { obj.optString("image") }
+        val artist = resolveArtistWithCache(effectiveRawArtist, videoId)
+        val rawBannerUrl = obj.optString("bannerUrl").ifBlank {
+            obj.optString("thumbnail").ifBlank {
+                obj.optString("image").ifBlank { obj.optString("coverUrl") }
+            }
         }
+        val bannerUrl = rawBannerUrl.ifBlank { cachedSpotifyMeta?.third.orEmpty() }
 
         var explicitRank = Int.MAX_VALUE
         for (fieldName in RANK_FIELD_NAMES) {
@@ -964,18 +1119,19 @@ class FirebaseSongsService(private val context: Context) {
             }
         }
 
-        if (title.isBlank() && videoId.isBlank()) return null
+        if (resolvedTitle.isBlank() && videoId.isBlank() && spotifyUrl.isBlank()) return null
 
         val song = Song(
             id = id,
-            title = title.ifBlank { "Untitled Track" },
+            title = resolvedTitle.ifBlank { "Untitled Track" },
             artist = artist,
             videoId = videoId,
             bannerUrl = bannerUrl,
             rank = explicitRank,
             isTopChart = isTopChart,
             timestamp = timestamp,
-            allowDownload = allowDownload
+            allowDownload = allowDownload,
+            spotifyUrl = spotifyUrl
         )
 
         return RawAdminSong(
@@ -985,6 +1141,372 @@ class FirebaseSongsService(private val context: Context) {
             snapshotOrder = snapshotOrder,
             updatedAt = updatedAt
         )
+    }
+
+    private fun isSnapshotPlaylistEntry(child: DataSnapshot): Boolean {
+        val type = child.child("type").getValue(String::class.java)
+            ?: child.child("itemType").getValue(String::class.java)
+            ?: ""
+        if (type.equals("playlist", ignoreCase = true)) return true
+        if (parseBooleanField(child.child("isPlaylist").value)) return true
+        val explicitPlUrl = listOf("playlistUrl", "youtubePlaylistUrl", "ytPlaylistUrl", "spotifyPlaylistUrl")
+            .any { !child.child(it).getValue(String::class.java).isNullOrBlank() }
+        if (explicitPlUrl) return true
+        val url = child.child("url").getValue(String::class.java)
+            ?: child.child("link").getValue(String::class.java)
+            ?: ""
+        val hasSingleYt = !child.child("videoId").getValue(String::class.java).isNullOrBlank() ||
+            !child.child("youtubeId").getValue(String::class.java).isNullOrBlank()
+        if (!hasSingleYt && url.isNotBlank()) {
+            if (url.contains("youtube.com/playlist", ignoreCase = true) ||
+                url.contains("music.youtube.com/playlist", ignoreCase = true) ||
+                url.contains("open.spotify.com/playlist/", ignoreCase = true) ||
+                url.contains("open.spotify.com/album/", ignoreCase = true)
+            ) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun isJsonObjectPlaylistEntry(obj: JSONObject): Boolean {
+        val type = obj.optString("type", obj.optString("itemType", ""))
+        if (type.equals("playlist", ignoreCase = true)) return true
+        if (parseBooleanField(obj.opt("isPlaylist"))) return true
+        if (obj.optString("playlistUrl").isNotBlank() ||
+            obj.optString("youtubePlaylistUrl").isNotBlank() ||
+            obj.optString("ytPlaylistUrl").isNotBlank() ||
+            obj.optString("spotifyPlaylistUrl").isNotBlank()
+        ) {
+            return true
+        }
+        val url = obj.optString("url", obj.optString("link", ""))
+        val hasSingleYt = obj.optString("videoId").isNotBlank() || obj.optString("youtubeId").isNotBlank()
+        if (!hasSingleYt && url.isNotBlank()) {
+            if (url.contains("youtube.com/playlist", ignoreCase = true) ||
+                url.contains("music.youtube.com/playlist", ignoreCase = true) ||
+                url.contains("open.spotify.com/playlist/", ignoreCase = true) ||
+                url.contains("open.spotify.com/album/", ignoreCase = true)
+            ) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun updatePlaylistSource(sourceKey: String, list: List<AdminChartPlaylist>) {
+        playlistSourcesMap[sourceKey] = list
+        val merged = playlistSourcesMap.values
+            .flatten()
+            .distinctBy { it.id }
+            .sortedWith(
+                compareBy<AdminChartPlaylist> { if (it.rank in 1 until Int.MAX_VALUE) it.rank else Int.MAX_VALUE }
+                    .thenByDescending { it.timestamp }
+            )
+        _topChartPlaylists.value = merged
+        enrichTopChartPlaylistsAsync(merged)
+    }
+
+    private fun enrichTopChartPlaylistsAsync(playlists: List<AdminChartPlaylist>) {
+        val needMeta = playlists.filter { pl ->
+            pl.playlistUrl.isNotBlank() &&
+                (pl.coverUrl.isBlank() || pl.title == "Top Chart Playlist" || pl.songs.isEmpty()) &&
+                (System.currentTimeMillis() - (playlistMetaAttempted[pl.id] ?: 0L)) > 300_000L
+        }
+        if (needMeta.isEmpty()) return
+        scope.launch {
+            var updatedAny = false
+            val enrichedMap = HashMap<String, AdminChartPlaylist>()
+            for (pl in needMeta.take(10)) {
+                playlistMetaAttempted[pl.id] = System.currentTimeMillis()
+                try {
+                    val ytListId = Song.extractYoutubePlaylistId(pl.playlistUrl)
+                    if (!ytListId.isNullOrBlank()) {
+                        val fetched = playlistExtractorHelper.fetchYoutubePlaylistDetails(pl.playlistUrl)
+                        if (fetched != null && fetched.songs.isNotEmpty()) {
+                            enrichedMap[pl.id] = pl.copy(
+                                title = if (pl.title.isBlank() || pl.title == "Top Chart Playlist") fetched.title else pl.title,
+                                coverUrl = pl.coverUrl.ifBlank { fetched.coverUrl },
+                                songs = if (pl.songs.isEmpty()) fetched.songs else pl.songs
+                            )
+                            updatedAny = true
+                        }
+                    } else if (Song.isSpotifyUrl(pl.playlistUrl)) {
+                        val sp = spotifyImportHelper.importFromSpotifyUrl(pl.playlistUrl).getOrNull()
+                        if (sp != null && sp.tracks.isNotEmpty()) {
+                            val spSongs = sp.tracks.mapIndexed { idx, t ->
+                                Song(
+                                    id = "sppl_${pl.id}_$idx",
+                                    title = t.title,
+                                    artist = t.artist,
+                                    videoId = t.videoId,
+                                    bannerUrl = t.coverUrl.ifBlank { sp.coverUrl },
+                                    rank = idx + 1,
+                                    timestamp = System.currentTimeMillis() - idx,
+                                    allowDownload = true,
+                                    spotifyUrl = if (t.spotifyTrackId.isNotBlank()) "https://open.spotify.com/track/${t.spotifyTrackId}" else ""
+                                )
+                            }
+                            enrichedMap[pl.id] = pl.copy(
+                                title = if (pl.title.isBlank() || pl.title == "Top Chart Playlist") sp.title else pl.title,
+                                coverUrl = pl.coverUrl.ifBlank { sp.coverUrl },
+                                songs = if (pl.songs.isEmpty()) spSongs else pl.songs
+                            )
+                            updatedAny = true
+                        }
+                    }
+                } catch (_: Exception) {
+                }
+            }
+            if (updatedAny) {
+                _topChartPlaylists.value = _topChartPlaylists.value.map { enrichedMap[it.id] ?: it }
+            }
+        }
+    }
+
+    private fun parsePlaylistsFromSongsSnapshot(snapshot: DataSnapshot): List<AdminChartPlaylist> {
+        val list = mutableListOf<AdminChartPlaylist>()
+        for (child in snapshot.children) {
+            if (!isSnapshotPlaylistEntry(child)) continue
+            parseSinglePlaylistSnapshot(child)?.let { list.add(it) }
+        }
+        return list
+    }
+
+    private fun parsePlaylistsFromSnapshot(snapshot: DataSnapshot): List<AdminChartPlaylist> {
+        val list = mutableListOf<AdminChartPlaylist>()
+        if (!snapshot.exists()) return list
+        for (child in snapshot.children) {
+            parseSinglePlaylistSnapshot(child)?.let { list.add(it) }
+        }
+        return list
+    }
+
+    private fun parseSinglePlaylistSnapshot(child: DataSnapshot): AdminChartPlaylist? {
+        return try {
+            val key = child.key ?: return null
+            val id = child.child("id").getValue(String::class.java)?.takeIf { it.isNotBlank() }
+                ?: child.child("playlistId").getValue(String::class.java)?.takeIf { it.isNotBlank() }
+                ?: key
+            val rawTitle = child.child("title").getValue(String::class.java)
+                ?: child.child("name").getValue(String::class.java)
+                ?: child.child("playlistName").getValue(String::class.java)
+                ?: child.child("playlistTitle").getValue(String::class.java)
+                ?: ""
+            val coverUrl = child.child("coverUrl").getValue(String::class.java)
+                ?: child.child("bannerUrl").getValue(String::class.java)
+                ?: child.child("thumbnail").getValue(String::class.java)
+                ?: child.child("image").getValue(String::class.java)
+                ?: child.child("cover").getValue(String::class.java)
+                ?: ""
+            val playlistUrl = listOf("playlistUrl", "youtubePlaylistUrl", "ytPlaylistUrl", "spotifyPlaylistUrl", "url", "link")
+                .mapNotNull { child.child(it).getValue(String::class.java)?.trim()?.takeIf { s -> s.isNotEmpty() } }
+                .firstOrNull().orEmpty()
+            val description = child.child("description").getValue(String::class.java)
+                ?: child.child("subtitle").getValue(String::class.java)
+                ?: ""
+            var rank = Int.MAX_VALUE
+            for (fieldName in RANK_FIELD_NAMES) {
+                val parsed = parseRankNumber(child.child(fieldName).value)
+                if (parsed in 1 until Int.MAX_VALUE) {
+                    rank = parsed
+                    break
+                }
+            }
+            val timestamp = (child.child("timestamp").value as? Number)?.toLong()
+                ?: (child.child("createdAt").value as? Number)?.toLong()
+                ?: 0L
+
+            val embeddedSongs = mutableListOf<Song>()
+            val songsChild = child.child("songs").takeIf { it.exists() }
+                ?: child.child("tracks").takeIf { it.exists() }
+                ?: child.child("items").takeIf { it.exists() }
+            if (songsChild != null) {
+                var idx = 0
+                for (songSnap in songsChild.children) {
+                    parseChildSnapshot(songSnap, idx)?.song?.let {
+                        embeddedSongs.add(it.copy(rank = idx + 1))
+                        idx++
+                    }
+                }
+            }
+
+            if (rawTitle.isBlank() && playlistUrl.isBlank() && embeddedSongs.isEmpty()) return null
+
+            val sourceType = when {
+                Song.extractYoutubePlaylistId(playlistUrl) != null -> "youtube"
+                Song.isSpotifyUrl(playlistUrl) -> "spotify"
+                else -> "custom"
+            }
+
+            AdminChartPlaylist(
+                id = id,
+                title = rawTitle.ifBlank { "Top Chart Playlist" },
+                coverUrl = coverUrl,
+                playlistUrl = playlistUrl,
+                sourceType = sourceType,
+                description = description,
+                rank = rank,
+                timestamp = timestamp,
+                songs = embeddedSongs
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun parsePlaylistsFromSongsJson(jsonStr: String): List<AdminChartPlaylist> {
+        val list = mutableListOf<AdminChartPlaylist>()
+        try {
+            if (jsonStr.startsWith("{")) {
+                val root = JSONObject(jsonStr)
+                val keys = root.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    val obj = root.optJSONObject(key) ?: continue
+                    if (!isJsonObjectPlaylistEntry(obj)) continue
+                    parsePlaylistJsonObject(key, obj)?.let { list.add(it) }
+                }
+            } else if (jsonStr.startsWith("[")) {
+                val arr = JSONArray(jsonStr)
+                for (i in 0 until arr.length()) {
+                    val obj = arr.optJSONObject(i) ?: continue
+                    if (!isJsonObjectPlaylistEntry(obj)) continue
+                    parsePlaylistJsonObject(i.toString(), obj)?.let { list.add(it) }
+                }
+            }
+        } catch (_: Exception) {
+        }
+        return list
+    }
+
+    fun parseTopChartPlaylistsJson(jsonStr: String): List<AdminChartPlaylist> {
+        val list = mutableListOf<AdminChartPlaylist>()
+        try {
+            if (jsonStr.startsWith("{")) {
+                val root = JSONObject(jsonStr)
+                val keys = root.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    val obj = root.optJSONObject(key) ?: continue
+                    parsePlaylistJsonObject(key, obj)?.let { list.add(it) }
+                }
+            } else if (jsonStr.startsWith("[")) {
+                val arr = JSONArray(jsonStr)
+                for (i in 0 until arr.length()) {
+                    val obj = arr.optJSONObject(i) ?: continue
+                    parsePlaylistJsonObject(i.toString(), obj)?.let { list.add(it) }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error parsing playlists JSON", e)
+        }
+        return list.sortedWith(
+            compareBy<AdminChartPlaylist> { if (it.rank in 1 until Int.MAX_VALUE) it.rank else Int.MAX_VALUE }
+                .thenByDescending { it.timestamp }
+        )
+    }
+
+    private fun parsePlaylistJsonObject(fallbackKey: String, obj: JSONObject): AdminChartPlaylist? {
+        val id = obj.optString("id").ifBlank { obj.optString("playlistId").ifBlank { fallbackKey } }
+        val title = obj.optString("title")
+            .ifBlank { obj.optString("name") }
+            .ifBlank { obj.optString("playlistName") }
+            .ifBlank { obj.optString("playlistTitle") }
+        val coverUrl = obj.optString("coverUrl")
+            .ifBlank { obj.optString("bannerUrl") }
+            .ifBlank { obj.optString("thumbnail") }
+            .ifBlank { obj.optString("image") }
+            .ifBlank { obj.optString("cover") }
+        val playlistUrl = listOf("playlistUrl", "youtubePlaylistUrl", "ytPlaylistUrl", "spotifyPlaylistUrl", "url", "link")
+            .mapNotNull { obj.optString(it, "").trim().takeIf { s -> s.isNotEmpty() } }
+            .firstOrNull().orEmpty()
+        val description = obj.optString("description").ifBlank { obj.optString("subtitle") }
+        var rank = Int.MAX_VALUE
+        for (fieldName in RANK_FIELD_NAMES) {
+            if (obj.has(fieldName)) {
+                val parsed = parseRankNumber(obj.opt(fieldName))
+                if (parsed in 1 until Int.MAX_VALUE) {
+                    rank = parsed
+                    break
+                }
+            }
+        }
+        val timestamp = obj.optLong("timestamp", obj.optLong("createdAt", 0L))
+
+        val embeddedSongs = mutableListOf<Song>()
+        val tracksArr = obj.optJSONArray("songs") ?: obj.optJSONArray("tracks") ?: obj.optJSONArray("items")
+        if (tracksArr != null) {
+            for (i in 0 until tracksArr.length()) {
+                val item = tracksArr.optJSONObject(i) ?: continue
+                parseJsonObject("${id}_$i", item, i)?.song?.let {
+                    embeddedSongs.add(it.copy(rank = i + 1))
+                }
+            }
+        } else {
+            val tracksObj = obj.optJSONObject("songs") ?: obj.optJSONObject("tracks") ?: obj.optJSONObject("items")
+            if (tracksObj != null) {
+                var idx = 0
+                val tKeys = tracksObj.keys()
+                while (tKeys.hasNext()) {
+                    val tk = tKeys.next()
+                    val item = tracksObj.optJSONObject(tk) ?: continue
+                    parseJsonObject("${id}_$tk", item, idx)?.song?.let {
+                        embeddedSongs.add(it.copy(rank = idx + 1))
+                        idx++
+                    }
+                }
+            }
+        }
+
+        if (title.isBlank() && playlistUrl.isBlank() && embeddedSongs.isEmpty()) return null
+
+        val sourceType = when {
+            Song.extractYoutubePlaylistId(playlistUrl) != null -> "youtube"
+            Song.isSpotifyUrl(playlistUrl) -> "spotify"
+            else -> "custom"
+        }
+
+        return AdminChartPlaylist(
+            id = id,
+            title = title.ifBlank { "Top Chart Playlist" },
+            coverUrl = coverUrl,
+            playlistUrl = playlistUrl,
+            sourceType = sourceType,
+            description = description,
+            rank = rank,
+            timestamp = timestamp,
+            songs = embeddedSongs
+        )
+    }
+
+    suspend fun fetchTopChartPlaylistsViaRest() = withContext(Dispatchers.IO) {
+        val nodes = listOf("topChartPlaylists", "topChartsPlaylists", "chartPlaylists", "playlists", "adminPlaylists")
+        for (nodeName in nodes) {
+            try {
+                val request = Request.Builder()
+                    .url("$DATABASE_URL/$nodeName.json")
+                    .get()
+                    .build()
+                httpClient.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) return@use
+                    val bodyStr = response.body?.string()?.trim().orEmpty()
+                    if (bodyStr.isEmpty() || bodyStr == "null") {
+                        updatePlaylistSource("rtdb_$nodeName", emptyList())
+                        return@use
+                    }
+                    val parsed = parseTopChartPlaylistsJson(bodyStr)
+                    updatePlaylistSource("rtdb_$nodeName", parsed)
+                    if (nodeName == "topChartPlaylists" && parsed.isNotEmpty()) {
+                        try {
+                            configCachePrefs.edit().putString("cached_top_chart_playlists_json", bodyStr).apply()
+                        } catch (_: Exception) {
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }
     }
 
     suspend fun uploadSongToFirebase(

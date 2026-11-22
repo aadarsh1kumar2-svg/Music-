@@ -12,7 +12,8 @@ data class Song(
     val isTopChart: Boolean = false,
     val timestamp: Long = 0L,
     val allowDownload: Boolean = false,
-    val localContentUri: String = ""
+    val localContentUri: String = "",
+    val spotifyUrl: String = ""
 ) {
     val resolvedLocalUri: String
         get() {
@@ -28,6 +29,9 @@ data class Song(
 
     val isLocalDeviceSong: Boolean
         get() = resolvedLocalUri.isNotBlank()
+
+    val isSpotifyTrack: Boolean
+        get() = spotifyUrl.isNotBlank()
 
     val resolvedBannerUrl: String
         get() = if (bannerUrl.isNotBlank()) {
@@ -62,6 +66,7 @@ data class Song(
             put("timestamp", timestamp)
             put("allowDownload", allowDownload)
             put("localContentUri", resolvedLocalUri)
+            put("spotifyUrl", spotifyUrl)
         }
     }
 
@@ -77,19 +82,46 @@ data class Song(
                 isTopChart = obj.optBoolean("isTopChart", false),
                 timestamp = obj.optLong("timestamp", 0L),
                 allowDownload = obj.optBoolean("allowDownload", false),
-                localContentUri = obj.optString("localContentUri", "")
+                localContentUri = obj.optString("localContentUri", ""),
+                spotifyUrl = obj.optString("spotifyUrl", "")
             )
+        }
+
+        fun isSpotifyUrl(input: String): Boolean {
+            val lower = input.trim().lowercase()
+            if (lower.isEmpty()) return false
+            return lower.contains("open.spotify.com/") ||
+                lower.contains("spotify.link/") ||
+                lower.startsWith("spotify:")
+        }
+
+        fun extractYoutubePlaylistId(input: String): String? {
+            val trimmed = input.trim()
+            if (trimmed.isEmpty() || isSpotifyUrl(trimmed)) return null
+            val listMatch = Regex("[?&]list=([a-zA-Z0-9_-]{10,})").find(trimmed)
+            if (listMatch != null && listMatch.groupValues.size > 1) {
+                return listMatch.groupValues[1]
+            }
+            if ((trimmed.startsWith("PL") || trimmed.startsWith("OLAK") || trimmed.startsWith("UU") || trimmed.startsWith("RD")) &&
+                trimmed.length >= 13 &&
+                !trimmed.contains(" ") &&
+                !trimmed.contains("/")
+            ) {
+                return trimmed
+            }
+            return null
         }
 
         fun extractYoutubeVideoId(input: String): String {
             val trimmed = input.trim()
             if (trimmed.isEmpty()) return ""
             if (trimmed.startsWith("content://", ignoreCase = true) ||
-                trimmed.startsWith("file://", ignoreCase = true)
+                trimmed.startsWith("file://", ignoreCase = true) ||
+                isSpotifyUrl(trimmed)
             ) {
                 return ""
             }
-            if (trimmed.length == 11 && !trimmed.contains("/") && !trimmed.contains("?")) {
+            if (trimmed.length == 11 && !trimmed.contains("/") && !trimmed.contains("?") && !trimmed.contains(".")) {
                 return trimmed
             }
             val patterns = listOf(
@@ -102,7 +134,29 @@ data class Song(
                     return match.groupValues[1]
                 }
             }
+            if (trimmed.startsWith("http://", ignoreCase = true) ||
+                trimmed.startsWith("https://", ignoreCase = true)
+            ) {
+                return ""
+            }
             return trimmed
         }
     }
+}
+
+data class AdminChartPlaylist(
+    val id: String = "",
+    val title: String = "",
+    val coverUrl: String = "",
+    val playlistUrl: String = "",
+    val sourceType: String = "",
+    val description: String = "",
+    val rank: Int = Int.MAX_VALUE,
+    val timestamp: Long = 0L,
+    val songs: List<Song> = emptyList()
+) {
+    val resolvedCoverUrl: String
+        get() = coverUrl.ifBlank {
+            songs.firstOrNull { it.highResBannerUrl.isNotBlank() }?.highResBannerUrl.orEmpty()
+        }
 }

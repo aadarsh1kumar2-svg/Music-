@@ -123,7 +123,6 @@ import com.example.screens.HomeScreen
 import com.example.screens.LibraryScreen
 import com.example.screens.NameOnboardingScreen
 import com.example.screens.NoInternetScreen
-import com.example.screens.PromoVideoAdOverlay
 import com.example.screens.SplashScreen
 import com.example.screens.SubscriptionPlansDialog
 import com.example.screens.TopChartsScreen
@@ -236,8 +235,7 @@ fun AKMusicAppRoot(
     val authErrorMessage by musicViewModel.authErrorMessage.collectAsStateWithLifecycle()
     val isEditNameDialogOpen by musicViewModel.isEditNameDialogOpen.collectAsStateWithLifecycle()
     val isSettingsPrivacyOpen by musicViewModel.isSettingsPrivacyOpen.collectAsStateWithLifecycle()
-    val isVideoAdPlaying by musicViewModel.isVideoAdPlaying.collectAsStateWithLifecycle()
-    val promoAdStream by musicViewModel.promoAdStream.collectAsStateWithLifecycle()
+    val isPromoAudioAdPlaying by musicViewModel.isPromoAudioAdPlaying.collectAsStateWithLifecycle()
     val hasAudioStoragePermission by musicViewModel.hasAudioStoragePermission.collectAsStateWithLifecycle()
     val deviceLocalSongs by musicViewModel.deviceLocalSongs.collectAsStateWithLifecycle()
 
@@ -267,6 +265,11 @@ fun AKMusicAppRoot(
     val allSongs by musicViewModel.allSongs.collectAsStateWithLifecycle()
     val exploreSongs by musicViewModel.exploreSongs.collectAsStateWithLifecycle()
     val chartSongs by musicViewModel.chartSongs.collectAsStateWithLifecycle()
+    val topChartPlaylists by musicViewModel.topChartPlaylists.collectAsStateWithLifecycle()
+    val selectedTopChartPlaylistId by musicViewModel.selectedTopChartPlaylistId.collectAsStateWithLifecycle()
+    val openedTopChartPlaylist by musicViewModel.openedTopChartPlaylist.collectAsStateWithLifecycle()
+    val openedTopChartPlaylistSongs by musicViewModel.openedTopChartPlaylistSongs.collectAsStateWithLifecycle()
+    val isLoadingTopChartPlaylist by musicViewModel.isLoadingTopChartPlaylist.collectAsStateWithLifecycle()
     val homeSearchQuery by musicViewModel.homeSearchQuery.collectAsStateWithLifecycle()
     val exploreSearchQuery by musicViewModel.exploreSearchQuery.collectAsStateWithLifecycle()
     val isSearchingOnline by musicViewModel.isSearchingOnline.collectAsStateWithLifecycle()
@@ -356,7 +359,12 @@ fun AKMusicAppRoot(
         }
     }
 
-    if (launchStage == LaunchStage.MAIN_APP && selectedTab != MainTab.HOME && !isFullScreenPlayerOpen && !isEditNameDialogOpen) {
+    if (launchStage == LaunchStage.MAIN_APP &&
+        selectedTab != MainTab.HOME &&
+        !isFullScreenPlayerOpen &&
+        !isEditNameDialogOpen &&
+        !(selectedTab == MainTab.TOP_CHARTS && openedTopChartPlaylist != null)
+    ) {
         BackHandler {
             musicViewModel.selectTab(MainTab.HOME)
         }
@@ -970,7 +978,8 @@ fun AKMusicAppRoot(
                                         onExpandPlayer = { musicViewModel.openFullScreenPlayer() },
                                         onToggleFavorite = { musicViewModel.toggleFavorite(activeSong) },
                                         onTogglePlayPause = { musicViewModel.togglePlayPause() },
-                                        onSkipNext = { musicViewModel.skipToNext() }
+                                        onSkipNext = { musicViewModel.skipToNext() },
+                                        isPromoAdPlaying = isPromoAudioAdPlaying
                                     )
                                 }
 
@@ -1032,7 +1041,14 @@ fun AKMusicAppRoot(
                                         },
                                         onRefreshCatalog = {
                                             musicViewModel.refreshFirebaseCatalog()
-                                        }
+                                        },
+                                        playlists = topChartPlaylists,
+                                        selectedPlaylistId = selectedTopChartPlaylistId,
+                                        openedPlaylist = openedTopChartPlaylist,
+                                        openedPlaylistSongs = openedTopChartPlaylistSongs,
+                                        isLoadingPlaylist = isLoadingTopChartPlaylist,
+                                        onPlaylistClick = { musicViewModel.onTopChartPlaylistClicked(it) },
+                                        onCloseOpenedPlaylist = { musicViewModel.closeOpenedTopChartPlaylist() }
                                     )
                                 }
                                 MainTab.EXPLORE -> {
@@ -1178,7 +1194,8 @@ fun AKMusicAppRoot(
                     onOpenSongOptions = { musicViewModel.openSongOptions(it) },
                     onSetUpNextOpen = { musicViewModel.setUpNextSheetOpen(it) },
                     onSetLyricsOpen = { musicViewModel.setLyricsOverlayOpen(it) },
-                    onSelectQueueSong = { musicViewModel.playSong(it, queue) }
+                    onSelectQueueSong = { musicViewModel.playSong(it, queue) },
+                    isPromoAdPlaying = isPromoAudioAdPlaying
                 )
             }
         }
@@ -1477,16 +1494,6 @@ fun AKMusicAppRoot(
                 },
                 onExitApp = {
                     (context as? Activity)?.finishAffinity()
-                }
-            )
-        }
-
-        // Free-user YouTube Video Ad Overlay (shown after every 3 songs; never shown to VIP Premium users)
-        if (isVideoAdPlaying && !subscriptionState.isActive() && launchStage == LaunchStage.MAIN_APP) {
-            PromoVideoAdOverlay(
-                resolvedStream = promoAdStream,
-                onAdCompleted = {
-                    musicViewModel.onVideoAdCompleted()
                 }
             )
         }

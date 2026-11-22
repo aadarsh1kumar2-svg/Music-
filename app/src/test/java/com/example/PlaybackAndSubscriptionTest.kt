@@ -7,6 +7,7 @@ import android.content.Intent
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelStore
 import androidx.test.core.app.ApplicationProvider
+import com.example.models.AdminChartPlaylist
 import com.example.models.Song
 import com.example.models.SubscriptionPlanType
 import com.example.models.UserSubscriptionState
@@ -456,7 +457,7 @@ class PlaybackAndSubscriptionTest {
     }
 
     @Test
-    fun freeUser_triggersYoutubeAdAfter3Songs_pausesMusic_andAutoPlaysNextOnCompletion() {
+    fun freeUser_triggersAudioOnlyAdAfter2Songs_andAutoPlaysNextOnAdEnd() {
         val prefs = app.getSharedPreferences("ak_music_user_prefs", Context.MODE_PRIVATE)
         prefs.edit()
             .putString("user_name", "FreeAdUser")
@@ -464,6 +465,7 @@ class PlaybackAndSubscriptionTest {
             .commit()
 
         assertEquals("fWvlsYrWIs4", AadifySecurityVault.getPromoAdVideoId())
+        assertEquals(2, MusicViewModel.FREE_SONGS_PER_AD)
 
         val vm = createVm("free_ad_cycle")
         assertFalse(vm.isVerifiedVipActive())
@@ -472,44 +474,55 @@ class PlaybackAndSubscriptionTest {
         val s2 = Song(id = "ad_s2", title = "Track 2", artist = "Artist 2", videoId = "9bZkp7q19f0")
         val s3 = Song(id = "ad_s3", title = "Track 3", artist = "Artist 3", videoId = "kJQP7kiw5Fk")
         val s4 = Song(id = "ad_s4", title = "Track 4", artist = "Artist 4", videoId = "RgKAFK5djSk")
-        val queue = listOf(s1, s2, s3, s4)
+        val s5 = Song(id = "ad_s5", title = "Track 5", artist = "Artist 5", videoId = "fJ9rUzIMcZQ")
+        val queue = listOf(s1, s2, s3, s4, s5)
 
-        // Song 1, 2, 3 play without Ad
+        // Song 1 & Song 2 play normally without Ad
         vm.playSong(s1, queue)
         ShadowLooper.idleMainLooper(200, TimeUnit.MILLISECONDS)
-        assertFalse(vm.isVideoAdPlaying.value)
+        assertFalse(vm.isPromoAudioAdPlaying.value)
         assertEquals(s1.id, vm.currentSong.value?.id)
 
         vm.playSong(s2, queue)
         ShadowLooper.idleMainLooper(200, TimeUnit.MILLISECONDS)
-        assertFalse(vm.isVideoAdPlaying.value)
+        assertFalse(vm.isPromoAudioAdPlaying.value)
         assertEquals(s2.id, vm.currentSong.value?.id)
 
+        // Clicking Song 3 after 2 songs pushes the Audio-Only Ad through the music player
         vm.playSong(s3, queue)
         ShadowLooper.idleMainLooper(200, TimeUnit.MILLISECONDS)
-        assertFalse(vm.isVideoAdPlaying.value)
-        assertEquals(s3.id, vm.currentSong.value?.id)
+        assertTrue(vm.isPromoAudioAdPlaying.value)
+        assertEquals(MusicViewModel.PROMO_AUDIO_AD_SONG_ID, vm.currentSong.value?.id)
+        assertEquals("fWvlsYrWIs4", vm.currentSong.value?.cleanVideoId)
+        assertTrue(vm.isPlaying.value)
 
-        // Transitioning after 3rd song triggers the Ad and pauses music playback
+        // Skip next is blocked while Audio Ad is active
+        vm.skipToNext()
+        ShadowLooper.idleMainLooper(100, TimeUnit.MILLISECONDS)
+        assertTrue(vm.isPromoAudioAdPlaying.value)
+        assertEquals(MusicViewModel.PROMO_AUDIO_AD_SONG_ID, vm.currentSong.value?.id)
+
+        // When Audio Ad finishes (track ends), next song (s3) plays automatically
+        vm.handleTrackEnded()
+        ShadowLooper.idleMainLooper(200, TimeUnit.MILLISECONDS)
+        assertFalse(vm.isPromoAudioAdPlaying.value)
+        assertEquals(s3.id, vm.currentSong.value?.id)
+        assertTrue(vm.isPlaying.value)
+
+        // Next song (s4 = 2nd song since ad) plays without ad, then s5 triggers ad again
         vm.playSong(s4, queue)
         ShadowLooper.idleMainLooper(200, TimeUnit.MILLISECONDS)
-        assertTrue(vm.isVideoAdPlaying.value)
-        assertFalse(vm.isPlaying.value)
-
-        // Cannot resume song playback while Ad is active
-        vm.togglePlayPause()
-        assertFalse(vm.isPlaying.value)
-
-        // When Ad finishes, Ad closes and next song (s4) plays automatically
-        vm.onVideoAdCompleted()
-        ShadowLooper.idleMainLooper(200, TimeUnit.MILLISECONDS)
-        assertFalse(vm.isVideoAdPlaying.value)
+        assertFalse(vm.isPromoAudioAdPlaying.value)
         assertEquals(s4.id, vm.currentSong.value?.id)
-        assertTrue(vm.isPlaying.value)
+
+        vm.playSong(s5, queue)
+        ShadowLooper.idleMainLooper(200, TimeUnit.MILLISECONDS)
+        assertTrue(vm.isPromoAudioAdPlaying.value)
+        assertEquals(MusicViewModel.PROMO_AUDIO_AD_SONG_ID, vm.currentSong.value?.id)
     }
 
     @Test
-    fun vipUser_neverSeesAdsAfter3OrMoreSongs() {
+    fun vipUser_neverHearsAdsAfter2OrMoreSongs() {
         seedVipUser(userName = "VipNoAdUser", planType = SubscriptionPlanType.MONTHLY)
         val vm = createVm("vip_no_ad")
         assertTrue(vm.isVerifiedVipActive())
@@ -524,10 +537,80 @@ class PlaybackAndSubscriptionTest {
         for (song in queue) {
             vm.playSong(song, queue)
             ShadowLooper.idleMainLooper(200, TimeUnit.MILLISECONDS)
-            assertFalse(vm.isVideoAdPlaying.value)
+            assertFalse(vm.isPromoAudioAdPlaying.value)
             assertEquals(song.id, vm.currentSong.value?.id)
             assertTrue(vm.isPlaying.value)
         }
+    }
+
+    @Test
+    fun adminCatalog_parsesSpotifySongsAndTopChartPlaylists_andOpensPlaylistOnSecondClick() {
+        val firebaseService = FirebaseSongsService(app)
+        val songsJson = """
+            {
+              "sp1": {
+                "title": "Blinding Lights",
+                "artist": "The Weeknd",
+                "spotifyLink": "https://open.spotify.com/track/0VjIjW4GlUZAMYd2vXMi3b",
+                "rank": 1
+              },
+              "yt1": {
+                "title": "Kesariya",
+                "artist": "Arijit Singh",
+                "videoId": "https://youtu.be/BddP6PYo2gs",
+                "spotifyUrl": "https://open.spotify.com/track/6VBhH7CyP56BXjp8VsDFPZ",
+                "rank": 2
+              }
+            }
+        """.trimIndent()
+
+        val parsedSongs = firebaseService.parseSongsJson(songsJson)
+        assertEquals(2, parsedSongs.size)
+        val spSong = parsedSongs.first { it.id == "sp1" }
+        assertTrue(spSong.isSpotifyTrack)
+        assertEquals("https://open.spotify.com/track/0VjIjW4GlUZAMYd2vXMi3b", spSong.spotifyUrl)
+        assertEquals("", spSong.cleanVideoId)
+
+        val ytSpSong = parsedSongs.first { it.id == "yt1" }
+        assertEquals("BddP6PYo2gs", ytSpSong.cleanVideoId)
+        assertTrue(ytSpSong.isSpotifyTrack)
+
+        val playlistsJson = """
+            {
+              "pl_top_1": {
+                "title": "Bollywood Top Hits",
+                "playlistUrl": "https://www.youtube.com/playlist?list=PLFgquLnL59alCl_2TQvOiD5Vgm1hCaGSI",
+                "rank": 1,
+                "songs": [
+                  {
+                    "id": "p_s1",
+                    "title": "Playlist Song 1",
+                    "artist": "Singer 1",
+                    "videoId": "dQw4w9WgXcQ"
+                  }
+                ]
+              }
+            }
+        """.trimIndent()
+        val parsedPlaylists = firebaseService.parseTopChartPlaylistsJson(playlistsJson)
+        assertEquals(1, parsedPlaylists.size)
+        val pl: AdminChartPlaylist = parsedPlaylists.first()
+        assertEquals("Bollywood Top Hits", pl.title)
+        assertEquals("youtube", pl.sourceType)
+        assertEquals(1, pl.songs.size)
+
+        // Verify 2-tap open behavior in MusicViewModel
+        val vm = createVm("top_chart_pl_tap")
+        vm.onTopChartPlaylistClicked(pl)
+        assertEquals(pl.id, vm.selectedTopChartPlaylistId.value)
+        assertNull(vm.openedTopChartPlaylist.value)
+
+        vm.onTopChartPlaylistClicked(pl)
+        assertEquals(pl.id, vm.openedTopChartPlaylist.value?.id)
+        assertEquals(1, vm.openedTopChartPlaylistSongs.value.size)
+
+        vm.closeOpenedTopChartPlaylist()
+        assertNull(vm.openedTopChartPlaylist.value)
     }
 
     @Test

@@ -44,6 +44,13 @@ data class ResolvedAudioStream(
     val cookie: String = ""
 )
 
+data class FetchedYoutubePlaylist(
+    val playlistId: String,
+    val title: String,
+    val coverUrl: String,
+    val songs: List<Song>
+)
+
 class AudioStreamExtractor {
 
     companion object {
@@ -203,6 +210,7 @@ class AudioStreamExtractor {
     private val streamCache = ConcurrentHashMap<String, Pair<Long, ResolvedAudioStream>>()
     private val inFlightExtractions = ConcurrentHashMap<String, CompletableDeferred<ResolvedAudioStream?>>()
     private val searchCache = ConcurrentHashMap<String, List<Song>>()
+    private val playlistCache = ConcurrentHashMap<String, Pair<Long, FetchedYoutubePlaylist>>()
     private val cacheTtlMs = 20 * 60 * 1000L
 
     fun invalidateCachedStream(rawVideoId: String) {
@@ -2047,4 +2055,322 @@ class AudioStreamExtractor {
         val playerParams: String? = null,
         val thirdPartyEmbedUrl: String? = null
     )
+
+    suspend fun fetchYoutubePlaylistDetails(
+        playlistUrlOrId: String,
+        forceRefresh: Boolean = false
+    ): FetchedYoutubePlaylist? = withContext(Dispatchers.IO) {
+        val listId = Song.extractYoutubePlaylistId(playlistUrlOrId)?.takeIf { it.isNotBlank() }
+            ?: return@withContext null
+
+        if (!forceRefresh) {
+            val cached = playlistCache[listId]
+            if (cached != null && (System.currentTimeMillis() - cached.first) < cacheTtlMs) {
+                return@withContext cached.second
+            }
+        }
+
+        val fetched = fetchYoutubePlaylistFromWebPage(listId)
+            ?: fetchYoutubePlaylistFromInnerTubeBrowse(listId)
+            ?: fetchYoutubePlaylistFromPiped(listId)
+            ?: fetchYoutubePlaylistFromInvidious(listId)
+
+        if (fetched != null && fetched.songs.isNotEmpty()) {
+            playlistCache[listId] = System.currentTimeMillis() to fetched
+        }
+        fetched
+    }
+
+    private fun fetchYoutubePlaylistFromWebPage(listId: String): FetchedYoutubePlaylist? {
+        return try {
+            val url = "https://www.youtube.com/playlist?list=$listId&hl=en&gl=IN"
+            val req = Request.Builder()
+                .url(url)
+                .header(
+                    "User-Agent",
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                )
+                .header("Accept-Language", "en-US,en;q=0.9")
+                .get()
+                .build()
+            downloadHttpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return null
+                val html = resp.body?.string().orEmpty()
+                if (html.isBlank()) return null
+
+                val markers = listOf("var ytInitialData = ", "window[\"ytInitialData\"] = ")
+                var jsonStr: String? = null
+                for (marker in markers) {
+                    val idx = html.indexOf(marker)
+                    if (idx >= 0) {
+                        val sub = html.substring(idx + marker.length)
+                        val end = sub.indexOf(";</script>")
+                        val raw = if (end > 0) sub.substring(0, end) else sub.substringBefore(";\n")
+                        val trimmed = raw.trim().trimEnd(';')
+                        if (trimmed.startsWith("{")) {
+                            jsonStr = trimmed
+                            break
+                        }
+                    }
+                }
+                if (jsonStr.isNullOrBlank()) return null
+                parseYoutubePlaylistInitialDataJson(listId, JSONObject(jsonStr))
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Web playlist parse failed for $listId: ${e.message}")
+            null
+        }
+    }
+
+    private fun fetchYoutubePlaylistFromInnerTubeBrowse(listId: String): FetchedYoutubePlaylist? {
+        return try {
+            val payload = JSONObject().apply {
+                put("browseId", if (listId.startsWith("VL")) listId else "VL$listId")
+                put(
+                    "context",
+                    JSONObject().put(
+                        "client",
+                        JSONObject().apply {
+                            put("clientName", "WEB")
+                            put("clientVersion", "2.20240530.01.00")
+                            put("hl", "en")
+                            put("gl", "IN")
+                        }
+                    )
+                )
+            }
+            val req = Request.Builder()
+                .url("https://www.youtube.com/youtubei/v1/browse")
+                .header(
+                    "User-Agent",
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                )
+                .header("Content-Type", "application/json")
+                .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+                .build()
+            downloadHttpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return null
+                val body = resp.body?.string().orEmpty()
+                if (!body.trimStart().startsWith("{")) return null
+                parseYoutubePlaylistInitialDataJson(listId, JSONObject(body))
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "InnerTube browse playlist failed for $listId: ${e.message}")
+            null
+        }
+    }
+
+    private fun parseYoutubePlaylistInitialDataJson(
+        listId: String,
+        root: JSONObject
+    ): FetchedYoutubePlaylist? {
+        var playlistTitle = ""
+        var playlistCover = ""
+        val songs = mutableListOf<Song>()
+        val seenVideoIds = HashSet<String>()
+
+        fun extractRunsOrSimpleText(obj: JSONObject?): String {
+            if (obj == null) return ""
+            val simple = obj.optString("simpleText", "").trim()
+            if (simple.isNotBlank()) return simple
+            val runs = obj.optJSONArray("runs") ?: return ""
+            return buildString {
+                for (i in 0 until runs.length()) {
+                    append(runs.optJSONObject(i)?.optString("text", "").orEmpty())
+                }
+            }.trim()
+        }
+
+        fun extractBestThumb(thumbObj: JSONObject?): String {
+            val arr = thumbObj?.optJSONArray("thumbnails") ?: return ""
+            var best = ""
+            var bestW = -1
+            for (i in 0 until arr.length()) {
+                val item = arr.optJSONObject(i) ?: continue
+                val url = item.optString("url", "").trim()
+                val w = item.optInt("width", 0)
+                if (url.startsWith("http") && w >= bestW) {
+                    best = url
+                    bestW = w
+                }
+            }
+            return best
+        }
+
+        fun walk(node: Any?) {
+            when (node) {
+                is JSONObject -> {
+                    if (playlistTitle.isBlank() && node.has("playlistHeaderRenderer")) {
+                        val hdr = node.optJSONObject("playlistHeaderRenderer")
+                        playlistTitle = extractRunsOrSimpleText(hdr?.optJSONObject("title"))
+                        val hero = hdr?.optJSONObject("playlistHeaderBanner")
+                            ?.optJSONObject("heroPlaylistThumbnailRenderer")
+                            ?.optJSONObject("thumbnail")
+                        val thumb = extractBestThumb(hero)
+                        if (thumb.isNotBlank()) playlistCover = thumb
+                    }
+                    if (playlistTitle.isBlank() && node.has("microformatDataRenderer")) {
+                        val mf = node.optJSONObject("microformatDataRenderer")
+                        playlistTitle = mf?.optString("title", "")?.trim().orEmpty()
+                        if (playlistCover.isBlank()) {
+                            playlistCover = extractBestThumb(mf?.optJSONObject("thumbnail"))
+                        }
+                    }
+
+                    val renderer = node.optJSONObject("playlistVideoRenderer")
+                        ?: node.optJSONObject("playlistPanelVideoRenderer")
+                    if (renderer != null) {
+                        val vid = Song.extractYoutubeVideoId(renderer.optString("videoId", ""))
+                        if (vid.length == 11 && seenVideoIds.add(vid)) {
+                            val title = extractRunsOrSimpleText(renderer.optJSONObject("title"))
+                                .ifBlank { "Track ${songs.size + 1}" }
+                            val rawArtist = extractRunsOrSimpleText(
+                                renderer.optJSONObject("shortBylineText")
+                                    ?: renderer.optJSONObject("longBylineText")
+                            ).replace(Regex("\\s*-\\s*Topic$", RegexOption.IGNORE_CASE), "").trim()
+                            val thumb = extractBestThumb(renderer.optJSONObject("thumbnail"))
+                                .ifBlank { "https://i.ytimg.com/vi/$vid/hqdefault.jpg" }
+                            if (playlistCover.isBlank()) playlistCover = thumb
+                            songs.add(
+                                Song(
+                                    id = "ytpl_${listId}_$vid",
+                                    title = title,
+                                    artist = rawArtist.ifBlank { "YouTube" },
+                                    videoId = vid,
+                                    bannerUrl = thumb,
+                                    rank = songs.size + 1,
+                                    timestamp = System.currentTimeMillis() - songs.size,
+                                    allowDownload = true
+                                )
+                            )
+                        }
+                    }
+
+                    val keys = node.keys()
+                    while (keys.hasNext()) {
+                        walk(node.opt(keys.next()))
+                    }
+                }
+                is JSONArray -> {
+                    for (i in 0 until node.length()) {
+                        walk(node.opt(i))
+                    }
+                }
+            }
+        }
+
+        walk(root)
+        if (songs.isEmpty()) return null
+        return FetchedYoutubePlaylist(
+            playlistId = listId,
+            title = playlistTitle.ifBlank { "Top Chart Playlist" },
+            coverUrl = playlistCover.ifBlank { songs.firstOrNull()?.highResBannerUrl.orEmpty() },
+            songs = songs
+        )
+    }
+
+    private fun fetchYoutubePlaylistFromPiped(listId: String): FetchedYoutubePlaylist? {
+        for (mirror in PIPED_MIRRORS) {
+            try {
+                val req = Request.Builder()
+                    .url("$mirror/playlists/$listId")
+                    .header("User-Agent", EXOPLAYER_USER_AGENT)
+                    .get()
+                    .build()
+                httpClient.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) return@use
+                    val body = resp.body?.string().orEmpty()
+                    if (!body.trimStart().startsWith("{")) return@use
+                    val root = JSONObject(body)
+                    val title = root.optString("name", "").trim()
+                    val cover = root.optString("thumbnailUrl", "").trim()
+                    val streams = root.optJSONArray("relatedStreams") ?: return@use
+                    val songs = mutableListOf<Song>()
+                    for (i in 0 until streams.length()) {
+                        val obj = streams.optJSONObject(i) ?: continue
+                        val vid = Song.extractYoutubeVideoId(obj.optString("url", ""))
+                        if (vid.length != 11) continue
+                        val t = obj.optString("title", "").trim().ifBlank { "Track ${songs.size + 1}" }
+                        val a = obj.optString("uploaderName", "").trim().ifBlank { "YouTube" }
+                        val thumb = obj.optString("thumbnail", "").trim()
+                            .ifBlank { "https://i.ytimg.com/vi/$vid/hqdefault.jpg" }
+                        songs.add(
+                            Song(
+                                id = "ytpl_${listId}_$vid",
+                                title = t,
+                                artist = a,
+                                videoId = vid,
+                                bannerUrl = thumb,
+                                rank = songs.size + 1,
+                                timestamp = System.currentTimeMillis() - songs.size,
+                                allowDownload = true
+                            )
+                        )
+                    }
+                    if (songs.isNotEmpty()) {
+                        return FetchedYoutubePlaylist(
+                            playlistId = listId,
+                            title = title.ifBlank { "Top Chart Playlist" },
+                            coverUrl = cover.ifBlank { songs.first().highResBannerUrl },
+                            songs = songs
+                        )
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }
+        return null
+    }
+
+    private fun fetchYoutubePlaylistFromInvidious(listId: String): FetchedYoutubePlaylist? {
+        for (mirror in INVIDIOUS_MIRRORS) {
+            try {
+                val req = Request.Builder()
+                    .url("$mirror/api/v1/playlists/$listId")
+                    .header("User-Agent", EXOPLAYER_USER_AGENT)
+                    .get()
+                    .build()
+                httpClient.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) return@use
+                    val body = resp.body?.string().orEmpty()
+                    if (!body.trimStart().startsWith("{")) return@use
+                    val root = JSONObject(body)
+                    val title = root.optString("title", "").trim()
+                    val cover = root.optString("playlistThumbnail", "").trim()
+                    val videos = root.optJSONArray("videos") ?: return@use
+                    val songs = mutableListOf<Song>()
+                    for (i in 0 until videos.length()) {
+                        val obj = videos.optJSONObject(i) ?: continue
+                        val vid = Song.extractYoutubeVideoId(obj.optString("videoId", ""))
+                        if (vid.length != 11) continue
+                        val t = obj.optString("title", "").trim().ifBlank { "Track ${songs.size + 1}" }
+                        val a = obj.optString("author", "").trim().ifBlank { "YouTube" }
+                        val thumb = "https://i.ytimg.com/vi/$vid/hqdefault.jpg"
+                        songs.add(
+                            Song(
+                                id = "ytpl_${listId}_$vid",
+                                title = t,
+                                artist = a,
+                                videoId = vid,
+                                bannerUrl = thumb,
+                                rank = songs.size + 1,
+                                timestamp = System.currentTimeMillis() - songs.size,
+                                allowDownload = true
+                            )
+                        )
+                    }
+                    if (songs.isNotEmpty()) {
+                        return FetchedYoutubePlaylist(
+                            playlistId = listId,
+                            title = title.ifBlank { "Top Chart Playlist" },
+                            coverUrl = cover.ifBlank { songs.first().highResBannerUrl },
+                            songs = songs
+                        )
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }
+        return null
+    }
 }

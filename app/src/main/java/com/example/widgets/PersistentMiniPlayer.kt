@@ -57,7 +57,8 @@ fun PersistentMiniPlayer(
     onToggleFavorite: () -> Unit,
     onTogglePlayPause: () -> Unit,
     onSkipNext: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    isPromoAdPlaying: Boolean = false
 ) {
     val progress = if (durationMs > 0L) {
         (currentPositionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
@@ -95,7 +96,7 @@ fun PersistentMiniPlayer(
 
                 Spacer(modifier = Modifier.width(12.dp))
 
-                // Auto-scrolling song title and muted gray artist
+                // Auto-scrolling song title and muted gray artist / Ad subtitle
                 Column(
                     modifier = Modifier.weight(1f),
                     verticalArrangement = Arrangement.Center
@@ -112,19 +113,21 @@ fun PersistentMiniPlayer(
                     )
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
-                        text = song.artist,
+                        text = if (isPromoAdPlaying) "Ad • Next song up after ad" else song.artist,
                         style = MaterialTheme.typography.bodyMedium.copy(
-                            color = MutedGray,
-                            fontSize = 14.sp
+                            color = if (isPromoAdPlaying) SpotifyVibrantGreen else MutedGray,
+                            fontSize = if (isPromoAdPlaying) 12.5.sp else 14.sp,
+                            fontWeight = if (isPromoAdPlaying) FontWeight.SemiBold else FontWeight.Normal
                         ),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                 }
 
-                // Heart / Like button
+                // Heart / Like button (disabled during audio ad)
                 IconButton(
                     onClick = onToggleFavorite,
+                    enabled = !isPromoAdPlaying,
                     modifier = Modifier
                         .size(48.dp)
                         .testTag("mini_player_favorite_button")
@@ -132,7 +135,11 @@ fun PersistentMiniPlayer(
                     Icon(
                         imageVector = if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
                         contentDescription = "Favorite",
-                        tint = if (isFavorite) SpotifyVibrantGreen else PrimaryWhite,
+                        tint = when {
+                            isPromoAdPlaying -> MutedGray.copy(alpha = 0.35f)
+                            isFavorite -> SpotifyVibrantGreen
+                            else -> PrimaryWhite
+                        },
                         modifier = Modifier.size(26.dp)
                     )
                 }
@@ -162,9 +169,10 @@ fun PersistentMiniPlayer(
                     }
                 }
 
-                // Skip Next button
+                // Skip Next button (locked during sponsored audio ad)
                 IconButton(
                     onClick = onSkipNext,
+                    enabled = !isPromoAdPlaying,
                     modifier = Modifier
                         .size(48.dp)
                         .testTag("mini_player_next_button")
@@ -172,7 +180,7 @@ fun PersistentMiniPlayer(
                     Icon(
                         imageVector = Icons.Default.SkipNext,
                         contentDescription = "Next Track",
-                        tint = PrimaryWhite,
+                        tint = if (isPromoAdPlaying) MutedGray.copy(alpha = 0.35f) else PrimaryWhite,
                         modifier = Modifier.size(28.dp)
                     )
                 }

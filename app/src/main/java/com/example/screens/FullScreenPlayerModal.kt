@@ -142,7 +142,8 @@ fun FullScreenPlayerModal(
     onSetUpNextOpen: (Boolean) -> Unit,
     onSetLyricsOpen: (Boolean) -> Unit,
     onSelectQueueSong: (Song) -> Unit,
-    onAttachBackstagePlayer: (ViewGroup) -> Unit = {}
+    onAttachBackstagePlayer: (ViewGroup) -> Unit = {},
+    isPromoAdPlaying: Boolean = false
 ) {
     BackHandler {
         if (isLyricsOpen) {
@@ -235,35 +236,37 @@ fun FullScreenPlayerModal(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    IconButton(
-                        onClick = { onSetLyricsOpen(!isLyricsOpen) },
-                        modifier = Modifier
-                            .size(48.dp)
-                            .testTag("full_player_lyrics_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Lyrics,
-                            contentDescription = "Lyrics",
-                            tint = if (isLyricsOpen) SpotifyVibrantGreen else PrimaryWhite,
-                            modifier = Modifier.size(24.dp)
-                        )
-                    }
+                    if (!isPromoAdPlaying) {
+                        IconButton(
+                            onClick = { onSetLyricsOpen(!isLyricsOpen) },
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("full_player_lyrics_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Lyrics,
+                                contentDescription = "Lyrics",
+                                tint = if (isLyricsOpen) SpotifyVibrantGreen else PrimaryWhite,
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
 
-                    // Top-Right 3-Lines Menu Button (opens bottom sheet with Add to Playlist & options)
-                    IconButton(
-                        onClick = { onOpenSongOptions(song) },
-                        modifier = Modifier
-                            .size(48.dp)
-                            .clip(CircleShape)
-                            .background(SurfaceDarkCard.copy(alpha = 0.75f))
-                            .testTag("full_player_more_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Menu,
-                            contentDescription = "Player Menu (Add to Playlist)",
-                            tint = PrimaryWhite,
-                            modifier = Modifier.size(26.dp)
-                        )
+                        // Top-Right 3-Lines Menu Button (opens bottom sheet with Add to Playlist & options)
+                        IconButton(
+                            onClick = { onOpenSongOptions(song) },
+                            modifier = Modifier
+                                .size(48.dp)
+                                .clip(CircleShape)
+                                .background(SurfaceDarkCard.copy(alpha = 0.75f))
+                                .testTag("full_player_more_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Menu,
+                                contentDescription = "Player Menu (Add to Playlist)",
+                                tint = PrimaryWhite,
+                                modifier = Modifier.size(26.dp)
+                            )
+                        }
                     }
                 }
             }
@@ -359,74 +362,96 @@ fun FullScreenPlayerModal(
                 Spacer(modifier = Modifier.height(12.dp))
             }
 
-            // Lyrics Pill Button (left) + 1.0x Speed Toggle Chip (right) above the seekbar
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            // Lyrics Pill Button (left) + 1.0x Speed Toggle Chip (right) above the seekbar (or Sponsored Ad Pill during ad)
+            if (isPromoAdPlaying) {
                 Surface(
-                    color = if (isLyricsOpen) SpotifyDarkGreenPill else SurfaceDarkCard,
-                    shape = RoundedCornerShape(20.dp),
+                    color = SpotifyDarkGreenPill,
+                    shape = RoundedCornerShape(50),
                     modifier = Modifier
-                        .clip(RoundedCornerShape(20.dp))
-                        .border(
-                            width = 1.dp,
-                            color = if (isLyricsOpen) SpotifyVibrantGreen else DividerDark,
-                            shape = RoundedCornerShape(20.dp)
-                        )
-                        .clickable { onSetLyricsOpen(!isLyricsOpen) }
-                        .testTag("full_player_lyrics_pill_button")
+                        .border(1.dp, SpotifyGreenBorder, RoundedCornerShape(50))
+                        .padding(vertical = 2.dp)
+                        .testTag("full_player_ad_pill")
                 ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Lyrics,
-                            contentDescription = "Lyrics",
-                            tint = if (isLyricsOpen) SpotifyVibrantGreen else PrimaryWhite,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = "Lyrics",
-                            style = MaterialTheme.typography.labelLarge.copy(
-                                color = if (isLyricsOpen) SpotifyVibrantGreen else PrimaryWhite,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 13.5.sp
-                            )
-                        )
-                    }
+                    Text(
+                        text = "SPONSORED AUDIO AD • NEXT SONG STARTS AFTER AD",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            color = SpotifyVibrantGreen,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 0.6.sp,
+                            fontSize = 11.sp
+                        ),
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
+                    )
                 }
-
-                Surface(
-                    color = SurfaceDarkCard,
-                    shape = RoundedCornerShape(20.dp),
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(20.dp))
-                        .clickable(onClick = onCycleSpeed)
-                        .testTag("full_player_speed_chip")
+            } else {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Speed,
-                            contentDescription = "Playback Speed",
-                            tint = MutedGray,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = "${playbackSpeed}x",
-                            style = MaterialTheme.typography.labelLarge.copy(
-                                color = MutedGray,
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 14.sp
+                    Surface(
+                        color = if (isLyricsOpen) SpotifyDarkGreenPill else SurfaceDarkCard,
+                        shape = RoundedCornerShape(20.dp),
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(20.dp))
+                            .border(
+                                width = 1.dp,
+                                color = if (isLyricsOpen) SpotifyVibrantGreen else DividerDark,
+                                shape = RoundedCornerShape(20.dp)
                             )
-                        )
+                            .clickable { onSetLyricsOpen(!isLyricsOpen) }
+                            .testTag("full_player_lyrics_pill_button")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Lyrics,
+                                contentDescription = "Lyrics",
+                                tint = if (isLyricsOpen) SpotifyVibrantGreen else PrimaryWhite,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Lyrics",
+                                style = MaterialTheme.typography.labelLarge.copy(
+                                    color = if (isLyricsOpen) SpotifyVibrantGreen else PrimaryWhite,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 13.5.sp
+                                )
+                            )
+                        }
+                    }
+
+                    Surface(
+                        color = SurfaceDarkCard,
+                        shape = RoundedCornerShape(20.dp),
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(20.dp))
+                            .clickable(onClick = onCycleSpeed)
+                            .testTag("full_player_speed_chip")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Speed,
+                                contentDescription = "Playback Speed",
+                                tint = MutedGray,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "${playbackSpeed}x",
+                                style = MaterialTheme.typography.labelLarge.copy(
+                                    color = MutedGray,
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 14.sp
+                                )
+                            )
+                        }
                     }
                 }
             }
@@ -434,20 +459,28 @@ fun FullScreenPlayerModal(
             // Custom Draggable Green Slider with Elapsed Time (left) and Total Duration (right)
             Slider(
                 value = currentSliderFraction,
+                enabled = !isPromoAdPlaying,
                 onValueChange = { fraction ->
-                    isDraggingSlider = true
-                    sliderDragPosition = fraction
+                    if (!isPromoAdPlaying) {
+                        isDraggingSlider = true
+                        sliderDragPosition = fraction
+                    }
                 },
                 onValueChangeFinished = {
-                    isDraggingSlider = false
-                    if (durationMs > 0L) {
-                        onSeekTo((sliderDragPosition * durationMs).toLong())
+                    if (!isPromoAdPlaying) {
+                        isDraggingSlider = false
+                        if (durationMs > 0L) {
+                            onSeekTo((sliderDragPosition * durationMs).toLong())
+                        }
                     }
                 },
                 colors = SliderDefaults.colors(
-                    thumbColor = PrimaryWhite,
+                    thumbColor = if (isPromoAdPlaying) MutedGray else PrimaryWhite,
                     activeTrackColor = SpotifyVibrantGreen,
-                    inactiveTrackColor = SurfaceDarkCard
+                    inactiveTrackColor = SurfaceDarkCard,
+                    disabledThumbColor = SpotifyVibrantGreen,
+                    disabledActiveTrackColor = SpotifyVibrantGreen,
+                    disabledInactiveTrackColor = SurfaceDarkCard
                 ),
                 modifier = Modifier
                     .fillMaxWidth()
@@ -507,6 +540,7 @@ fun FullScreenPlayerModal(
 
                 IconButton(
                     onClick = onSkipPrevious,
+                    enabled = !isPromoAdPlaying,
                     modifier = Modifier
                         .size(56.dp)
                         .testTag("full_player_prev_button")
@@ -514,7 +548,7 @@ fun FullScreenPlayerModal(
                     Icon(
                         imageVector = Icons.Default.SkipPrevious,
                         contentDescription = "Previous Track",
-                        tint = PrimaryWhite,
+                        tint = if (isPromoAdPlaying) MutedGray.copy(alpha = 0.35f) else PrimaryWhite,
                         modifier = Modifier.size(36.dp)
                     )
                 }
@@ -547,6 +581,7 @@ fun FullScreenPlayerModal(
 
                 IconButton(
                     onClick = onSkipNext,
+                    enabled = !isPromoAdPlaying,
                     modifier = Modifier
                         .size(56.dp)
                         .testTag("full_player_next_button")
@@ -554,13 +589,14 @@ fun FullScreenPlayerModal(
                     Icon(
                         imageVector = Icons.Default.SkipNext,
                         contentDescription = "Next Track",
-                        tint = PrimaryWhite,
+                        tint = if (isPromoAdPlaying) MutedGray.copy(alpha = 0.35f) else PrimaryWhite,
                         modifier = Modifier.size(36.dp)
                     )
                 }
 
                 IconButton(
                     onClick = onCycleRepeat,
+                    enabled = !isPromoAdPlaying,
                     modifier = Modifier
                         .size(48.dp)
                         .testTag("full_player_repeat_button")
@@ -572,7 +608,11 @@ fun FullScreenPlayerModal(
                             Icons.Default.Repeat
                         },
                         contentDescription = "Repeat",
-                        tint = if (repeatMode != RepeatModeState.OFF) SpotifyVibrantGreen else MutedGray,
+                        tint = when {
+                            isPromoAdPlaying -> MutedGray.copy(alpha = 0.25f)
+                            repeatMode != RepeatModeState.OFF -> SpotifyVibrantGreen
+                            else -> MutedGray
+                        },
                         modifier = Modifier.size(26.dp)
                     )
                 }
@@ -588,6 +628,7 @@ fun FullScreenPlayerModal(
             ) {
                 IconButton(
                     onClick = onToggleFavorite,
+                    enabled = !isPromoAdPlaying,
                     modifier = Modifier
                         .size(48.dp)
                         .testTag("full_player_favorite_button")
@@ -595,7 +636,11 @@ fun FullScreenPlayerModal(
                     Icon(
                         imageVector = if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
                         contentDescription = "Favorite",
-                        tint = if (isFavorite) SpotifyVibrantGreen else PrimaryWhite,
+                        tint = when {
+                            isPromoAdPlaying -> MutedGray.copy(alpha = 0.35f)
+                            isFavorite -> SpotifyVibrantGreen
+                            else -> PrimaryWhite
+                        },
                         modifier = Modifier.size(28.dp)
                     )
                 }
@@ -606,6 +651,7 @@ fun FullScreenPlayerModal(
                 ) {
                     IconButton(
                         onClick = { onSeekRelativeSeconds(-10) },
+                        enabled = !isPromoAdPlaying,
                         modifier = Modifier
                             .size(48.dp)
                             .testTag("full_player_rewind_10s_button")
@@ -613,12 +659,13 @@ fun FullScreenPlayerModal(
                         Icon(
                             imageVector = Icons.Default.Replay10,
                             contentDescription = "Rewind 10 seconds",
-                            tint = MutedGray,
+                            tint = if (isPromoAdPlaying) MutedGray.copy(alpha = 0.35f) else MutedGray,
                             modifier = Modifier.size(26.dp)
                         )
                     }
                     IconButton(
                         onClick = { onSeekRelativeSeconds(10) },
+                        enabled = !isPromoAdPlaying,
                         modifier = Modifier
                             .size(48.dp)
                             .testTag("full_player_forward_10s_button")
@@ -626,7 +673,7 @@ fun FullScreenPlayerModal(
                         Icon(
                             imageVector = Icons.Default.Forward10,
                             contentDescription = "Fast Forward 10 seconds",
-                            tint = MutedGray,
+                            tint = if (isPromoAdPlaying) MutedGray.copy(alpha = 0.35f) else MutedGray,
                             modifier = Modifier.size(26.dp)
                         )
                     }
