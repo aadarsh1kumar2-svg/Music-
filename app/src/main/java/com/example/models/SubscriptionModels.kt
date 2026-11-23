@@ -149,14 +149,42 @@ data class AdminAppControlConfig(
 data class AdminAdsConfig(
     val enabled: Boolean = false,
     val youtubeUrl: String = "",
+    val youtubeUrl2: String = "",
+    val youtubeUrl3: String = "",
     val label: String = "",
+    val label2: String = "",
+    val label3: String = "",
     val updatedAt: Long = 0L
 ) {
     val cleanVideoId: String
         get() = Song.extractYoutubeVideoId(youtubeUrl)
 
+    val cleanVideoId2: String
+        get() = Song.extractYoutubeVideoId(youtubeUrl2)
+
+    val cleanVideoId3: String
+        get() = Song.extractYoutubeVideoId(youtubeUrl3)
+
+    /**
+     * Returns list of valid ad video IDs and labels configured by admin
+     */
+    val availableAds: List<Pair<String, String>>
+        get() {
+            val list = mutableListOf<Pair<String, String>>()
+            if (cleanVideoId.length == 11) {
+                list.add(cleanVideoId to (label.trim().ifBlank { "Sponsored Audio Ad" }))
+            }
+            if (cleanVideoId2.length == 11) {
+                list.add(cleanVideoId2 to (label2.trim().ifBlank { label.trim().ifBlank { "Sponsored Audio Ad" } }))
+            }
+            if (cleanVideoId3.length == 11) {
+                list.add(cleanVideoId3 to (label3.trim().ifBlank { label.trim().ifBlank { "Sponsored Audio Ad" } }))
+            }
+            return list
+        }
+
     val isEffectivelyEnabled: Boolean
-        get() = enabled && cleanVideoId.length == 11
+        get() = enabled && availableAds.isNotEmpty()
 
     val displayTitle: String
         get() = label.trim().ifBlank { "Sponsored Audio Ad" }

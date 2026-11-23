@@ -640,7 +640,52 @@ fun AKMusicAppRoot(
                             HorizontalDivider(color = DividerDark)
                             Spacer(modifier = Modifier.height(8.dp))
 
-                            // Settings & Privacy Policy Button at TOP of Left 3-Lines Drawer
+                            // Developer Screen Button (Placed right ABOVE Settings)
+                            NavigationDrawerItem(
+                                label = {
+                                    Column {
+                                        Text(
+                                            text = "Developer",
+                                            style = MaterialTheme.typography.bodyMedium.copy(
+                                                color = PrimaryWhite,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                        )
+                                        Text(
+                                            text = "Aadarshkumar • Creator Info",
+                                            style = MaterialTheme.typography.labelSmall.copy(
+                                                color = SpotifyVibrantGreen
+                                            )
+                                        )
+                                    }
+                                },
+                                icon = {
+                                    Icon(
+                                        imageVector = Icons.Default.Code,
+                                        contentDescription = "Developer",
+                                        tint = SpotifyVibrantGreen
+                                    )
+                                },
+                                selected = isDeveloperScreenOpen,
+                                onClick = {
+                                    coroutineScope.launch { drawerState.close() }
+                                    musicViewModel.setDeveloperScreenOpen(true)
+                                },
+                                colors = NavigationDrawerItemDefaults.colors(
+                                    selectedContainerColor = SpotifyDarkGreenPill,
+                                    selectedIconColor = SpotifyVibrantGreen,
+                                    selectedTextColor = SpotifyVibrantGreen,
+                                    unselectedIconColor = SpotifyVibrantGreen,
+                                    unselectedTextColor = PrimaryWhite
+                                ),
+                                modifier = Modifier
+                                    .padding(horizontal = 12.dp)
+                                    .testTag("drawer_developer_item")
+                            )
+
+                            Spacer(modifier = Modifier.height(4.dp))
+
+                            // Settings & Privacy Policy Button
                             NavigationDrawerItem(
                                 label = {
                                     Column {
@@ -917,32 +962,6 @@ fun AKMusicAppRoot(
                             )
 
                             NavigationDrawerItem(
-                                label = { Text("Developer") },
-                                icon = {
-                                    Icon(
-                                        imageVector = Icons.Default.Code,
-                                        contentDescription = "Developer",
-                                        tint = SpotifyVibrantGreen
-                                    )
-                                },
-                                selected = isDeveloperScreenOpen,
-                                onClick = {
-                                    coroutineScope.launch { drawerState.close() }
-                                    musicViewModel.setDeveloperScreenOpen(true)
-                                },
-                                colors = NavigationDrawerItemDefaults.colors(
-                                    selectedContainerColor = SpotifyDarkGreenPill,
-                                    selectedIconColor = SpotifyVibrantGreen,
-                                    selectedTextColor = SpotifyVibrantGreen,
-                                    unselectedIconColor = SpotifyVibrantGreen,
-                                    unselectedTextColor = PrimaryWhite
-                                ),
-                                modifier = Modifier
-                                    .padding(horizontal = 12.dp)
-                                    .testTag("drawer_developer_item")
-                            )
-
-                            NavigationDrawerItem(
                                 label = {
                                     Text(
                                         text = "Logout",
@@ -1025,6 +1044,28 @@ fun AKMusicAppRoot(
                                 .fillMaxSize()
                                 .padding(top = innerPadding.calculateTopPadding())
                         ) {
+                            // Aadify Luxury Brand Wallpaper Background
+                            Image(
+                                painter = painterResource(id = R.drawable.aadify_bg),
+                                contentDescription = null,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                            // Ambient dark overlay scrim so texts and theme colors remain 100% crystal clear & legible
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(
+                                        Brush.verticalGradient(
+                                            colors = listOf(
+                                                PureBlack.copy(alpha = 0.88f),
+                                                PureBlack.copy(alpha = 0.78f),
+                                                PureBlack.copy(alpha = 0.92f)
+                                            )
+                                        )
+                                    )
+                            )
+
                             when (selectedTab) {
                                 MainTab.HOME -> {
                                     HomeScreen(

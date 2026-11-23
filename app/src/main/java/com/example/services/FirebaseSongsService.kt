@@ -131,6 +131,10 @@ class FirebaseSongsService(private val context: Context) {
     private val _songs = MutableStateFlow<List<Song>>(emptyList())
     val songs: StateFlow<List<Song>> = _songs.asStateFlow()
 
+    // Separate App Music collection (added via Admin App Music / Both)
+    private val _appMusic = MutableStateFlow<List<Song>>(emptyList())
+    val appMusic: StateFlow<List<Song>> = _appMusic.asStateFlow()
+
     // Admin-uploaded Playlists for Top Charts (supports YouTube playlist links, Spotify playlists & custom track lists)
     private val _topChartPlaylists = MutableStateFlow<List<AdminChartPlaylist>>(emptyList())
     val topChartPlaylists: StateFlow<List<AdminChartPlaylist>> = _topChartPlaylists.asStateFlow()
@@ -449,6 +453,20 @@ class FirebaseSongsService(private val context: Context) {
 
             songsRef = database.getReference("songs")
             songsRef?.keepSynced(true)
+
+            val appMusicRef = database.getReference("appMusic")
+            appMusicRef.keepSynced(true)
+            val appMusicListener = object : ValueEventListener {
+                override fun onDataChange(snapshot: DataSnapshot) {
+                    scope.launch(Dispatchers.Default) {
+                        val parsed = parseSnapshot(snapshot)
+                        val resolved = resolveSmartSwapsAndSort(parsed)
+                        _appMusic.value = resolved
+                    }
+                }
+                override fun onCancelled(error: DatabaseError) {}
+            }
+            appMusicRef.addValueEventListener(appMusicListener)
 
             val listener = object : ValueEventListener {
                 override fun onDataChange(snapshot: DataSnapshot) {
@@ -2948,7 +2966,11 @@ class FirebaseSongsService(private val context: Context) {
             AdminAdsConfig(
                 enabled = configCachePrefs.getBoolean("ads_cfg_enabled", false),
                 youtubeUrl = configCachePrefs.getString("ads_cfg_youtube_url", "") ?: "",
+                youtubeUrl2 = configCachePrefs.getString("ads_cfg_youtube_url2", "") ?: "",
+                youtubeUrl3 = configCachePrefs.getString("ads_cfg_youtube_url3", "") ?: "",
                 label = configCachePrefs.getString("ads_cfg_label", "") ?: "",
+                label2 = configCachePrefs.getString("ads_cfg_label2", "") ?: "",
+                label3 = configCachePrefs.getString("ads_cfg_label3", "") ?: "",
                 updatedAt = configCachePrefs.getLong("ads_cfg_updated_at", 0L)
             )
         } catch (_: Exception) {
@@ -2963,14 +2985,20 @@ class FirebaseSongsService(private val context: Context) {
                 .putBoolean("has_cached_ads_config", true)
                 .putBoolean("ads_cfg_enabled", newConfig.enabled)
                 .putString("ads_cfg_youtube_url", newConfig.youtubeUrl)
+                .putString("ads_cfg_youtube_url2", newConfig.youtubeUrl2)
+                .putString("ads_cfg_youtube_url3", newConfig.youtubeUrl3)
                 .putString("ads_cfg_label", newConfig.label)
+                .putString("ads_cfg_label2", newConfig.label2)
+                .putString("ads_cfg_label3", newConfig.label3)
                 .putLong("ads_cfg_updated_at", newConfig.updatedAt)
                 .apply()
-            // Mirror into shared user prefs so MusicPlaybackService autonomous background playback also respects Admin's Ads toggle & link
+            // Mirror into shared user prefs so MusicPlaybackService autonomous background playback also respects Admin's Ads toggle & links
             context.applicationContext.getSharedPreferences("ak_music_user_prefs", Context.MODE_PRIVATE)
                 .edit()
                 .putBoolean("ads_enabled", newConfig.enabled)
                 .putString("ads_youtube_url", newConfig.youtubeUrl)
+                .putString("ads_youtube_url2", newConfig.youtubeUrl2)
+                .putString("ads_youtube_url3", newConfig.youtubeUrl3)
                 .putString("ads_video_id", newConfig.cleanVideoId)
                 .putString("ads_label", newConfig.displayTitle)
                 .apply()
@@ -2986,14 +3014,34 @@ class FirebaseSongsService(private val context: Context) {
                 ?: snapshot.child("link").getValue(String::class.java)
                 ?: snapshot.child("videoId").getValue(String::class.java)
                 ?: "").trim()
+            val youtubeUrl2 = (snapshot.child("youtubeUrl2").getValue(String::class.java)
+                ?: snapshot.child("url2").getValue(String::class.java)
+                ?: snapshot.child("link2").getValue(String::class.java)
+                ?: "").trim()
+            val youtubeUrl3 = (snapshot.child("youtubeUrl3").getValue(String::class.java)
+                ?: snapshot.child("url3").getValue(String::class.java)
+                ?: snapshot.child("link3").getValue(String::class.java)
+                ?: "").trim()
+
             val label = (snapshot.child("label").getValue(String::class.java)
                 ?: snapshot.child("title").getValue(String::class.java)
                 ?: "").trim()
+            val label2 = (snapshot.child("label2").getValue(String::class.java)
+                ?: snapshot.child("title2").getValue(String::class.java)
+                ?: "").trim()
+            val label3 = (snapshot.child("label3").getValue(String::class.java)
+                ?: snapshot.child("title3").getValue(String::class.java)
+                ?: "").trim()
+
             val updatedAt = (snapshot.child("updatedAt").value as? Number)?.toLong() ?: 0L
             AdminAdsConfig(
                 enabled = enabled,
                 youtubeUrl = youtubeUrl,
+                youtubeUrl2 = youtubeUrl2,
+                youtubeUrl3 = youtubeUrl3,
                 label = label,
+                label2 = label2,
+                label3 = label3,
                 updatedAt = updatedAt
             )
         } catch (e: Exception) {
@@ -3015,14 +3063,32 @@ class FirebaseSongsService(private val context: Context) {
                 .ifBlank { obj.optString("link") }
                 .ifBlank { obj.optString("videoId") }
                 .trim()
+            val youtubeUrl2 = obj.optString("youtubeUrl2")
+                .ifBlank { obj.optString("url2") }
+                .ifBlank { obj.optString("link2") }
+                .trim()
+            val youtubeUrl3 = obj.optString("youtubeUrl3")
+                .ifBlank { obj.optString("url3") }
+                .ifBlank { obj.optString("link3") }
+                .trim()
             val label = obj.optString("label")
                 .ifBlank { obj.optString("title") }
+                .trim()
+            val label2 = obj.optString("label2")
+                .ifBlank { obj.optString("title2") }
+                .trim()
+            val label3 = obj.optString("label3")
+                .ifBlank { obj.optString("title3") }
                 .trim()
             val updatedAt = obj.optLong("updatedAt", 0L)
             AdminAdsConfig(
                 enabled = enabled,
                 youtubeUrl = youtubeUrl,
+                youtubeUrl2 = youtubeUrl2,
+                youtubeUrl3 = youtubeUrl3,
                 label = label,
+                label2 = label2,
+                label3 = label3,
                 updatedAt = updatedAt
             )
         } catch (_: Exception) {

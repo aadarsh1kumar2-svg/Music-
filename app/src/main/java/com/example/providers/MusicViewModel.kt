@@ -1187,26 +1187,28 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         _isLoadingTopChartPlaylist.value = false
     }
 
-    // Explore Songs StateFlow (Combines Catalog + Country Trending + Live Online Search Results)
+    // Explore Songs StateFlow (Combines Catalog + App Music + Country Trending + Live Online Search Results)
     val exploreSongs: StateFlow<List<Song>> = combine(
         firebaseService.songs,
+        firebaseService.appMusic,
         _exploreSearchQuery,
         _onlineSearchResults,
         _countryTrendingSongs,
         _selectedCountry
-    ) { catalogSongs, query, onlineMatches, countrySongs, country ->
+    ) { catalogSongs, appMusicSongs, query, onlineMatches, countrySongs, country ->
+        val allAdminSongs = (catalogSongs + appMusicSongs).distinctBy { it.cleanVideoId.ifBlank { it.id } }
         val trimmed = query.trim()
         if (trimmed.isEmpty()) {
             if (countrySongs.isNotEmpty()) {
                 val seenIds = countrySongs.map { it.cleanVideoId.lowercase() }.filter { it.isNotBlank() }.toSet()
-                val extraCatalog = catalogSongs.filter { it.cleanVideoId.lowercase() !in seenIds }
+                val extraCatalog = allAdminSongs.filter { it.cleanVideoId.lowercase() !in seenIds }
                 countrySongs + extraCatalog
             } else {
-                catalogSongs
+                allAdminSongs
             }
         } else {
             val tokens = trimmed.lowercase().split(Regex("\\s+")).filter { it.isNotBlank() }
-            val localPool = (catalogSongs + countrySongs).distinctBy { it.cleanVideoId.ifBlank { it.id } }
+            val localPool = (allAdminSongs + countrySongs).distinctBy { it.cleanVideoId.ifBlank { it.id } }
             val localMatches = localPool.filter { song ->
                 val haystack = "${song.title} ${song.artist} ${song.videoId}".lowercase()
                 tokens.all { token -> haystack.contains(token) } ||
@@ -3096,10 +3098,15 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
+    private var adRotationIndex: Int = 0
+
     private fun preloadPromoAudioAdStreamAsync() {
         val adsCfg = firebaseService.adsConfig.value
         if (isVerifiedVipActive() || !adsCfg.isEffectivelyEnabled || promoAdResolveJob?.isActive == true) return
-        val adVid = adsCfg.cleanVideoId
+        val adsList = adsCfg.availableAds
+        if (adsList.isEmpty()) return
+        val currentAd = adsList[adRotationIndex % adsList.size]
+        val adVid = currentAd.first
         if (audioExtractor.getCachedExactYoutubeAudioForPlayback(adVid) != null) return
         promoAdResolveJob = viewModelScope.launch(Dispatchers.IO) {
             audioExtractor.extractExactYoutubeDirectAudioForPlayback(adVid)
@@ -3108,7 +3115,8 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun triggerPromoAudioAdBeforeSong(nextSong: Song, nextQueue: List<Song>) {
         val adsCfg = firebaseService.adsConfig.value
-        if (!adsCfg.isEffectivelyEnabled) {
+        val adsList = adsCfg.availableAds
+        if (!adsCfg.isEffectivelyEnabled || adsList.isEmpty()) {
             // Admin disabled ads or left link empty -> play the user's song immediately!
             freeSongsPlayedSinceLastAd = 0
             lastCountedAdSongId = null
@@ -3126,10 +3134,14 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         lastCountedAdSongId = null
         _isPromoAudioAdPlaying.value = true
 
-        val adVid = adsCfg.cleanVideoId
+        val currentAd = adsList[adRotationIndex % adsList.size]
+        adRotationIndex = (adRotationIndex + 1) % adsList.size
+        val adVid = currentAd.first
+        val adTitle = currentAd.second
+
         val adSong = Song(
             id = PROMO_AUDIO_AD_SONG_ID,
-            title = adsCfg.displayTitle,
+            title = adTitle,
             artist = "AADIFY",
             videoId = adVid,
             bannerUrl = "https://img.youtube.com/vi/$adVid/hqdefault.jpg",
