@@ -269,8 +269,8 @@ fun AKMusicAppRoot(
     val exploreSongs by musicViewModel.exploreSongs.collectAsStateWithLifecycle()
     val chartSongs by musicViewModel.chartSongs.collectAsStateWithLifecycle()
     val topChartPlaylists by musicViewModel.topChartPlaylists.collectAsStateWithLifecycle()
-    val expandedTopChartPlaylistId by musicViewModel.expandedTopChartPlaylistId.collectAsStateWithLifecycle()
-    val expandedTopChartPlaylistSongs by musicViewModel.expandedTopChartPlaylistSongs.collectAsStateWithLifecycle()
+    val openedTopChartPlaylist by musicViewModel.openedTopChartPlaylist.collectAsStateWithLifecycle()
+    val openedTopChartPlaylistSongs by musicViewModel.openedTopChartPlaylistSongs.collectAsStateWithLifecycle()
     val isLoadingTopChartPlaylist by musicViewModel.isLoadingTopChartPlaylist.collectAsStateWithLifecycle()
     val homeSearchQuery by musicViewModel.homeSearchQuery.collectAsStateWithLifecycle()
     val exploreSearchQuery by musicViewModel.exploreSearchQuery.collectAsStateWithLifecycle()
@@ -1073,10 +1073,12 @@ fun AKMusicAppRoot(
                                             musicViewModel.refreshFirebaseCatalog()
                                         },
                                         playlists = topChartPlaylists,
-                                        expandedPlaylistId = expandedTopChartPlaylistId,
-                                        expandedPlaylistSongs = expandedTopChartPlaylistSongs,
+                                        openedPlaylist = openedTopChartPlaylist,
+                                        openedPlaylistSongs = openedTopChartPlaylistSongs,
                                         isLoadingPlaylist = isLoadingTopChartPlaylist,
-                                        onPlaylistClick = { musicViewModel.onTopChartPlaylistClicked(it) }
+                                        onPlaylistClick = { musicViewModel.onTopChartPlaylistClicked(it) },
+                                        onClosePlaylist = { musicViewModel.closeOpenedTopChartPlaylist() },
+                                        onPlayAllPlaylist = { musicViewModel.playAllTopChartPlaylistSongs() }
                                     )
                                 }
                                 MainTab.EXPLORE -> {

@@ -816,7 +816,7 @@ class FirebaseSongsService(private val context: Context) {
         for (child in snapshot.children) {
             if (isSnapshotPlaylistEntry(child)) continue
             val parsed = parseChildSnapshot(child, idx)
-            if (parsed != null && (parsed.song.videoId.isNotBlank() || parsed.song.spotifyUrl.isNotBlank() || parsed.song.title.isNotBlank())) {
+            if (parsed != null && (parsed.song.cleanVideoId.length == 11 || Song.isSpotifyUrl(parsed.song.spotifyUrl))) {
                 result.add(parsed)
                 idx++
             }
@@ -893,11 +893,18 @@ class FirebaseSongsService(private val context: Context) {
 
             val extractedVideoId = ytFieldCandidates
                 .map { Song.extractYoutubeVideoId(it) }
-                .firstOrNull { it.isNotBlank() }
+                .firstOrNull { it.length == 11 }
                 .orEmpty()
 
+            // Reject ghost / partial / rank-only Firebase nodes that have NO playable YouTube ID and NO Spotify track URL
+            val isSpotifyPlaylistOrAlbum = extractedSpotifyUrl.contains("open.spotify.com/playlist/", ignoreCase = true) ||
+                extractedSpotifyUrl.contains("open.spotify.com/album/", ignoreCase = true)
+            if (isSpotifyPlaylistOrAlbum) return null
+            if (extractedVideoId.length != 11 && extractedSpotifyUrl.isBlank()) return null
+
             val cachedSpotifyMeta = if (extractedSpotifyUrl.isNotBlank()) spotifyMetaCache[extractedSpotifyUrl] else null
-            val resolvedTitle = title.ifBlank { cachedSpotifyMeta?.first.orEmpty() }.ifBlank { "Untitled Track" }
+            val resolvedTitle = title.ifBlank { cachedSpotifyMeta?.first.orEmpty() }
+                .ifBlank { if (extractedSpotifyUrl.isNotBlank()) "Spotify Track" else return null }
             val effectiveRawArtist = if (isGenericArtistLabel(rawArtist) && !cachedSpotifyMeta?.second.isNullOrBlank()) {
                 cachedSpotifyMeta!!.second
             } else {
@@ -1156,11 +1163,19 @@ class FirebaseSongsService(private val context: Context) {
             }
         }
 
-        if (resolvedTitle.isBlank() && videoId.isBlank() && spotifyUrl.isBlank()) return null
+        // Reject ghost / rank-only / unplayable nodes AND prevent Spotify playlists from leaking as single songs
+        val isSpotifyPlaylistOrAlbum = spotifyUrl.contains("open.spotify.com/playlist/", ignoreCase = true) ||
+            spotifyUrl.contains("open.spotify.com/album/", ignoreCase = true)
+        if (isSpotifyPlaylistOrAlbum) return null
+        if (videoId.length != 11 && spotifyUrl.isBlank()) return null
+
+        val finalTitle = resolvedTitle.ifBlank {
+            if (spotifyUrl.isNotBlank()) "Spotify Track" else return null
+        }
 
         val song = Song(
             id = id,
-            title = resolvedTitle.ifBlank { "Untitled Track" },
+            title = finalTitle,
             artist = artist,
             videoId = videoId,
             bannerUrl = bannerUrl,
@@ -1238,9 +1253,14 @@ class FirebaseSongsService(private val context: Context) {
     }
 
     private fun updatePlaylistSource(sourceKey: String, list: List<AdminChartPlaylist>) {
-        playlistSourcesMap[sourceKey] = list
+        // Strictly allow ONLY Spotify playlists (no YouTube playlists in Top Charts)
+        val spotifyOnly = list.filter { pl ->
+            pl.sourceType == "spotify" || Song.isSpotifyUrl(pl.playlistUrl)
+        }
+        playlistSourcesMap[sourceKey] = spotifyOnly
         val merged = playlistSourcesMap.values
             .flatten()
+            .filter { pl -> pl.sourceType == "spotify" || Song.isSpotifyUrl(pl.playlistUrl) }
             .distinctBy { it.id }
             .sortedWith(
                 compareBy<AdminChartPlaylist> { if (it.rank in 1 until Int.MAX_VALUE) it.rank else Int.MAX_VALUE }
@@ -1384,18 +1404,16 @@ class FirebaseSongsService(private val context: Context) {
             val explicitPlatform = (child.child("platform").getValue(String::class.java)
                 ?: child.child("sourceType").getValue(String::class.java)
                 ?: "").trim().lowercase(Locale.US)
-            val sourceType = when {
-                explicitPlatform == "spotify" || Song.isSpotifyUrl(playlistUrl) -> "spotify"
-                explicitPlatform == "youtube" || Song.extractYoutubePlaylistId(playlistUrl) != null -> "youtube"
-                else -> "custom"
-            }
+            val isSpotifyPlaylist = explicitPlatform == "spotify" || Song.isSpotifyUrl(playlistUrl)
+            // Strictly ignore YouTube / non-Spotify playlists — ONLY Spotify playlists are supported!
+            if (!isSpotifyPlaylist) return null
 
             AdminChartPlaylist(
                 id = id,
-                title = rawTitle.ifBlank { "Top Chart Playlist" },
+                title = rawTitle.ifBlank { "Spotify Playlist" },
                 coverUrl = coverUrl,
                 playlistUrl = playlistUrl,
-                sourceType = sourceType,
+                sourceType = "spotify",
                 description = description,
                 rank = rank,
                 timestamp = timestamp,
@@ -1518,18 +1536,16 @@ class FirebaseSongsService(private val context: Context) {
         if (title.isBlank() && playlistUrl.isBlank() && embeddedSongs.isEmpty()) return null
 
         val explicitPlatform = obj.optString("platform", obj.optString("sourceType", "")).trim().lowercase(Locale.US)
-        val sourceType = when {
-            explicitPlatform == "spotify" || Song.isSpotifyUrl(playlistUrl) -> "spotify"
-            explicitPlatform == "youtube" || Song.extractYoutubePlaylistId(playlistUrl) != null -> "youtube"
-            else -> "custom"
-        }
+        val isSpotifyPlaylist = explicitPlatform == "spotify" || Song.isSpotifyUrl(playlistUrl)
+        // Strictly ignore YouTube / non-Spotify playlists — ONLY Spotify playlists are supported!
+        if (!isSpotifyPlaylist) return null
 
         return AdminChartPlaylist(
             id = id,
-            title = title.ifBlank { "Top Chart Playlist" },
+            title = title.ifBlank { "Spotify Playlist" },
             coverUrl = coverUrl,
             playlistUrl = playlistUrl,
-            sourceType = sourceType,
+            sourceType = "spotify",
             description = description,
             rank = rank,
             timestamp = timestamp,
@@ -4117,5 +4133,12 @@ class FirebaseSongsService(private val context: Context) {
             }
         }
         null
+    }
+
+    fun release() {
+        try {
+            scope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
+        } catch (_: Exception) {
+        }
     }
 }

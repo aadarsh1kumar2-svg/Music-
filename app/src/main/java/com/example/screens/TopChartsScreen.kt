@@ -1,8 +1,6 @@
 package com.example.screens
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.shrinkVertically
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -23,13 +21,15 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.TrendingUp
 import androidx.compose.material.icons.filled.FilterCenterFocus
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.QueueMusic
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -41,6 +41,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -52,7 +53,6 @@ import com.example.R
 import com.example.models.AdminChartPlaylist
 import com.example.models.Song
 import com.example.providers.ChartTab
-import com.example.ui.theme.DeepCharcoal
 import com.example.ui.theme.DividerDark
 import com.example.ui.theme.MutedGray
 import com.example.ui.theme.PrimaryWhite
@@ -77,11 +77,34 @@ fun TopChartsScreen(
     onRefreshCatalog: () -> Unit,
     modifier: Modifier = Modifier,
     playlists: List<AdminChartPlaylist> = emptyList(),
-    expandedPlaylistId: String? = null,
-    expandedPlaylistSongs: List<Song> = emptyList(),
+    openedPlaylist: AdminChartPlaylist? = null,
+    openedPlaylistSongs: List<Song> = emptyList(),
     isLoadingPlaylist: Boolean = false,
-    onPlaylistClick: (AdminChartPlaylist) -> Unit = {}
+    onPlaylistClick: (AdminChartPlaylist) -> Unit = {},
+    onClosePlaylist: () -> Unit = {},
+    onPlayAllPlaylist: () -> Unit = {}
 ) {
+    // Dedicated full Playlist Page when a Spotify playlist row is clicked:
+    // Top = Banner, Below = Playlist Name + Play All button, Below = All Playlist Songs
+    if (openedPlaylist != null) {
+        TopChartPlaylistDetailPage(
+            playlist = openedPlaylist,
+            songs = openedPlaylistSongs,
+            isLoading = isLoadingPlaylist,
+            currentSong = currentSong,
+            isPlaying = isPlaying,
+            onBack = onClosePlaylist,
+            onPlayAll = onPlayAllPlaylist,
+            onSongClick = onSongClick,
+            onSongMoreClick = onSongMoreClick,
+            modifier = modifier
+        )
+        return
+    }
+
+    // Only Spotify playlists are displayed in Top Charts (YouTube playlists are excluded)
+    val spotifyPlaylists = playlists.filter { it.sourceType == "spotify" || Song.isSpotifyUrl(it.playlistUrl) }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -154,7 +177,7 @@ fun TopChartsScreen(
             )
         }
 
-        if (chartSongs.isEmpty() && playlists.isEmpty()) {
+        if (chartSongs.isEmpty() && spotifyPlaylists.isEmpty()) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -198,135 +221,17 @@ fun TopChartsScreen(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(bottom = 140.dp)
             ) {
-                // Admin Playlists rendered in the exact same vertical Song-row layout!
-                // Single click expands all playlist songs directly underneath; clicking any song plays immediately.
-                if (playlists.isNotEmpty()) {
+                // Spotify Playlists displayed just like Song rows (Banner + Playlist Name)
+                // Tapping a playlist opens its dedicated full Playlist Page with Banner, Name, Play All & Songs.
+                if (spotifyPlaylists.isNotEmpty()) {
                     items(
-                        items = playlists,
+                        items = spotifyPlaylists,
                         key = { "top_chart_pl_row_${it.id}" }
                     ) { playlist ->
-                        val isExpanded = expandedPlaylistId == playlist.id
-                        Column(modifier = Modifier.fillMaxWidth()) {
-                            TopChartPlaylistSongStyleRow(
-                                playlist = playlist,
-                                isExpanded = isExpanded,
-                                loadedCount = if (isExpanded && expandedPlaylistSongs.isNotEmpty()) expandedPlaylistSongs.size else playlist.songs.size,
-                                onClick = { onPlaylistClick(playlist) }
-                            )
-
-                            AnimatedVisibility(
-                                visible = isExpanded,
-                                enter = expandVertically(),
-                                exit = shrinkVertically()
-                            ) {
-                                Surface(
-                                    color = DeepCharcoal,
-                                    shape = RoundedCornerShape(14.dp),
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(start = 16.dp, end = 16.dp, top = 2.dp, bottom = 10.dp)
-                                        .border(1.dp, DividerDark, RoundedCornerShape(14.dp))
-                                        .testTag("top_chart_playlist_expanded_${playlist.id}")
-                                ) {
-                                    when {
-                                        isLoadingPlaylist -> {
-                                            Row(
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .padding(horizontal = 16.dp, vertical = 18.dp),
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.Center
-                                            ) {
-                                                CircularProgressIndicator(
-                                                    color = SpotifyVibrantGreen,
-                                                    strokeWidth = 2.5.dp,
-                                                    modifier = Modifier.size(20.dp)
-                                                )
-                                                Spacer(modifier = Modifier.width(12.dp))
-                                                Text(
-                                                    text = "Loading playlist songs...",
-                                                    style = MaterialTheme.typography.bodyMedium.copy(
-                                                        color = MutedGray,
-                                                        fontWeight = FontWeight.Medium
-                                                    )
-                                                )
-                                            }
-                                        }
-                                        expandedPlaylistSongs.isEmpty() -> {
-                                            Text(
-                                                text = "No playable tracks found in this playlist yet.",
-                                                style = MaterialTheme.typography.bodySmall.copy(color = MutedGray),
-                                                textAlign = TextAlign.Center,
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .padding(16.dp)
-                                            )
-                                        }
-                                        else -> {
-                                            Column(modifier = Modifier.fillMaxWidth()) {
-                                                Row(
-                                                    modifier = Modifier
-                                                        .fillMaxWidth()
-                                                        .padding(horizontal = 14.dp, vertical = 10.dp),
-                                                    verticalAlignment = Alignment.CenterVertically,
-                                                    horizontalArrangement = Arrangement.SpaceBetween
-                                                ) {
-                                                    Text(
-                                                        text = "${expandedPlaylistSongs.size} songs in playlist",
-                                                        style = MaterialTheme.typography.labelMedium.copy(
-                                                            color = SpotifyVibrantGreen,
-                                                            fontWeight = FontWeight.Bold
-                                                        )
-                                                    )
-                                                    Surface(
-                                                        color = SpotifyVibrantGreen,
-                                                        shape = RoundedCornerShape(50),
-                                                        modifier = Modifier
-                                                            .clip(RoundedCornerShape(50))
-                                                            .clickable {
-                                                                onSongClick(expandedPlaylistSongs.first(), expandedPlaylistSongs)
-                                                            }
-                                                            .testTag("top_chart_playlist_play_all_${playlist.id}")
-                                                    ) {
-                                                        Row(
-                                                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
-                                                            verticalAlignment = Alignment.CenterVertically
-                                                        ) {
-                                                            Icon(
-                                                                imageVector = Icons.Default.PlayArrow,
-                                                                contentDescription = "Play All",
-                                                                tint = PureBlack,
-                                                                modifier = Modifier.size(16.dp)
-                                                            )
-                                                            Spacer(modifier = Modifier.width(4.dp))
-                                                            Text(
-                                                                text = "Play All",
-                                                                style = MaterialTheme.typography.labelSmall.copy(
-                                                                    color = PureBlack,
-                                                                    fontWeight = FontWeight.ExtraBold
-                                                                )
-                                                            )
-                                                        }
-                                                    }
-                                                }
-                                                HorizontalDivider(color = DividerDark)
-                                                expandedPlaylistSongs.forEachIndexed { idx, plSong ->
-                                                    SongListRow(
-                                                        song = plSong,
-                                                        isCurrentSong = currentSong?.id == plSong.id,
-                                                        isPlaying = isPlaying,
-                                                        rankNumber = idx + 1,
-                                                        subtitlePrefix = "",
-                                                        onSongClick = { onSongClick(plSong, expandedPlaylistSongs) },
-                                                        onMoreClick = { onSongMoreClick(plSong) }
-                                                    )
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        TopChartPlaylistSongStyleRow(
+                            playlist = playlist,
+                            onClick = { onPlaylistClick(playlist) }
+                        )
                     }
                 }
 
@@ -350,10 +255,227 @@ fun TopChartsScreen(
 }
 
 @Composable
+private fun TopChartPlaylistDetailPage(
+    playlist: AdminChartPlaylist,
+    songs: List<Song>,
+    isLoading: Boolean,
+    currentSong: Song?,
+    isPlaying: Boolean,
+    onBack: () -> Unit,
+    onPlayAll: () -> Unit,
+    onSongClick: (Song, List<Song>) -> Unit,
+    onSongMoreClick: (Song) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    BackHandler(onBack = onBack)
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .background(PureBlack)
+            .testTag("top_chart_playlist_detail_page")
+    ) {
+        // Top App Bar with Back button
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(
+                onClick = onBack,
+                modifier = Modifier
+                    .size(48.dp)
+                    .testTag("playlist_detail_back_button")
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "Back",
+                    tint = PrimaryWhite,
+                    modifier = Modifier.size(26.dp)
+                )
+            }
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = "Playlist",
+                style = MaterialTheme.typography.titleLarge.copy(
+                    color = PrimaryWhite,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 19.sp
+                ),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(bottom = 148.dp)
+        ) {
+            // Hero Header: Banner on top -> Playlist Name below -> Play All button
+            item(key = "playlist_detail_header") {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            Brush.verticalGradient(
+                                colors = listOf(
+                                    SpotifyDarkGreenPill.copy(alpha = 0.45f),
+                                    PureBlack
+                                )
+                            )
+                        )
+                        .padding(horizontal = 24.dp, vertical = 16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    val resolvedHeroBanner = playlist.resolvedCoverUrl
+                        .ifBlank { songs.firstOrNull { it.highResBannerUrl.isNotBlank() }?.highResBannerUrl.orEmpty() }
+
+                    Surface(
+                        shape = RoundedCornerShape(18.dp),
+                        color = SurfaceDarkCard,
+                        shadowElevation = 10.dp,
+                        modifier = Modifier
+                            .size(210.dp)
+                            .border(1.dp, SpotifyGreenBorder.copy(alpha = 0.55f), RoundedCornerShape(18.dp))
+                    ) {
+                        SongArtwork(
+                            imageUrl = resolvedHeroBanner,
+                            contentDescription = playlist.title,
+                            modifier = Modifier.fillMaxSize(),
+                            cornerRadius = 18.dp
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(18.dp))
+
+                    Text(
+                        text = playlist.title,
+                        style = MaterialTheme.typography.headlineSmall.copy(
+                            color = PrimaryWhite,
+                            fontWeight = FontWeight.ExtraBold,
+                            fontSize = 23.sp
+                        ),
+                        textAlign = TextAlign.Center,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.testTag("playlist_detail_title")
+                    )
+
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    val effectiveCount = maxOf(songs.size, playlist.itemCount)
+                    val subtitleText = if (effectiveCount > 0) {
+                        "Spotify Playlist • $effectiveCount songs"
+                    } else {
+                        "Spotify Playlist"
+                    }
+                    Text(
+                        text = subtitleText,
+                        style = MaterialTheme.typography.bodyMedium.copy(
+                            color = MutedGray,
+                            fontWeight = FontWeight.Medium
+                        ),
+                        textAlign = TextAlign.Center
+                    )
+
+                    Spacer(modifier = Modifier.height(18.dp))
+
+                    Button(
+                        onClick = onPlayAll,
+                        enabled = !isLoading && songs.isNotEmpty(),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = SpotifyVibrantGreen,
+                            contentColor = PureBlack,
+                            disabledContainerColor = SurfaceDarkCard,
+                            disabledContentColor = MutedGray
+                        ),
+                        shape = RoundedCornerShape(50),
+                        contentPadding = PaddingValues(horizontal = 32.dp, vertical = 12.dp),
+                        modifier = Modifier
+                            .height(48.dp)
+                            .testTag("playlist_detail_play_all_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.PlayArrow,
+                            contentDescription = "Play All",
+                            modifier = Modifier.size(22.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Play All",
+                            style = MaterialTheme.typography.titleMedium.copy(
+                                fontWeight = FontWeight.ExtraBold,
+                                fontSize = 15.5.sp
+                            )
+                        )
+                    }
+                }
+                HorizontalDivider(color = DividerDark, modifier = Modifier.padding(top = 6.dp, bottom = 8.dp))
+            }
+
+            when {
+                isLoading -> {
+                    item(key = "playlist_loading_indicator") {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 40.dp, horizontal = 24.dp),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            CircularProgressIndicator(
+                                color = SpotifyVibrantGreen,
+                                strokeWidth = 3.dp,
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Spacer(modifier = Modifier.width(14.dp))
+                            Text(
+                                text = "Loading Spotify playlist songs...",
+                                style = MaterialTheme.typography.bodyMedium.copy(
+                                    color = MutedGray,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            )
+                        }
+                    }
+                }
+                songs.isEmpty() -> {
+                    item(key = "playlist_empty_state") {
+                        Text(
+                            text = "No playable songs found in this Spotify playlist right now.",
+                            style = MaterialTheme.typography.bodyMedium.copy(color = MutedGray),
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 24.dp, vertical = 36.dp)
+                        )
+                    }
+                }
+                else -> {
+                    itemsIndexed(
+                        items = songs,
+                        key = { idx, plSong -> "pl_detail_${playlist.id}_${idx}_${plSong.id}" }
+                    ) { idx, plSong ->
+                        SongListRow(
+                            song = plSong,
+                            isCurrentSong = currentSong?.id == plSong.id,
+                            isPlaying = isPlaying,
+                            rankNumber = idx + 1,
+                            subtitlePrefix = "",
+                            onSongClick = { onSongClick(plSong, songs) },
+                            onMoreClick = { onSongMoreClick(plSong) }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun TopChartPlaylistSongStyleRow(
     playlist: AdminChartPlaylist,
-    isExpanded: Boolean,
-    loadedCount: Int,
     onClick: () -> Unit
 ) {
     Row(
@@ -393,7 +515,7 @@ private fun TopChartPlaylistSongStyleRow(
             Text(
                 text = playlist.title,
                 style = MaterialTheme.typography.titleMedium.copy(
-                    color = if (isExpanded) SpotifyVibrantGreen else PrimaryWhite,
+                    color = PrimaryWhite,
                     fontWeight = FontWeight.Bold,
                     fontSize = 15.5.sp
                 ),
@@ -401,16 +523,11 @@ private fun TopChartPlaylistSongStyleRow(
                 overflow = TextOverflow.Ellipsis
             )
             Spacer(modifier = Modifier.height(3.dp))
-            val effectiveCount = maxOf(loadedCount, playlist.itemCount)
-            val platformLabel = when (playlist.sourceType) {
-                "youtube" -> "YouTube Playlist"
-                "spotify" -> "Spotify Playlist"
-                else -> "Playlist"
-            }
+            val effectiveCount = maxOf(playlist.songs.size, playlist.itemCount)
             val subText = if (effectiveCount > 0) {
-                "$platformLabel • $effectiveCount songs"
+                "Spotify Playlist • $effectiveCount songs"
             } else {
-                "$platformLabel • Tap to view songs"
+                "Spotify Playlist"
             }
             Text(
                 text = subText,
@@ -425,26 +542,12 @@ private fun TopChartPlaylistSongStyleRow(
 
         Spacer(modifier = Modifier.width(8.dp))
 
-        Surface(
-            color = if (isExpanded) SpotifyDarkGreenPill else SurfaceDarkCard,
-            shape = RoundedCornerShape(50),
-            modifier = Modifier
-                .size(36.dp)
-                .border(
-                    width = 1.dp,
-                    color = if (isExpanded) SpotifyGreenBorder else DividerDark,
-                    shape = RoundedCornerShape(50)
-                )
-        ) {
-            Box(contentAlignment = Alignment.Center) {
-                Icon(
-                    imageVector = if (isExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-                    contentDescription = if (isExpanded) "Collapse Playlist" else "Expand Playlist",
-                    tint = if (isExpanded) SpotifyVibrantGreen else PrimaryWhite,
-                    modifier = Modifier.size(22.dp)
-                )
-            }
-        }
+        Icon(
+            imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+            contentDescription = "Open Playlist",
+            tint = MutedGray,
+            modifier = Modifier.size(24.dp)
+        )
     }
 }
 

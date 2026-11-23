@@ -47,6 +47,8 @@ class PlaybackAndSubscriptionTest {
         viewModelStore = ViewModelStore()
         MusicPlaybackService.resetForTests()
         app.getSharedPreferences("ak_music_user_prefs", Context.MODE_PRIVATE).edit().clear().commit()
+        app.getSharedPreferences("ak_admin_config_cache", Context.MODE_PRIVATE).edit().clear().commit()
+        app.getSharedPreferences("ak_admin_rank_tracker", Context.MODE_PRIVATE).edit().clear().commit()
         ShadowLooper.idleMainLooper()
     }
 
@@ -458,12 +460,6 @@ class PlaybackAndSubscriptionTest {
 
     @Test
     fun freeUser_noAdsWhenAdminAdsDisabledOrBlankLink() {
-        val prefs = app.getSharedPreferences("ak_music_user_prefs", Context.MODE_PRIVATE)
-        prefs.edit()
-            .putString("user_name", "FreeNoAdUser")
-            .putString("user_password", AadifySecurityVault.encryptSensitiveLocalString("pass1234"))
-            .commit()
-
         val vm = createVm("free_no_ad_when_off")
         assertFalse(vm.isVerifiedVipActive())
 
@@ -494,12 +490,6 @@ class PlaybackAndSubscriptionTest {
 
     @Test
     fun freeUser_triggersAudioOnlyAdAfter2Songs_andAutoPlaysNextOnAdEnd() {
-        val prefs = app.getSharedPreferences("ak_music_user_prefs", Context.MODE_PRIVATE)
-        prefs.edit()
-            .putString("user_name", "FreeAdUser")
-            .putString("user_password", AadifySecurityVault.encryptSensitiveLocalString("pass1234"))
-            .commit()
-
         assertEquals(2, MusicViewModel.FREE_SONGS_PER_AD)
 
         val vm = createVm("free_ad_cycle")
@@ -594,7 +584,7 @@ class PlaybackAndSubscriptionTest {
     }
 
     @Test
-    fun adminCatalog_parsesAdminV3SchemaAndAdsSettings_andExpandsPlaylistOnSingleClick() {
+    fun adminCatalog_rejectsGhostUntitledAndYoutubePlaylists_andOpensSpotifyPlaylistPageWithPlayAll() {
         val firebaseService = FirebaseSongsService(app)
         val songsJson = """
             {
@@ -615,27 +605,52 @@ class PlaybackAndSubscriptionTest {
                 "spotifyUrl": "https://open.spotify.com/track/6VBhH7CyP56BXjp8VsDFPZ",
                 "rank": 2
               },
-              "pl_top_1": {
-                "title": "Bollywood Top Hits",
+              "ghost_5": {
+                "rank": 5
+              },
+              "ghost_6": {
+                "title": "",
+                "artist": "",
+                "rank": 6
+              },
+              "yt_pl_rejected": {
+                "title": "YouTube Playlist Should Be Ignored",
                 "contentType": "playlist",
                 "platform": "youtube",
                 "sourceUrl": "https://www.youtube.com/playlist?list=PLFgquLnL59alCl_2TQvOiD5Vgm1hCaGSI",
-                "itemCount": 1,
-                "rank": 3,
+                "itemCount": 12,
+                "rank": 3
+              },
+              "sp_pl_top_1": {
+                "title": "Bollywood Top Hits",
+                "contentType": "playlist",
+                "platform": "spotify",
+                "sourceUrl": "https://open.spotify.com/playlist/37i9dQZF1DX0XUfTFmNBRM",
+                "bannerUrl": "https://i.scdn.co/image/test_cover",
+                "itemCount": 2,
+                "rank": 4,
                 "songs": [
                   {
-                    "id": "p_s1",
+                    "id": "sppl_s1",
                     "title": "Playlist Song 1",
                     "artist": "Singer 1",
                     "videoId": "dQw4w9WgXcQ"
+                  },
+                  {
+                    "id": "sppl_s2",
+                    "title": "Playlist Song 2",
+                    "artist": "Singer 2",
+                    "videoId": "9bZkp7q19f0"
                   }
                 ]
               }
             }
         """.trimIndent()
 
+        // Ghost rank-only nodes and playlists must NEVER appear as "Untitled Track" songs!
         val parsedSongs = firebaseService.parseSongsJson(songsJson)
         assertEquals(2, parsedSongs.size)
+        assertFalse(parsedSongs.any { it.title.equals("Untitled Track", ignoreCase = true) })
         val spSong = parsedSongs.first { it.id == "sp1" }
         assertTrue(spSong.isSpotifyTrack)
         assertEquals("https://open.spotify.com/track/0VjIjW4GlUZAMYd2vXMi3b", spSong.spotifyUrl)
@@ -645,13 +660,15 @@ class PlaybackAndSubscriptionTest {
         assertEquals("BddP6PYo2gs", ytSpSong.cleanVideoId)
         assertTrue(ytSpSong.isSpotifyTrack)
 
+        // ONLY Spotify playlists are accepted; YouTube playlists are strictly excluded!
         val parsedPlaylists = firebaseService.parsePlaylistsFromSongsJson(songsJson)
         assertEquals(1, parsedPlaylists.size)
         val pl: AdminChartPlaylist = parsedPlaylists.first()
+        assertEquals("sp_pl_top_1", pl.id)
         assertEquals("Bollywood Top Hits", pl.title)
-        assertEquals("youtube", pl.sourceType)
-        assertEquals(1, pl.itemCount)
-        assertEquals(1, pl.songs.size)
+        assertEquals("spotify", pl.sourceType)
+        assertEquals(2, pl.itemCount)
+        assertEquals(2, pl.songs.size)
 
         // Verify /adsSettings JSON parsing (ON with valid YouTube link vs OFF)
         val adsOn = firebaseService.parseAdsConfigJson(
@@ -671,20 +688,32 @@ class PlaybackAndSubscriptionTest {
         )
         assertFalse(adsBlank.isEffectivelyEnabled)
 
-        // Verify 1-tap inline expand & collapse behavior in MusicViewModel
-        val vm = createVm("top_chart_pl_tap")
-        assertNull(vm.expandedTopChartPlaylistId.value)
+        // Verify 1-tap open dedicated Playlist Page + Play All sequential playback (1 -> 2)
+        seedVipUser(userName = "PlaylistTester", planType = SubscriptionPlanType.MONTHLY)
+        val vm = createVm("top_chart_pl_page")
+        assertNull(vm.openedTopChartPlaylist.value)
 
         vm.onTopChartPlaylistClicked(pl)
         ShadowLooper.idleMainLooper(200, TimeUnit.MILLISECONDS)
-        assertEquals(pl.id, vm.expandedTopChartPlaylistId.value)
-        assertEquals(1, vm.expandedTopChartPlaylistSongs.value.size)
+        assertEquals(pl.id, vm.openedTopChartPlaylist.value?.id)
+        assertEquals(2, vm.openedTopChartPlaylistSongs.value.size)
 
-        // Tapping the same expanded playlist again collapses it
-        vm.onTopChartPlaylistClicked(pl)
+        // Play All starts song #1 and auto-advances sequentially to song #2 on track end
+        vm.playAllTopChartPlaylistSongs()
+        ShadowLooper.idleMainLooper(200, TimeUnit.MILLISECONDS)
+        assertEquals("sppl_s1", vm.currentSong.value?.id)
+        assertTrue(vm.isPlaying.value)
+
+        vm.handleTrackEnded()
+        ShadowLooper.idleMainLooper(200, TimeUnit.MILLISECONDS)
+        assertEquals("sppl_s2", vm.currentSong.value?.id)
+        assertTrue(vm.isPlaying.value)
+
+        // Closing the Playlist Page returns cleanly to Top Charts
+        vm.closeOpenedTopChartPlaylist()
         ShadowLooper.idleMainLooper(100, TimeUnit.MILLISECONDS)
-        assertNull(vm.expandedTopChartPlaylistId.value)
-        assertTrue(vm.expandedTopChartPlaylistSongs.value.isEmpty())
+        assertNull(vm.openedTopChartPlaylist.value)
+        assertTrue(vm.openedTopChartPlaylistSongs.value.isEmpty())
     }
 
     @Test
