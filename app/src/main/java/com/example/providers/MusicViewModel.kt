@@ -109,7 +109,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         const val FREE_DAILY_LIMIT_SECONDS = 3600 // 1 hour (3600 seconds) per 12h cycle for Free users
         const val LIMIT_RESET_WINDOW_MS = 12L * 60L * 60L * 1000L // Strict 12-hour window before free limit resets
         const val CRAZY_DEAL_WINDOW_MS = 3L * 24L * 60L * 60L * 1000L // 3 days (72 hours) for new users
-        const val CURRENT_APP_UPDATE_SECRET_CODE = "6842"
+        const val CURRENT_APP_UPDATE_SECRET_CODE = "7924"
         private const val CURRENT_SECRET_CODE_VERSION = 14
         const val FREE_SONGS_PER_AD = 2
         const val PROMO_AUDIO_AD_SONG_ID = "__aadify_audio_ad__"

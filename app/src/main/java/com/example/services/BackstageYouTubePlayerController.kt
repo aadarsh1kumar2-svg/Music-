@@ -652,18 +652,19 @@ class BackstageYouTubePlayerController(
                     window.__akLastReportedState = 3;
                     window.__akLastMetaKey = '';
                     var mp = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
+                    var vTag = document.querySelector('video');
                     if ($canTryInPlace && mp && typeof mp.loadVideoById === 'function') {
                         try {
                             mp.loadVideoById({ videoId: '$cleanId', startSeconds: $safeStartSec });
                             window.__akLoadedInPlaceId = '$cleanId';
                             if (typeof mp.playVideo === 'function') { mp.playVideo(); }
+                            if (vTag) { vTag.play().catch(function() {}); }
                             if (typeof window.__akSyncMediaSession === 'function') { window.__akSyncMediaSession(); }
                             return 'IN_PLACE';
                         } catch (e) {}
                     }
-                    var vOld = document.querySelector('video');
-                    if (vOld) {
-                        try { vOld.pause(); } catch (e) {}
+                    if (vTag) {
+                        try { vTag.pause(); } catch (e) {}
                     }
                     if (typeof window.__akSyncMediaSession === 'function') {
                         window.__akSyncMediaSession();
@@ -685,7 +686,7 @@ class BackstageYouTubePlayerController(
                         }
                     }
                     fallbackUrlReloadRunnable = fallbackRunnable
-                    mainHandler.postDelayed(fallbackRunnable, 1800L)
+                    mainHandler.postDelayed(fallbackRunnable, 900L)
                 } else {
                     view.loadUrl(watchUrl)
                 }
