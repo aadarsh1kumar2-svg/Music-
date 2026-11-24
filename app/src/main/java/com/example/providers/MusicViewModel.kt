@@ -1187,28 +1187,34 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         _isLoadingTopChartPlaylist.value = false
     }
 
-    // Explore Songs StateFlow (Combines Catalog + App Music + Country Trending + Live Online Search Results)
-    val exploreSongs: StateFlow<List<Song>> = combine(
+    // Combined Admin Songs (Top Charts Catalog + App Music), deduplicated
+    val allAdminSongs: StateFlow<List<Song>> = combine(
         firebaseService.songs,
-        firebaseService.appMusic,
+        firebaseService.appMusic
+    ) { catalogSongs, appMusicSongs ->
+        (catalogSongs + appMusicSongs).distinctBy { it.cleanVideoId.ifBlank { it.id } }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    // Explore Songs StateFlow (Combines All Admin Songs + Country Trending + Live Online Search Results)
+    val exploreSongs: StateFlow<List<Song>> = combine(
+        allAdminSongs,
         _exploreSearchQuery,
         _onlineSearchResults,
         _countryTrendingSongs,
         _selectedCountry
-    ) { catalogSongs, appMusicSongs, query, onlineMatches, countrySongs, country ->
-        val allAdminSongs = (catalogSongs + appMusicSongs).distinctBy { it.cleanVideoId.ifBlank { it.id } }
+    ) { adminSongs, query, onlineMatches, countrySongs, _ ->
         val trimmed = query.trim()
         if (trimmed.isEmpty()) {
             if (countrySongs.isNotEmpty()) {
                 val seenIds = countrySongs.map { it.cleanVideoId.lowercase() }.filter { it.isNotBlank() }.toSet()
-                val extraCatalog = allAdminSongs.filter { it.cleanVideoId.lowercase() !in seenIds }
+                val extraCatalog = adminSongs.filter { it.cleanVideoId.lowercase() !in seenIds }
                 countrySongs + extraCatalog
             } else {
-                allAdminSongs
+                adminSongs
             }
         } else {
             val tokens = trimmed.lowercase().split(Regex("\\s+")).filter { it.isNotBlank() }
-            val localPool = (allAdminSongs + countrySongs).distinctBy { it.cleanVideoId.ifBlank { it.id } }
+            val localPool = (adminSongs + countrySongs).distinctBy { it.cleanVideoId.ifBlank { it.id } }
             val localMatches = localPool.filter { song ->
                 val haystack = "${song.title} ${song.artist} ${song.videoId}".lowercase()
                 tokens.all { token -> haystack.contains(token) } ||
