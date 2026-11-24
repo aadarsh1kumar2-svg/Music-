@@ -1043,29 +1043,9 @@ fun AKMusicAppRoot(
                         Box(
                             modifier = Modifier
                                 .fillMaxSize()
+                                .background(PureBlack)
                                 .padding(top = innerPadding.calculateTopPadding())
                         ) {
-                            // Aadify Luxury Brand Wallpaper Background
-                            Image(
-                                painter = painterResource(id = R.drawable.aadify_bg),
-                                contentDescription = null,
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier.fillMaxSize()
-                            )
-                            // Ambient dark overlay scrim so texts and theme colors remain 100% crystal clear & legible while wallpaper shines through
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .background(
-                                        Brush.verticalGradient(
-                                            colors = listOf(
-                                                PureBlack.copy(alpha = 0.55f),
-                                                PureBlack.copy(alpha = 0.40f),
-                                                PureBlack.copy(alpha = 0.65f)
-                                            )
-                                        )
-                                    )
-                            )
 
                             when (selectedTab) {
                                 MainTab.HOME -> {

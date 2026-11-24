@@ -109,7 +109,7 @@ fun TopChartsScreen(
     Column(
         modifier = modifier
             .fillMaxSize()
-            .background(Color.Transparent)
+            .background(PureBlack)
             .testTag("top_charts_screen")
     ) {
         Row(

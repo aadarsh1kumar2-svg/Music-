@@ -86,7 +86,7 @@ fun ExploreScreen(
     LazyColumn(
         modifier = modifier
             .fillMaxSize()
-            .background(Color.Transparent)
+            .background(PureBlack)
             .testTag("explore_screen"),
         contentPadding = PaddingValues(bottom = 140.dp)
     ) {

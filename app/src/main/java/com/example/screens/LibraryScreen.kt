@@ -337,7 +337,7 @@ private fun LibraryRootContent(
     LazyColumn(
         modifier = modifier
             .fillMaxSize()
-            .background(Color.Transparent)
+            .background(PureBlack)
             .testTag("library_screen"),
         contentPadding = PaddingValues(bottom = 140.dp)
     ) {
