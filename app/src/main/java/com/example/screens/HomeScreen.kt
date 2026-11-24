@@ -108,7 +108,7 @@ fun HomeScreen(
     LazyColumn(
         modifier = modifier
             .fillMaxSize()
-            .background(PureBlack)
+            .background(Color.Transparent)
             .testTag("home_screen"),
         contentPadding = PaddingValues(bottom = 140.dp)
     ) {
